@@ -1,10 +1,10 @@
-from typing import Any, Protocol, Dict
-from abc import abstractmethod, ABCMeta
+from typing import Any, Dict, ClassVar
+from abc import ABC, abstractmethod
 
-class SiestaModule(Protocol, metaclass=ABCMeta):
+class SiestaModule(ABC):
     """All Siesta modules must implement to be accessed by the framework.
        eg. ::
-        class PreprocessorModule(IModule):
+        class PreprocessorModule(SiestaModule):
             name = "preprocessor"
 
             def register_routes(self):
@@ -18,9 +18,10 @@ class SiestaModule(Protocol, metaclass=ABCMeta):
             ...
     """
     
-    name: str
+    name: ClassVar[str] = "Unnamed Module"
+    version: ClassVar[str] = "unversioned"
 
-    @abstractmethod
+    # @abstractmethod
     def register_routes(self) -> Dict[str, Any] | None:
         """Return a dict of endpoint_name -> function."""
         pass
@@ -29,6 +30,6 @@ class SiestaModule(Protocol, metaclass=ABCMeta):
         """Lifecycle hook: Called when the framework starts."""
         pass
 
-    def run(self, *args: Any, **kwargs: Any) -> Any:
+    def run(*args: Any, **kwargs: Any) -> Any:
         """Main execution method for the module."""
         pass

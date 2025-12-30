@@ -1,11 +1,12 @@
-from typing import Any, Protocol, Dict
+from typing import Any, Dict
 from siesta_framework.core.interfaces import SiestaModule
 
-class ExampleModule(SiestaModule):
+class Example(SiestaModule):
     def __init__(self):
         super().__init__()
-        self.name = "Example Module"
-        self.version = "1.0.0"
+
+    name = "Example Module"
+    version = "1.0.0"
 
     def startup(self):
         print(f"{self.name} v{self.version} initialized.")
@@ -15,8 +16,9 @@ class ExampleModule(SiestaModule):
             "example_endpoint": self.example_endpoint
         }
     
-    def run(self, *args: Any, **kwargs: Any) -> Any:
-        print(f"{self.name} is running with args: {args} and kwargs: {kwargs}")
+    def run(*args: Any, **kwargs: Any) -> Any:
+        print(f"{Example.name} is running with args: {args} and kwargs: {kwargs}")
+        print("Hello from Example Module!")
 
     def example_endpoint(self, request_data: Any) -> str:
         return f"Example endpoint received: {request_data}"
