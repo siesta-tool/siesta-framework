@@ -2,4 +2,5 @@ import sys;from pathlib import Path;sys.path.insert(0, str(Path(__file__).parent
 from siesta_framework.core.app import Siesta
 
 app = Siesta()
-app.run()
+app.startup()
+app.shutdown()

@@ -3,6 +3,7 @@ import pkgutil
 from typing import List, Type
 from siesta_framework.core.interfaces import SiestaModule
 import siesta_framework.modules as modules
+import siesta_framework.core.sparkManager as sm
 
 class Siesta:
     def __init__(self) -> None:
@@ -26,13 +27,16 @@ class Siesta:
 
         return list(discovered)
 
-    def run(self) -> None:
-        try:
-            print("--- Starting Framework ---")
-            discovered_modules = self.discover_modules()
-            print(len(discovered_modules))
-            print(f"Discovered Modules: {[mod.__name__ for mod in discovered_modules]}")
-            for mod_class in discovered_modules:
-                mod_instance = mod_class()
-                print(f"--- Starting Module: {mod_instance.name} v{mod_instance.version} ---")
-                mod_instance.startup()
+    def startup(self) -> None:
+        print("--- Starting Framework ---")
+        sm.startup()
+        discovered_modules = self.discover_modules()
+        print(len(discovered_modules))
+        print(f"Discovered Modules: {[mod.__name__ for mod in discovered_modules]}")
+        for mod_class in discovered_modules:
+            mod_instance = mod_class()
+            print(f"--- Starting Module: {mod_instance.name} v{mod_instance.version} ---")
+            mod_instance.startup()
+
+    def shutdown(self) -> None:
+        sm.shutdown()
