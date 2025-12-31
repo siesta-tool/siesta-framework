@@ -1,0 +1,61 @@
+networks:
+  siesta-net:
+
+services:
+  spark-master:
+    container_name: spark-master
+    image: siesta/spark:3.5.4
+    build:
+      context: dockerbase/Spark
+      dockerfile: Spark.dockerfile
+    environment:
+      - SPARK_MODE=master
+      - SPARK_MASTER_MEMORY=8G
+      - SPARK_MASTER_CORES=4
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+      - SPARK_USER=spark
+      - LOGS_PATH=/tmp/spark-events
+      - RESULTS_PATH=/tmp/output/
+      - SPARK_MASTER_WEBUI_PORT=8085
+      - SPARK_SUBMIT_OPTS=-Dlog4j.configurationFile=/opt/spark/conf/log4j2.properties
+    networks:
+      - siesta-net
+    ports:
+      - '8085:8085'
+      - '4040:4040'
+      - '8081:8081'
+    # Uncomment for docker swarm
+    # deploy:
+    #   replicas: 1
+    #   placement:
+    #     constraints:
+    #       - 'node.labels.host == node-name-1'
+
+  spark-worker:
+    container_name: spark-worker
+    image: siesta/spark:3.5.4
+    build: 
+      context: dockerbase/Spark
+      dockerfile: Spark.dockerfile
+    environment:
+        - SPARK_MODE=worker
+        - SPARK_MASTER_URL=spark://spark-master:7077
+        - SPARK_WORKER_MEMORY=2G
+        - SPARK_WORKER_CORES=2
+        - SPARK_RPC_AUTHENTICATION_ENABLED=no
+        - SPARK_RPC_ENCRYPTION_ENABLED=no
+        - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+        - SPARK_SSL_ENABLED=no
+        - SPARK_USER=spark
+        - SPARK_SUBMIT_OPTS=-Dlog4j.configurationFile=/opt/spark/conf/log4j2.properties
+    networks:
+      - siesta-net
+    # Uncomment for docker swarm
+    # deploy:
+    #   replicas: 1
+    #   placement:
+    #     constraints:
+    #       - 'node.labels.host == node-name-2'

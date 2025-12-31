@@ -27,11 +27,12 @@ class Siesta:
         return list(discovered)
 
     def run(self) -> None:
-        print("--- Starting Framework ---")
-        discovered_modules = self.discover_modules()
-        print(len(discovered_modules))
-        print(f"Discovered Modules: {[mod.__name__ for mod in discovered_modules]}")
-        for mod_class in discovered_modules:
-            mod_instance = mod_class()
-            print(f"--- Starting Module: {mod_instance.name} v{mod_instance.version} ---")
-            mod_instance.startup()
+        try:
+            print("--- Starting Framework ---")
+            discovered_modules = self.discover_modules()
+            print(len(discovered_modules))
+            print(f"Discovered Modules: {[mod.__name__ for mod in discovered_modules]}")
+            for mod_class in discovered_modules:
+                mod_instance = mod_class()
+                print(f"--- Starting Module: {mod_instance.name} v{mod_instance.version} ---")
+                mod_instance.startup()
