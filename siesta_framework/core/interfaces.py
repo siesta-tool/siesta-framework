@@ -103,10 +103,6 @@ class StorageManager(ABC):
         """
         pass
     
-    @abstractmethod
-    def close_spark(self) -> None:
-        """Close the Spark connection."""
-        pass
     
     @abstractmethod
     def read_sequence_table(self, metadata: Any, detailed: bool = False) -> RDD:

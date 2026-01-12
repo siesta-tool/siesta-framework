@@ -56,13 +56,14 @@ class S3Manager(StorageManager):
         if self.spark is None:
             raise RuntimeError("Spark session not available. Ensure spark manager is started before initializing S3Manager.")
         
-        # Configure S3 access if credentials are provided
         if config.get("s3_access_key") and config.get("s3_secret_key"):
             self.spark.conf.set("spark.hadoop.fs.s3a.access.key", config["s3_access_key"])
             self.spark.conf.set("spark.hadoop.fs.s3a.secret.key", config["s3_secret_key"])
         
         if config.get("s3_endpoint"):
             self.spark.conf.set("spark.hadoop.fs.s3a.endpoint", config["s3_endpoint"])
+        else:
+            self.spark.conf.se
         
         print("S3Manager: Spark session configured for S3 access.")
     
@@ -83,9 +84,6 @@ class S3Manager(StorageManager):
         
         if config.get("s3_endpoint"):
             s3_config['endpoint_url'] = config["s3_endpoint"]
-        
-        if config.get("s3_region"):
-            s3_config['region_name'] = config["s3_region"]
         
         return boto3.client('s3', **s3_config)
     

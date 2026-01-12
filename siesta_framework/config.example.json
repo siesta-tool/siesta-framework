@@ -10,5 +10,5 @@
   "is_continued": false,
   "is_streaming": false,
   "spark_master": "local",
-  "spark_app_name": "SiestaFramework",
+  "spark_app_name": "SiestaFramework"
 }

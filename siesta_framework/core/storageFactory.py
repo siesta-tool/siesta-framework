@@ -49,7 +49,7 @@ class StorageManagerFactory:
             RuntimeError: If initialization fails
         """
         try:
-            storage_type = config.get("storage_type", "").lower()
+            storage_type = config.get("storage_type", "s3").lower()
             
             if not storage_type:
                 raise ValueError(

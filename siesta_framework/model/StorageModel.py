@@ -14,33 +14,35 @@ class MetaData:
     end_timestamp: datetime    
     last_mined_timestamp: datetime
 
-    # Generic storage namespace (bucket/container/prefix/domain)
     storage_namespace: str
-    
-    index_table_path: str
-    sequence_table_path: str
-    metadata_table_path: str
-    single_table_path: str
-    count_table_path: str
-    last_checked_table_path: str
-    declare_table_path: str
+
+    @property
+    def s3_index_table(self) -> str:
+        return f"s3://{self.storage_namespace}/{self.log_name}/index_table.parquet"
+    @property
+    def s3_sequence_table(self) -> str:
+        return f"s3://{self.storage_namespace}/{self.log_name}/sequence_table.parquet"
+    @property
+    def s3_metadata_table(self) -> str:
+        return f"s3://{self.storage_namespace}/{self.log_name}/metadata_table.parquet"
+    @property
+    def s3_single_table(self) -> str:
+        return f"s3://{self.storage_namespace}/{self.log_name}/single_table.parquet"
+    @property
+    def s3_count_table(self) -> str:
+        return f"s3://{self.storage_namespace}/{self.log_name}/count_table.parquet"
+    @property
+    def s3_last_checked_table(self) -> str:
+        return f"s3://{self.storage_namespace}/{self.log_name}/last_checked_table.parquet"
+    @property
+    def s3_mining(self) -> str:
+        return f"s3://{self.storage_namespace}/{self.log_name}/declare_table"
 
     def __init__(self, storage_namespace: str = "siesta", log_name: str = None):
         self.storage_namespace = storage_namespace
-        self.log_name = log_name if log_name else "default"
-        
-        # Initialize table paths using the storage namespace
-        self.index_table_path = f"s3a://{self.storage_namespace}/{self.log_name}/index.parquet"
-        self.sequence_table_path = f"s3a://{self.storage_namespace}/{self.log_name}/sequence.parquet"
-        self.metadata_table_path = f"s3a://{self.storage_namespace}/{self.log_name}/metadata.parquet"
-        self.single_table_path = f"s3a://{self.storage_namespace}/{self.log_name}/single.parquet"
-        self.count_table_path = f"s3a://{self.storage_namespace}/{self.log_name}/count.parquet"
-        self.last_checked_table_path = f"s3a://{self.storage_namespace}/{self.log_name}/last_checked.parquet"
-        self.declare_table_path = f"s3a://{self.storage_namespace}/{self.log_name}/declare.parquet"
-        
+        self.log_name = log_name if log_name else "default"        
         self.is_continued = False
         self.is_streaming = False
-
 
 class IndexTableEntry(DataModel.EventPair):
     pass
