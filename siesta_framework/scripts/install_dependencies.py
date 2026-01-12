@@ -9,22 +9,17 @@ def install_dependencies():
     # 1. Find root requirements
     if os.path.exists("requirements.txt"):
         requirements_files.append("requirements.txt")
-        
-    # 2.1 Find module requirements
-    modules_dir = os.path.join(root, "modules")
-    if os.path.exists(modules_dir):
-        for root_dir, dirs, files in os.walk(modules_dir):
-            for file in files:
-                if file == "requirements.txt":
-                    requirements_files.append(os.path.join(root_dir, file))
 
-    # 2.2 Find core requirements
-    modules_dir = os.path.join(root, "core")
-    if os.path.exists(modules_dir):
-        for root_dir, dirs, files in os.walk(modules_dir):
-            for file in files:
-                if file == "requirements.txt":
-                    requirements_files.append(os.path.join(root_dir, file))
+    # 2. Find all requirements
+    dirs = ["core", "modules", "storage"]
+    for dir in dirs:
+        modele_dir = os.path.join(root, dir)
+        if os.path.exists(modele_dir):
+            for root_dir, dirs, files in os.walk(modele_dir):
+                for file in files:
+                    if file == "requirements.txt":
+                        requirements_files.append(os.path.join(root_dir, file))
+
     
     print(f"Found {len(requirements_files)} requirement files.")
     

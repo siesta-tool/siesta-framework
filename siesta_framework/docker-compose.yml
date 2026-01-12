@@ -59,3 +59,27 @@ services:
     #   placement:
     #     constraints:
     #       - 'node.labels.host == node-name-2'
+
+  minio:
+    container_name: minio
+    image: minio/minio:latest
+    environment:
+      s3_access_key: minioadmin
+      s3_secret_key: minioadmin
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    networks:
+      - siesta-net
+    volumes:
+      - minio-data:/data
+    # Uncomment for docker swarm
+    # deploy:
+    #   replicas: 1
+    #   placement:
+    #     constraints:
+    #       - 'node.labels.host == node-name-3'
+
+volumes:
+  minio-data: {}
