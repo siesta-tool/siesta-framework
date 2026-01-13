@@ -8,12 +8,40 @@ import siesta_framework.modules as modules
 import siesta_framework.core.sparkManager as sparkManager
 from siesta_framework.core.storageFactory import StorageManagerFactory
 from siesta_framework.model.SystemModel import DEFAULT_CONFIG
+import argparse
 
 class Siesta:
     def __init__(self, config_path: str|None = None) -> None:
         self.config = self._load_config(config_path) if config_path else {}
         self.storage_manager = None
         self.registered_routes: Dict[str, SiestaModule.ApiRoutes|None] = {}
+
+    @classmethod
+    def with_args(cls, args:List[str]):
+        """Alternative constructor to initialize Siesta with command-line arguments.
+        
+        Args:
+            args: List of command-line arguments
+            
+        Returns:
+            An instance of Siesta
+        """
+        parser = argparse.ArgumentParser(description="Siesta Framework Initialization")
+        parser.add_argument('--config', type=str, help='Path to configuration JSON file')
+        parser.add_argument('module', type=str, help='Module to run')
+        
+        parsed_args, unknown_args = parser.parse_known_args(args)
+        
+        app = cls(config_path=parsed_args.config)
+        app.startup()
+
+        for module in app.discovered_modules:
+            if module.name == parsed_args.module:
+                module().run(unknown_args)
+                return app
+        
+        print(f"Module {parsed_args.module} not found")
+        return app
     
     def _load_config(self, config_path: str) -> Dict[str, Any]:
         """Load configuration from a JSON file and merge with defaults.
