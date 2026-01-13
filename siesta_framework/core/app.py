@@ -2,17 +2,18 @@ import importlib
 import pkgutil
 import json
 from pathlib import Path
-from typing import List, Type, Dict, Any
+from typing import Callable, List, Tuple, Type, Dict, Any
 from siesta_framework.core.interfaces import SiestaModule, StorageManager
 import siesta_framework.modules as modules
-import siesta_framework.core.sparkManager as sm
+import siesta_framework.core.sparkManager as sparkManager
 from siesta_framework.core.storageFactory import StorageManagerFactory
 from siesta_framework.model.SystemModel import DEFAULT_CONFIG
 
 class Siesta:
-    def __init__(self, config_path: str = None) -> None:
+    def __init__(self, config_path: str|None = None) -> None:
         self.config = self._load_config(config_path) if config_path else {}
         self.storage_manager = None
+        self.registered_routes: Dict[str, SiestaModule.ApiRoutes|None] = {}
     
     def _load_config(self, config_path: str) -> Dict[str, Any]:
         """Load configuration from a JSON file and merge with defaults.
@@ -64,18 +65,34 @@ class Siesta:
         print("--- Starting Framework ---")
         
         # Start Spark Manager
-        sm.startup(self.config)
+        sparkManager.startup(self.config)
         
         # Setup Storage Manager
-        self.storage_manager = StorageManagerFactory.create_storage_manager(self.config, sm)
+        self.storage_manager = StorageManagerFactory.create_storage_manager(self.config, sparkManager)
         
-        discovered_modules = self.discover_modules()
-        print(f"Discovered Modules: {[mod.__name__ for mod in discovered_modules]}")
-        for mod_class in discovered_modules:
+        # Initialize Modules
+        self.discovered_modules = self.discover_modules()
+
+        print(f"Discovered Modules: {[mod.__name__ for mod in self.discovered_modules]}")
+        for mod_class in self.discovered_modules:
             mod_instance = mod_class()
             print(f"--- Starting Module: {mod_instance.name} v{mod_instance.version} ---")
             mod_instance.startup()
+
+        print("--- Framework Started ---")
     
+    def get_registered_routes(self) -> Dict[str, SiestaModule.ApiRoutes|None]:
+        if not self.discovered_modules:
+            raise RuntimeError("Modules not discovered. Call startup() first.")
+
+        for mod_class in self.discovered_modules:
+            mod_instance = mod_class()
+            routes = mod_instance.register_routes()
+            if routes:
+                self.registered_routes[mod_class.__name__.lower()] = routes
+        
+        return self.registered_routes
+
     def get_storage_manager(self) -> StorageManager:
         """Get the StorageManager instance.
         
@@ -87,4 +104,5 @@ class Siesta:
         return self.storage_manager
 
     def shutdown(self) -> None:
-        sm.shutdown()
+        print("--- Shutting Down Framework ---")
+        sparkManager.shutdown()

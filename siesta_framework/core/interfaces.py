@@ -1,4 +1,4 @@
-from typing import Any, Dict, ClassVar
+from typing import Any, Callable, Dict, ClassVar, Literal, Tuple
 from abc import ABC, abstractmethod
 from pyspark import RDD
 
@@ -22,8 +22,12 @@ class SiestaModule(ABC):
     name: ClassVar[str] = "Unnamed Module"
     version: ClassVar[str] = "unversioned"
 
+    type ApiMethod = Literal["GET", "POST", "PUT", "DELETE"]
+    type ApiRoute = Tuple[ApiMethod, Callable] | Tuple[ApiMethod, Callable, Dict[str, Any]]
+    type ApiRoutes = Dict[str, ApiRoute]
+
     # @abstractmethod
-    def register_routes(self) -> Dict[str, Any] | None:
+    def register_routes(self) -> ApiRoutes | None:
         """Return a dict of endpoint_name -> function."""
         pass
 

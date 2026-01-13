@@ -1,4 +1,5 @@
 {
+  "App Name": "Siesta Framework",
   "storage_type": "s3",
   "log_name": "example_log",
   "storage_namespace": "siesta",
@@ -10,5 +11,9 @@
   "is_continued": false,
   "is_streaming": false,
   "spark_master": "local",
-  "spark_app_name": "SiestaFramework"
+  "spark_app_name": "SiestaFramework",
+  "api": {
+    "host": "0.0.0.0",
+    "port": 8000
+  }
 }

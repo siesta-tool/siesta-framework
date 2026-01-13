@@ -11,7 +11,7 @@ def install_dependencies():
         requirements_files.append("requirements.txt")
 
     # 2. Find all requirements
-    dirs = ["core", "modules", "storage"]
+    dirs = ["core", "modules", "storage", "api"]
     for dir in dirs:
         modele_dir = os.path.join(root, dir)
         if os.path.exists(modele_dir):
