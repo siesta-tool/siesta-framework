@@ -5,6 +5,7 @@ from pyspark import RDD
 from pyspark.sql import DataFrame
 from siesta_framework.core.interfaces import StorageManager
 from siesta_framework.model.StorageModel import MetaData
+from siesta_framework.model.DataModel import Event
 
 
 class S3Manager(StorageManager):
@@ -226,7 +227,7 @@ class S3Manager(StorageManager):
                 return False
             raise
     
-    def read_sequence_table(self, metadata: MetaData, detailed: bool = False) -> RDD:
+    def read_sequence_table(self, metadata: MetaData) -> RDD:
         """
         Read data as an RDD from the SequenceTable stored in S3.
         
@@ -316,7 +317,7 @@ class S3Manager(StorageManager):
         except Exception as e:
             print(f"S3Manager: Error writing CountTable: {e}")
     
-    def write_sequence_table(self, sequence_rdd: RDD, metadata: MetaData, detailed: bool = False) -> None:
+    def write_sequence_table(self, sequence_rdd: RDD, metadata: MetaData) -> None:
         """
         Write traces to the SequenceTable in S3.
         
@@ -324,18 +325,28 @@ class S3Manager(StorageManager):
         Updates the metadata object.
         
         Args:
-            sequence_rdd: RDD containing traces with new events
+            sequence_rdd: RDD containing traces with new events (Event objects or dicts)
             metadata: MetaData object containing the metadata
-            detailed: Whether to include detailed information
         """
         try:
             # Convert RDD to DataFrame
-            df = self.spark.createDataFrame(sequence_rdd)
+            # Handle both Event objects and dicts
+            first_element = sequence_rdd.first()
+            if isinstance(first_element, dict):
+                # Already dictionaries, use directly
+                event_dicts_rdd = sequence_rdd
+            else:
+                # Event objects, convert to dicts
+                event_dicts_rdd = sequence_rdd.map(lambda event: event.to_dict())
+            
+            df = self.spark.createDataFrame(event_dicts_rdd)
             df.write.mode("append").parquet(metadata.sequence_table_path)
             
-            # Update metadata
-            metadata.trace_count = df.count()
-            print(f"S3Manager: Wrote {metadata.trace_count} traces to {metadata.sequence_table_path}")
+            print(f"S3Manager: Wrote traces to {metadata.sequence_table_path}")
+            
+            # # Update metadata
+            # metadata.trace_count = df.count()
+            # print(f"S3Manager: Wrote {metadata.trace_count} traces to {metadata.sequence_table_path}")
         except Exception as e:
             print(f"S3Manager: Error writing SequenceTable: {e}")
     
@@ -355,7 +366,7 @@ class S3Manager(StorageManager):
             sequence_rdd.persist()
             
             # Convert RDD to DataFrame
-            df = self.spark.createDataFrame(sequence_rdd)
+            df = self.spark.createDataFrame(sequence_rdd.map(lambda event: event.to_dict()))
             df.write.mode("append").parquet(metadata.single_table_path)
             
             # Update metadata

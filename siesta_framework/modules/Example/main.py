@@ -1,5 +1,6 @@
 from typing import Any, Dict, Tuple
 from siesta_framework.core.interfaces import SiestaModule
+from siesta_framework.core.storageFactory import get_or_create_metadata, get_storage_manager
 
 class Example(SiestaModule):
     def __init__(self):
@@ -16,7 +17,8 @@ class Example(SiestaModule):
 
     def register_routes(self) -> SiestaModule.ApiRoutes:
         return {
-            "example_endpoint": ("GET", self.example_endpoint)
+            "example_endpoint": ("GET", self.example_endpoint),
+            "log_info": ("GET", self.get_log_info)
         }
     
     def run(*args: Any, **kwargs: Any) -> Any:
@@ -25,3 +27,22 @@ class Example(SiestaModule):
 
     def example_endpoint(self, request_data: str = "default") -> exampleComplicatedType|None:
         return None
+    
+    def get_log_info(self, log_name: str) -> Dict[str, Any]:
+        """Example API endpoint that works with a specific log.
+        
+        In API mode, use get_or_create_metadata(log_name) to get/create
+        metadata for the requested log.
+        
+        Args:
+            log_name: The log/dataset name from the request.
+            
+        Returns:
+            Dict with log metadata info.
+        """
+        metadata = get_or_create_metadata(log_name)
+        return {
+            "log_name": metadata.log_name,
+            "storage_namespace": metadata.storage_namespace,
+            "sequence_table_path": metadata.sequence_table_path
+        }

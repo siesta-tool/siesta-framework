@@ -10,8 +10,10 @@
   "clear_existing": false,
   "is_continued": false,
   "is_streaming": false,
-  "spark_master": "local",
+  "spark_master": "spark://localhost:7077",
   "spark_app_name": "SiestaFramework",
+  "spark_driver_memory": "8g",
+  "spark_executor_memory": "4g",
   "api": {
     "host": "0.0.0.0",
     "port": 8000

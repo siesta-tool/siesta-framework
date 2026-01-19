@@ -6,7 +6,7 @@ from typing import Callable, List, Tuple, Type, Dict, Any
 from siesta_framework.core.interfaces import SiestaModule, StorageManager
 import siesta_framework.modules as modules
 import siesta_framework.core.sparkManager as sparkManager
-from siesta_framework.core.storageFactory import StorageManagerFactory
+from siesta_framework.core.storageFactory import StorageManagerFactory, set_storage_manager, set_config, set_active_log
 from siesta_framework.model.SystemModel import DEFAULT_CONFIG
 import argparse
 
@@ -33,7 +33,7 @@ class Siesta:
         parsed_args, unknown_args = parser.parse_known_args(args)
         
         app = cls(config_path=parsed_args.config)
-        app.startup()
+        app.startup(cli_mode=True)
 
         for module in app.discovered_modules:
             if module.name == parsed_args.module:
@@ -89,14 +89,34 @@ class Siesta:
 
         return list(discovered)
 
-    def startup(self) -> None:
+    def startup(self, cli_mode: bool = False) -> None:
+        """Start the Siesta framework.
+        
+        Args:
+            cli_mode: If True, sets an active log from config (for CLI module runs).
+                      If False (API mode), no active log is set - logs are handled per-request.
+        """
         print("--- Starting Framework ---")
+        
+        # Set global config accessor
+        set_config(self.config)
+        
+        # In CLI mode, set the active log from config
+        # In API mode, logs are created on-demand per request
+        if cli_mode:
+            log_name = self.config.get("log_name", "default")
+            self.metadata = set_active_log(log_name)
+            print(f"CLI mode: Active log set to '{log_name}'")
+        else:
+            self.metadata = None
+            print("API mode: No active log set (logs created per-request)")
         
         # Start Spark Manager
         sparkManager.startup(self.config)
         
-        # Setup Storage Manager
+        # Setup Storage Manager and set global accessor
         self.storage_manager = StorageManagerFactory.create_storage_manager(self.config, sparkManager)
+        set_storage_manager(self.storage_manager)
         
         # Initialize Modules
         self.discovered_modules = self.discover_modules()

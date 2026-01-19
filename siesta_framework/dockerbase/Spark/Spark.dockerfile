@@ -8,6 +8,9 @@ RUN mkdir -p /opt/bitnami/spark/jars && \
     curl -L -o /opt/bitnami/spark/jars/hadoop-aws-3.3.4.jar https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-aws/3.3.4/hadoop-aws-3.3.4.jar && \
     curl -L -o /opt/bitnami/spark/jars/aws-java-sdk-bundle-1.12.262.jar https://repo1.maven.org/maven2/com/amazonaws/aws-java-sdk-bundle/1.12.262/aws-java-sdk-bundle-1.12.262.jar
 
+# Create symlink so /usr/bin/python3 points to the Bitnami Python
+RUN ln -sf /opt/bitnami/python/bin/python3 /usr/bin/python3
+
 COPY log4j2.properties /opt/bitnami/spark/conf/log4j2.properties
 RUN chmod 0644 /opt/bitnami/spark/conf/log4j2.properties
 
