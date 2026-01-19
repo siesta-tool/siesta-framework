@@ -1,12 +1,34 @@
 from typing import Any, Dict
 from pyspark.sql import SparkSession
 import os
+import socket
+import subprocess
 
-# Ensure PySpark uses its bundled Spark (avoid version mismatch with system Spark)
+# Ensure PySpark uses its bundled Spark
 if "SPARK_HOME" in os.environ:
     del os.environ["SPARK_HOME"]
 
 spark_session = None
+
+def get_docker_bridge_ip():
+    """Get Docker bridge gateway IP dynamically."""
+    try:
+        result = subprocess.run(
+            ["ip", "-4", "addr", "show", "docker0"],
+            capture_output=True,
+            text=True,
+            timeout=2
+        )
+        if result.returncode == 0:
+            for line in result.stdout.split('\n'):
+                if 'inet ' in line:
+                    ip = line.strip().split()[1].split('/')[0]
+                    return ip
+    except:
+        pass
+    
+    # Fallback to default
+    return "172.17.0.1"
 
 def startup(config: Dict[str, Any] = None) -> None:
     """Initialize Spark session with configuration.
@@ -45,20 +67,36 @@ def startup(config: Dict[str, Any] = None) -> None:
             "--add-opens=java.security.jgss/sun.security.krb5=ALL-UNNAMED"
         )
         
-        # Hadoop AWS packages for S3 support (needed by driver)
-        hadoop_aws_packages = "org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262"
+        # Hadoop AWS packages for S3 support
+        hadoop_aws_packages = "org.apache.hadoop:hadoop-aws:3.4.1,com.amazonaws:aws-java-sdk-bundle:1.12.540"
         
         builder = builder \
             .config("spark.driver.extraJavaOptions", java_options) \
             .config("spark.executor.extraJavaOptions", java_options) \
             .config("spark.driver.memory", driver_memory) \
             .config("spark.executor.memory", executor_memory) \
-            .config("spark.jars.packages", hadoop_aws_packages) \
             .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem") \
             .config("spark.hadoop.fs.s3a.path.style.access", "true") \
             .config("spark.pyspark.python", "/opt/bitnami/python/bin/python3") \
             .config("spark.pyspark.driver.python", "python3") \
-            .config("spark.executorEnv.PYSPARK_PYTHON", "/opt/bitnami/python/bin/python3")
+            .config("spark.executorEnv.PYSPARK_PYTHON", "/opt/bitnami/python/bin/python3") \
+            .config("spark.jars.packages", hadoop_aws_packages)
+        
+        # Configure S3 credentials if provided
+        if config and config.get("s3_access_key") and config.get("s3_secret_key"):
+            builder = builder \
+                .config("spark.hadoop.fs.s3a.access.key", config["s3_access_key"]) \
+                .config("spark.hadoop.fs.s3a.secret.key", config["s3_secret_key"])
+            print(f"S3 credentials configured from config file.")
+        
+        # Configure S3 endpoint if provided
+        if config and config.get("s3_endpoint"):
+            s3_endpoint = config["s3_endpoint"]
+            # Translate localhost to Docker bridge IP
+            bridge_ip = get_docker_bridge_ip()
+            executor_s3_endpoint = s3_endpoint.replace("localhost", bridge_ip).replace("127.0.0.1", bridge_ip)
+            builder = builder.config("spark.hadoop.fs.s3a.endpoint", executor_s3_endpoint)
+            print(f"S3 endpoint configured: {executor_s3_endpoint} (Docker bridge: {bridge_ip})")
         
         spark_session = builder.getOrCreate()
         print(f"SparkSession initialized and connected to Spark Master at {spark_master_url}.")
