@@ -1,14 +1,17 @@
 from siesta_framework.core.sparkManager import get_spark_session
+from siesta_framework.core.storageFactory import get_storage_manager
 from siesta_framework.model.DataModel import Event, Activity
 from pyspark.sql import SparkSession, DataFrame
+from pyspark.sql import functions as F
+from pyspark.sql.types import StringType, TimestampType
 from pyspark import RDD
-import pm4py
 from datetime import datetime
 
 
 def parse_xml() -> RDD:
     """
-    Parse_xml: Parses XES log file and creates an RDD of Event objects.
+    Parse_xml: Parses XES log file using Spark-XML and creates an RDD of Event objects.
+    This approach is scalable and handles large files without loading everything into driver memory.
     
     Returns:
         RDD containing Event objects (as dicts for serialization)
@@ -16,93 +19,100 @@ def parse_xml() -> RDD:
     spark = get_spark_session()
     if spark is None:
         raise RuntimeError("Spark session is not initialized.")
-
-    # Parse the XES file
-    log = pm4py.objects.log.importer.xes.importer.apply("/mnt/datasets/bpic2017.xes")
     
-    # Convert pm4py log to list of Event dicts
-    # We convert to dicts because Event objects can't be pickled directly
-    events_as_dicts = []
-    for trace in log:
-        trace_id = trace.attributes.get('concept:name', str(id(trace)))
+    storage = get_storage_manager()
+    if not storage:
+        raise RuntimeError("Storage manager is not initialized.")
+
+    local_xes_path = "/home/balaktsis/Projects/siesta-framework/siesta_framework/modules/Preprocess/test.xes"
+    xes_filename = local_xes_path.split("/")[-1]
+    
+    print(f"Uploading {local_xes_path} to storage...")
+    s3_path = storage.upload_file(local_xes_path, xes_filename)
+    print(f"File uploaded to: {s3_path}")
+    
+    traces_df = spark.read.format("xml") \
+        .option("rowTag", "trace") \
+        .load(s3_path)
+    
+    # Transform traces DataFrame to events RDD
+    def process_trace(row):
+        """Process a single trace row and yield Event dicts"""
+        events = []
         
-        for position, event in enumerate(trace):
-
-            timestamp = event.get('time:timestamp', None)
-            start_ts = None
-            end_ts = None
-            if timestamp and isinstance(timestamp, datetime):
-                start_ts = timestamp
-                end_ts = timestamp
+        # Extract trace ID from trace attributes
+        trace_attrs = {}
+        if hasattr(row, 'string'):
+            for attr in (row.string if isinstance(row.string, list) else [row.string]):
+                if attr and hasattr(attr, 'key') and attr.key == 'concept:name':
+                    trace_attrs['concept:name'] = getattr(attr, 'value', None)
+        
+        trace_id = trace_attrs.get('concept:name', f'trace_{id(row)}')
+        
+        # Extract events from trace
+        if not hasattr(row, 'event') or row.event is None:
+            return events
             
-            # Collect additional attributes
-            attributes = {}
-            for k, v in event.items():
-                if k not in ['concept:name', 'time:timestamp']:
-                    attributes[k] = str(v)
+        event_list = row.event if isinstance(row.event, list) else [row.event]
+        
+        for position, event in enumerate(event_list):
+            # Extract event attributes
+            event_attrs = {}
+            activity_name = 'Unknown'
+            timestamp = None
             
-            # Create Activity instance
-            activity = Activity()
-            activity.name = event.get('concept:name', 'Unknown')
-            activity.attributes = attributes if attributes else None
+            # Parse event attributes (string, date, etc.)
+            for attr_type in ['string', 'date', 'int', 'float', 'boolean']:
+                if hasattr(event, attr_type):
+                    attrs = getattr(event, attr_type)
+                    attr_list = attrs if isinstance(attrs, list) else [attrs] if attrs else []
+                    
+                    for attr in attr_list:
+                        if not attr:
+                            continue
+                        key = getattr(attr, 'key', None)
+                        value = getattr(attr, 'value', None)
+                        
+                        if key and value:
+                            if key == 'concept:name':
+                                activity_name = str(value)
+                            elif key == 'time:timestamp':
+                                # Parse timestamp
+                                if isinstance(value, str):
+                                    try:
+                                        timestamp = datetime.fromisoformat(value.replace('Z', '+00:00'))
+                                    except:
+                                        timestamp = None
+                                else:
+                                    timestamp = value
+                            else:
+                                event_attrs[key] = str(value)
             
-            # Create Event instance
-            event_obj = Event()
-            event_obj.activity = activity
-            event_obj.trace_id = trace_id
-            event_obj.position = position
-            event_obj.start_timestamp = start_ts
-            event_obj.end_timestamp = end_ts    
-             
-            # Collect converted-to-dict for serialization
-            events_as_dicts.append(event_obj.to_dict())
+            event_dict = {
+                "activity": activity_name,
+                "trace_id": trace_id,
+                "position": position,
+                "start_timestamp": timestamp.isoformat() if timestamp else None,
+                "end_timestamp": timestamp.isoformat() if timestamp else None
+            }
+            
+            # Add attributes as a Map to preserve schema consistency
+            if event_attrs:
+                event_dict["attributes"] = event_attrs
+            else:
+                event_dict["attributes"] = {}
+                
+            events.append(event_dict)
+        
+        return events
     
-    total_events = len(events_as_dicts)
-    num_traces = len(log)
+    # Process traces in parallel and flatten to events
+    events_rdd = traces_df.rdd.flatMap(process_trace)
     
-    # Free the pm4py log from memory
-    del log
-    
-    # Create RDD using batched parallelize to avoid OOM on large datasets
-    events_rdd = _batched_parallelize(spark, events_as_dicts, batch_size=50000)
+    # Get statistics
+    total_events = events_rdd.count()
+    num_traces = traces_df.count()
     
     print(f"Created RDD with {total_events} events from {num_traces} traces")
     
     return events_rdd
-
-
-def _batched_parallelize(spark: SparkSession, data: list, batch_size: int = 50000) -> RDD:
-    """
-    Parallelize a large list in batches to avoid driver OOM.
-
-    Args:
-        spark: SparkSession instance
-        data: List of items to parallelize
-        batch_size: Number of items per batch (default 50000)
-        
-    Returns:
-        Combined RDD containing all items
-    """
-    if len(data) <= batch_size:
-        # Small enough to parallelize directly
-        return spark.sparkContext.parallelize(data, numSlices=max(10, len(data) // 1000))
-    
-    # Create RDDs in batches and union them
-    rdds = []
-    for i in range(0, len(data), batch_size):
-        batch = data[i:i + batch_size]
-        num_partitions = max(10, len(batch) // 1000)
-        rdd = spark.sparkContext.parallelize(batch, numSlices=num_partitions)
-        rdds.append(rdd)
-        # Clear the batch from memory
-        del batch
-    
-    # Clear original data
-    data.clear()
-    
-    # Union all RDDs
-    combined_rdd = rdds[0]
-    for rdd in rdds[1:]:
-        combined_rdd = combined_rdd.union(rdd)
-    
-    return combined_rdd

@@ -6,10 +6,7 @@ class Activity:
     attributes: Optional[dict[str, str | int | float | bool]]
 
     def to_dict(self) -> dict:
-        r = {"name": self.name}
-        if self.attributes:
-            for k, v in self.attributes.items():
-                r[k] = v
+        r = {"name": self.name, "attributes": self.attributes if self.attributes else {}}
         return r
 
 class ActivityPair:
@@ -38,11 +35,9 @@ class Event:
             "trace_id": self.trace_id,
             "position": self.position,
             "start_timestamp": self.start_timestamp.isoformat() if self.start_timestamp else None,
-            "end_timestamp": self.end_timestamp.isoformat() if self.end_timestamp else None
+            "end_timestamp": self.end_timestamp.isoformat() if self.end_timestamp else None,
+            "attributes": self.activity.attributes if self.activity.attributes else {}
         }
-        if self.activity.attributes:
-            for k, v in self.activity.attributes.items():
-                r[k] = v
         return r
 
 

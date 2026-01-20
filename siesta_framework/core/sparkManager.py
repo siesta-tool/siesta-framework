@@ -3,6 +3,8 @@ from pyspark.sql import SparkSession
 import os
 import socket
 import subprocess
+import shutil
+from pathlib import Path
 
 # Ensure PySpark uses its bundled Spark
 if "SPARK_HOME" in os.environ:
@@ -68,7 +70,7 @@ def startup(config: Dict[str, Any] = None) -> None:
         )
         
         # Hadoop AWS packages for S3 support
-        hadoop_aws_packages = "org.apache.hadoop:hadoop-aws:3.4.1,com.amazonaws:aws-java-sdk-bundle:1.12.540"
+        packages = "org.apache.hadoop:hadoop-aws:3.4.1,com.amazonaws:aws-java-sdk-bundle:1.12.540"
         
         builder = builder \
             .config("spark.driver.extraJavaOptions", java_options) \
@@ -80,7 +82,7 @@ def startup(config: Dict[str, Any] = None) -> None:
             .config("spark.pyspark.python", "/opt/bitnami/python/bin/python3") \
             .config("spark.pyspark.driver.python", "python3") \
             .config("spark.executorEnv.PYSPARK_PYTHON", "/opt/bitnami/python/bin/python3") \
-            .config("spark.jars.packages", hadoop_aws_packages)
+            .config("spark.jars.packages", packages)
         
         # Configure S3 credentials if provided
         if config and config.get("s3_access_key") and config.get("s3_secret_key"):
@@ -100,6 +102,21 @@ def startup(config: Dict[str, Any] = None) -> None:
         
         spark_session = builder.getOrCreate()
         print(f"SparkSession initialized and connected to Spark Master at {spark_master_url}.")
+        
+        # Ship code to executors
+        try:
+            current_file = Path(__file__).resolve()
+            package_dir = current_file.parent.parent # siesta_framework directory
+            project_root = package_dir.parent # Project root containing siesta_framework
+            
+            zip_path = "/tmp/siesta_framework.zip"
+            shutil.make_archive(zip_path.replace('.zip', ''), 'zip', root_dir=project_root, base_dir="siesta_framework")
+            
+            spark_session.sparkContext.addPyFile(zip_path)
+            print(f"Shipped code to executors: {zip_path}")
+        except Exception as e:
+            print(f"Warning: Failed to ship code to executors: {e}")
+
     except Exception as e:
         raise RuntimeError(f"Failed to initialize SparkSession: {e}")
 

@@ -202,6 +202,34 @@ class S3Manager(StorageManager):
         metadata_df = self.spark.createDataFrame([metadata_dict])
         metadata_df.write.mode("overwrite").parquet(metadata.metadata_table_path)
         print(f"S3Manager: Metadata written to {metadata.metadata_table_path}")
+
+    def upload_file(self, local_path: str, destination_path: str) -> str:
+        """
+        Upload a local file to S3.
+        
+        Args:
+            local_path: Path to the local file
+            destination_path: Path/Name for the file in storage (key)
+            
+        Returns:
+            The S3A URI to access the uploaded file
+        """
+        import os
+        
+        key = destination_path
+        if key.startswith("/"):
+            key = key[1:]
+            
+        print(f"S3Manager: Uploading '{local_path}' to bucket '{self.storage_namespace}' with key '{key}'...")
+        try:
+            self.s3_client.upload_file(local_path, self.storage_namespace, key)
+            print("S3Manager: Upload successful.")
+            
+            # Construct S3A URI for Spark
+            return f"s3a://{self.storage_namespace}/{key}"
+        except Exception as e:
+            print(f"S3Manager: Upload failed: {e}")
+            raise
     
     def close_spark(self) -> None:
         """Close the Spark connection using sparkManager."""
@@ -329,24 +357,31 @@ class S3Manager(StorageManager):
             metadata: MetaData object containing the metadata
         """
         try:
-            # Convert RDD to DataFrame
-            # Handle both Event objects and dicts
-            first_element = sequence_rdd.first()
-            if isinstance(first_element, dict):
-                # Already dictionaries, use directly
-                event_dicts_rdd = sequence_rdd
-            else:
-                # Event objects, convert to dicts
-                event_dicts_rdd = sequence_rdd.map(lambda event: event.to_dict())
+            if sequence_rdd.isEmpty():
+                print("S3Manager: Sequence RDD is empty, skipping write.")
+                return
+
+            from pyspark.sql.types import StructType, StructField, StringType, IntegerType, MapType
             
-            df = self.spark.createDataFrame(event_dicts_rdd)
+            schema = StructType([
+                StructField("activity", StringType(), True),
+                StructField("trace_id", StringType(), True),
+                StructField("position", IntegerType(), True),
+                StructField("start_timestamp", StringType(), True),
+                StructField("end_timestamp", StringType(), True),
+                StructField("attributes", MapType(StringType(), StringType()), True)
+            ])
+            
+            first_element = sequence_rdd.first()
+            if not isinstance(first_element, dict):
+                event_dicts_rdd = sequence_rdd.map(lambda event: event.to_dict())
+            else:
+                event_dicts_rdd = sequence_rdd
+
+            df = self.spark.createDataFrame(event_dicts_rdd, schema=schema)
             df.write.mode("append").parquet(metadata.sequence_table_path)
             
             print(f"S3Manager: Wrote traces to {metadata.sequence_table_path}")
-            
-            # # Update metadata
-            # metadata.trace_count = df.count()
-            # print(f"S3Manager: Wrote {metadata.trace_count} traces to {metadata.sequence_table_path}")
         except Exception as e:
             print(f"S3Manager: Error writing SequenceTable: {e}")
     

@@ -96,6 +96,20 @@ class StorageManager(ABC):
             MetaData object containing the metadata
         """
         pass
+
+    @abstractmethod
+    def upload_file(self, local_path: str, destination_path: str) -> str:
+        """
+        Upload a local file to the storage system.
+        
+        Args:
+            local_path: Path to the local file
+            destination_path: Path/Name for the file in storage
+            
+        Returns:
+            The URI to access the uploaded file (e.g., s3a://bucket/path)
+        """
+        pass
     
     @abstractmethod
     def write_metadata(self, metadata: Any) -> None:
