@@ -35,18 +35,21 @@ def parse_xml() -> RDD:
         .option("rowTag", "trace") \
         .load(s3_path)
     
+    
     # Transform traces DataFrame to events RDD
     def process_trace(row):
         """Process a single trace row and yield Event dicts"""
+        
         events = []
         
         # Extract trace ID from trace attributes
         trace_attrs = {}
         if hasattr(row, 'string'):
             for attr in (row.string if isinstance(row.string, list) else [row.string]):
-                if attr and hasattr(attr, 'key') and attr.key == 'concept:name':
-                    trace_attrs['concept:name'] = getattr(attr, 'value', None)
-        
+                if attr and hasattr(attr, '_key') and attr._key == 'concept:name':
+                    trace_attrs['concept:name'] = getattr(attr, '_value', None)
+
+
         trace_id = trace_attrs.get('concept:name', f'trace_{id(row)}')
         
         # Extract events from trace
@@ -70,8 +73,8 @@ def parse_xml() -> RDD:
                     for attr in attr_list:
                         if not attr:
                             continue
-                        key = getattr(attr, 'key', None)
-                        value = getattr(attr, 'value', None)
+                        key = getattr(attr, '_key', None)
+                        value = getattr(attr, '_value', None)
                         
                         if key and value:
                             if key == 'concept:name':
