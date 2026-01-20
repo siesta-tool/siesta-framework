@@ -24,7 +24,7 @@ def parse_xml() -> RDD:
     if not storage:
         raise RuntimeError("Storage manager is not initialized.")
 
-    local_xes_path = "/home/balaktsis/Projects/siesta-framework/siesta_framework/modules/Preprocess/test.xes"
+    local_xes_path = "/mnt/datasets/bpic2017.xes"
     xes_filename = local_xes_path.split("/")[-1]
     
     print(f"Uploading {local_xes_path} to storage...")
@@ -39,7 +39,7 @@ def parse_xml() -> RDD:
     # Transform traces DataFrame to events RDD
     def process_trace(row):
         """Process a single trace row and yield Event dicts"""
-        
+
         events = []
         
         # Extract trace ID from trace attributes
@@ -64,7 +64,7 @@ def parse_xml() -> RDD:
             activity_name = 'Unknown'
             timestamp = None
             
-            # Parse event attributes (string, date, etc.)
+            # Parse event attributes
             for attr_type in ['string', 'date', 'int', 'float', 'boolean']:
                 if hasattr(event, attr_type):
                     attrs = getattr(event, attr_type)
@@ -73,14 +73,14 @@ def parse_xml() -> RDD:
                     for attr in attr_list:
                         if not attr:
                             continue
-                        key = getattr(attr, '_key', None)
-                        value = getattr(attr, '_value', None)
+                        # Try both _key/_value and key/value patterns
+                        key = getattr(attr, '_key', None) or getattr(attr, 'key', None)
+                        value = getattr(attr, '_value', None) or getattr(attr, 'value', None)
                         
-                        if key and value:
+                        if key and value is not None:
                             if key == 'concept:name':
                                 activity_name = str(value)
                             elif key == 'time:timestamp':
-                                # Parse timestamp
                                 if isinstance(value, str):
                                     try:
                                         timestamp = datetime.fromisoformat(value.replace('Z', '+00:00'))
@@ -108,14 +108,8 @@ def parse_xml() -> RDD:
             events.append(event_dict)
         
         return events
-    
+
     # Process traces in parallel and flatten to events
     events_rdd = traces_df.rdd.flatMap(process_trace)
-    
-    # Get statistics
-    total_events = events_rdd.count()
-    num_traces = traces_df.count()
-    
-    print(f"Created RDD with {total_events} events from {num_traces} traces")
     
     return events_rdd
