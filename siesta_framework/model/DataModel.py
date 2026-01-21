@@ -1,27 +1,11 @@
 from datetime import datetime
 from typing import Optional
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType, MapType
 
-class Activity:
-    name: str
-    attributes: Optional[dict[str, str | int | float | bool]]
-
-    def to_dict(self) -> dict:
-        r = {"name": self.name, "attributes": self.attributes if self.attributes else {}}
-        return r
-
-class ActivityPair:
-    source: Activity
-    target: Activity
-
-    def to_dict(self) -> dict:
-        return {
-            "source": self.source.to_dict() if self.source else None,
-            "target": self.target.to_dict() if self.target else None
-        }
 
 
 class Event:
-    activity: Activity
+    activity: str
     
     trace_id: str
     position: int
@@ -29,14 +13,38 @@ class Event:
     start_timestamp: Optional[datetime]
     end_timestamp: Optional[datetime]
 
+    attributes: Optional[dict[str, str | datetime | int | float | bool]]
+
+    def __init__(self, activity: str = None, trace_id: str = None, position: int = None,
+                 start_timestamp: Optional[datetime] = None, end_timestamp: Optional[datetime] = None,
+                 attributes: Optional[dict] = None):
+        self.activity = activity
+        self.trace_id = trace_id
+        self.position = position
+        self.start_timestamp = start_timestamp
+        self.end_timestamp = end_timestamp
+        self.attributes = attributes if attributes else {}
+
+    @staticmethod
+    def get_schema() -> StructType:
+        """Return the Spark schema for Event serialization."""
+        return StructType([
+            StructField("activity", StringType(), True),
+            StructField("trace_id", StringType(), True),
+            StructField("position", IntegerType(), True),
+            StructField("start_timestamp", StringType(), True),
+            StructField("end_timestamp", StringType(), True),
+            StructField("attributes", MapType(StringType(), StringType()), True)
+        ])
+
     def to_dict(self) -> dict:
         r = {
-            "activity": self.activity.name,
+            "activity": self.activity,
             "trace_id": self.trace_id,
             "position": self.position,
             "start_timestamp": self.start_timestamp.isoformat() if self.start_timestamp else None,
             "end_timestamp": self.end_timestamp.isoformat() if self.end_timestamp else None,
-            "attributes": self.activity.attributes if self.activity.attributes else {}
+            "attributes": self.attributes if self.attributes else {}
         }
         return r
 
@@ -46,19 +54,19 @@ class EventPair:
     target: Event
     @property
     def trace_id(self) -> str:
-        return self.event_pair.source.trace_id
+        return self.source.trace_id
     @property
     def start_position(self) -> int:
-        return self.event_pair.source.position
+        return self.source.position
     @property
     def end_position(self) -> int:
-        return self.event_pair.target.position
+        return self.target.position
     @property
     def start_timestamp(self) -> Optional[datetime]:
-        return self.event_pair.source.start_timestamp
+        return self.source.start_timestamp
     @property
     def end_timestamp(self) -> Optional[datetime]:
-        return self.event_pair.target.end_timestamp
+        return self.target.end_timestamp
     @property
     def position_diff(self) -> int:
         return self.target.position - self.source.position

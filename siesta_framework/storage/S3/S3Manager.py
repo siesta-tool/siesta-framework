@@ -361,16 +361,10 @@ class S3Manager(StorageManager):
                 print("S3Manager: Sequence RDD is empty, skipping write.")
                 return
 
-            from pyspark.sql.types import StructType, StructField, StringType, IntegerType, MapType
+            from siesta_framework.model.StorageModel import SequenceTableEntry
             
-            schema = StructType([
-                StructField("activity", StringType(), True),
-                StructField("trace_id", StringType(), True),
-                StructField("position", IntegerType(), True),
-                StructField("start_timestamp", StringType(), True),
-                StructField("end_timestamp", StringType(), True),
-                StructField("attributes", MapType(StringType(), StringType()), True)
-            ])
+            # Use the schema from SequenceTableEntry to ensure consistency
+            schema = SequenceTableEntry.get_schema()
             
             first_element = sequence_rdd.first()
             if not isinstance(first_element, dict):

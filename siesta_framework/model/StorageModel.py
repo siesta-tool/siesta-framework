@@ -1,4 +1,5 @@
 from datetime import datetime
+from pyspark.sql.types import StructType
 from . import DataModel
 
 class MetaData:
@@ -94,6 +95,11 @@ class IndexTableEntry(DataModel.EventPair):
     #         raise ValueError("Source and target events do not belong to the same trace.")
     #     return self.source.trace_id
 
-class SequenceTableEntry(DataModel.Trace):
+class SequenceTableEntry(DataModel.Event):
+    @staticmethod
+    def get_schema() -> StructType:
+        """Return the Spark schema for SequenceTableEntry serialization."""
+        return DataModel.Event.get_schema()
+    
     def to_dict(self) -> dict:
         return super().to_dict()

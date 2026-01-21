@@ -1,6 +1,6 @@
 from siesta_framework.core.sparkManager import get_spark_session
 from siesta_framework.core.storageFactory import get_storage_manager
-from siesta_framework.model.DataModel import Event, Activity
+from siesta_framework.model.DataModel import Event
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.types import StringType, TimestampType
@@ -24,7 +24,7 @@ def parse_xml() -> RDD:
     if not storage:
         raise RuntimeError("Storage manager is not initialized.")
 
-    local_xes_path = "/mnt/datasets/bpic2017.xes"
+    local_xes_path = "/home/balaktsis/Projects/siesta-framework/siesta_framework/modules/Preprocess/test.xes"
     xes_filename = local_xes_path.split("/")[-1]
     
     print(f"Uploading {local_xes_path} to storage...")
@@ -91,21 +91,17 @@ def parse_xml() -> RDD:
                             else:
                                 event_attrs[key] = str(value)
             
-            event_dict = {
-                "activity": activity_name,
-                "trace_id": trace_id,
-                "position": position,
-                "start_timestamp": timestamp.isoformat() if timestamp else None,
-                "end_timestamp": timestamp.isoformat() if timestamp else None
-            }
-            
-            # Add attributes as a Map to preserve schema consistency
-            if event_attrs:
-                event_dict["attributes"] = event_attrs
-            else:
-                event_dict["attributes"] = {}
+            # Create Event object using the constructor
+            event = Event(
+                activity=activity_name,
+                trace_id=trace_id,
+                position=position,
+                start_timestamp=timestamp,
+                end_timestamp=timestamp,
+                attributes=event_attrs
+            )
                 
-            events.append(event_dict)
+            events.append(event)
         
         return events
 
