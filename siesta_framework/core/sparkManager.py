@@ -4,6 +4,7 @@ import os
 import socket
 import subprocess
 import shutil
+import zipfile
 from pathlib import Path
 
 # Ensure PySpark uses its bundled Spark
@@ -110,7 +111,13 @@ def startup(config: Dict[str, Any] = None) -> None:
             project_root = package_dir.parent # Project root containing siesta_framework
             
             zip_path = "/tmp/siesta_framework.zip"
-            shutil.make_archive(zip_path.replace('.zip', ''), 'zip', root_dir=project_root, base_dir="siesta_framework")
+            
+            # Create zip with only .py files to reduce size
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                siesta_dir = project_root / "siesta_framework"
+                for py_file in siesta_dir.rglob("*.py"):
+                    arcname = py_file.relative_to(project_root)
+                    zipf.write(py_file, arcname)
             
             spark_session.sparkContext.addPyFile(zip_path)
             print(f"Shipped code to executors: {zip_path}")
