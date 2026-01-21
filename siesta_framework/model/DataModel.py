@@ -3,6 +3,74 @@ from typing import Optional
 from pyspark.sql.types import StructType, StructField, StringType, IntegerType, MapType
 
 
+class EventConfig:
+    """Configuration for mapping source data attributes to Event fields.
+    
+    Loads field mappings from system config. To customize mappings, edit config.json
+    or pass a custom config to parse functions.
+    """
+    
+    def __init__(self, 
+                 field_mappings: dict[str, Optional[str]],
+                 trace_level_fields: set[str],
+                 timestamp_fields: set[str]):
+        """
+        Initialize EventConfig with field mappings.
+        
+        Args:
+            field_mappings: Dict mapping Event field names to source attribute keys.
+                          Use None as value for computed fields.
+            trace_level_fields: Set of fields extracted from trace level
+            timestamp_fields: Set of fields containing timestamps
+        """
+        self.field_mappings = field_mappings
+        self.trace_level_fields = trace_level_fields
+        self.timestamp_fields = timestamp_fields
+    
+    @staticmethod
+    def from_system_config(config: dict, log_format: str = 'xes') -> 'EventConfig':
+        """Create EventConfig from system configuration.
+        
+        Args:
+            config: System configuration dictionary
+            log_format: Log format to use ('xes', 'csv', or custom defined in config)
+            
+        Returns:
+            EventConfig initialized from system config
+        """
+        field_mappings = config.get('field_mappings', {}).get(log_format, {})
+        if not field_mappings:
+            # Fallback to default XES for default Event class
+            field_mappings = {
+                'activity': 'concept:name',
+                'trace_id': 'concept:name',
+                'position': None,
+                'start_timestamp': 'time:timestamp',
+                'end_timestamp': 'time:timestamp',
+            }
+        
+        return EventConfig(
+            field_mappings=field_mappings,
+            trace_level_fields=set(config.get('trace_level_fields', ['trace_id'])),
+            timestamp_fields=set(config.get('timestamp_fields', ['start_timestamp', 'end_timestamp']))
+        )
+    
+    def get_event_fields(self) -> dict[str, Optional[str]]:
+        """Get mappings for event-level fields only."""
+        return {k: v for k, v in self.field_mappings.items() if k not in self.trace_level_fields}
+    
+    def get_trace_fields(self) -> dict[str, Optional[str]]:
+        """Get mappings for trace-level fields only."""
+        return {k: v for k, v in self.field_mappings.items() if k in self.trace_level_fields}
+    
+    def is_timestamp_field(self, field_name: str) -> bool:
+        """Check if a field should be parsed as timestamp."""
+        return field_name in self.timestamp_fields
+    
+    def is_computed_field(self, field_name: str) -> bool:
+        """Check if a field is computed (not extracted from source)."""
+        return self.field_mappings.get(field_name) is None
+
 
 class Event:
     activity: str
@@ -17,13 +85,22 @@ class Event:
 
     def __init__(self, activity: str = None, trace_id: str = None, position: int = None,
                  start_timestamp: Optional[datetime] = None, end_timestamp: Optional[datetime] = None,
-                 attributes: Optional[dict] = None):
+                 attributes: Optional[dict] = None, **kwargs):
         self.activity = activity
         self.trace_id = trace_id
         self.position = position
         self.start_timestamp = start_timestamp
         self.end_timestamp = end_timestamp
         self.attributes = attributes if attributes else {}
+        
+        # Support dynamic field assignment for extensibility
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+    
+    @classmethod
+    def from_dict(cls, data: dict) -> 'Event':
+        """Create Event from dictionary with dynamic field support."""
+        return cls(**data)
 
     @staticmethod
     def get_schema() -> StructType:

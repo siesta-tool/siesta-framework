@@ -17,5 +17,23 @@
   "api": {
     "host": "0.0.0.0",
     "port": 8000
-  }
+  },
+  "field_mappings": {
+    "xes": {
+      "activity": "concept:name",
+      "trace_id": "concept:name",
+      "position": null,
+      "start_timestamp": "time:timestamp",
+      "end_timestamp": "time:timestamp"
+    },
+    "csv": {
+      "activity": "Activity",
+      "trace_id": "CaseID",
+      "position": null,
+      "start_timestamp": "Timestamp",
+      "end_timestamp": "Timestamp"
+    }
+  },
+  "trace_level_fields": ["trace_id"],
+  "timestamp_fields": ["start_timestamp", "end_timestamp"]
 }

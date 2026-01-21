@@ -2,34 +2,14 @@ from typing import Dict, Any, Optional
 from siesta_framework.core.interfaces import StorageManager
 from siesta_framework.storage.S3.S3Manager import S3Manager
 from siesta_framework.model.StorageModel import MetaData
+from siesta_framework.core.config import get_config
 
 # Global storage manager instance
 _storage_manager: Optional[StorageManager] = None
-# Global config instance
-_config: Optional[Dict[str, Any]] = None
 # Cache of metadata instances per log name
 _metadata_cache: Dict[str, MetaData] = {}
 # Current active log name (set for CLI mode, None for API mode)
 _active_log_name: Optional[str] = None
-
-
-def get_config() -> Optional[Dict[str, Any]]:
-    """Get the global config dictionary.
-    
-    Returns:
-        The configuration dictionary, or None if not set.
-    """
-    return _config
-
-
-def set_config(config: Dict[str, Any]) -> None:
-    """Set the global config dictionary.
-    
-    Args:
-        config: The configuration dictionary to set.
-    """
-    global _config
-    _config = config
 
 
 def get_metadata(log_name: Optional[str] = None) -> Optional[MetaData]:
@@ -68,7 +48,7 @@ def get_or_create_metadata(log_name: str) -> MetaData:
         return _metadata_cache[log_name]
     
     config = get_config()
-    if config is None:
+    if not config:
         raise RuntimeError("Configuration not available. Ensure framework is started.")
     
     metadata = MetaData(

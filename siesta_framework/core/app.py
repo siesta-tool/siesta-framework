@@ -1,18 +1,17 @@
 import importlib
 import pkgutil
-import json
-from pathlib import Path
 from typing import Callable, List, Tuple, Type, Dict, Any
 from siesta_framework.core.interfaces import SiestaModule, StorageManager
 import siesta_framework.modules as modules
 import siesta_framework.core.sparkManager as sparkManager
-from siesta_framework.core.storageFactory import StorageManagerFactory, set_storage_manager, set_config, set_active_log
+from siesta_framework.core.storageFactory import StorageManagerFactory, set_storage_manager, set_active_log
+from siesta_framework.core.config import initialize_config, load_config
 from siesta_framework.model.SystemModel import DEFAULT_CONFIG
 import argparse
 
 class Siesta:
     def __init__(self, config_path: str|None = None) -> None:
-        self.config = self._load_config(config_path) if config_path else {}
+        self.config = load_config(config_path)
         self.storage_manager = None
         self.registered_routes: Dict[str, SiestaModule.ApiRoutes|None] = {}
 
@@ -43,34 +42,6 @@ class Siesta:
         print(f"Module {parsed_args.module} not found")
         return app
     
-    def _load_config(self, config_path: str) -> Dict[str, Any]:
-        """Load configuration from a JSON file and merge with defaults.
-        
-        Args:
-            config_path: Path to the configuration JSON file
-            
-        Returns:
-            Dictionary containing configuration merged with defaults
-        """
-        # Start with default config
-        config = DEFAULT_CONFIG.copy()
-        
-        config_file = Path(config_path)
-        if not config_file.exists():
-            print(f"Warning: Config file {config_path} not found. Using default config.")
-            return config
-        
-        try:
-            with open(config_file, 'r') as f:
-                user_config = json.load(f)
-                # Merge user config with defaults
-                config.update(user_config)
-                print(f"Configuration loaded from {config_path} and merged with defaults")
-                return config
-        except Exception as e:
-            print(f"Error loading config from {config_path}: {e}. Using default config.")
-            return config
-
     def discover_modules(self) -> List[Type[SiestaModule]]:
         discovered: set[Type[SiestaModule]] = set()
 
@@ -98,8 +69,8 @@ class Siesta:
         """
         print("--- Starting Framework ---")
         
-        # Set global config accessor
-        set_config(self.config)
+        # Initialize global config accessor
+        initialize_config(self.config)
         
         # In CLI mode, set the active log from config
         # In API mode, logs are created on-demand per request
