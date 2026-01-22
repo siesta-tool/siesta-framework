@@ -84,6 +84,11 @@ def parse_xml(s3_path: str, spark: SparkSession, system_config: dict) -> RDD:
         trace_field_values = {}
         trace_fields_config = config.get_trace_fields()
         
+        """
+        Check if there's string columns -> Turn them into an iterable list, which we call attributes.
+        -> For each attribute, check if its key matches any trace-level field mapping. (eg. 'trace_id': 'concept:name')
+         
+        """
         if hasattr(row, 'string'):
             for attr in (row.string if isinstance(row.string, list) else [row.string]):
                 if attr and hasattr(attr, '_key'):

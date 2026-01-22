@@ -39,6 +39,7 @@ class EventConfig:
             EventConfig initialized from system config
         """
         field_mappings = config.get('field_mappings', {}).get(log_format, {})
+
         if not field_mappings:
             # Fallback to default XES for default Event class
             field_mappings = {
@@ -48,6 +49,11 @@ class EventConfig:
                 'start_timestamp': 'time:timestamp',
                 'end_timestamp': 'time:timestamp',
             }
+        
+        expected_attrs = set(dir(Event()))
+        field_mappings_keys = set(field_mappings.keys())
+        if not field_mappings_keys <= expected_attrs:
+            raise Exception("Incompatible field mappings given in Config")
         
         return EventConfig(
             field_mappings=field_mappings,
