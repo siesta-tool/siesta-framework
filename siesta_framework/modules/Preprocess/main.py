@@ -2,7 +2,7 @@ from typing import Any
 from siesta_framework.modules.Example.main import Example
 from siesta_framework.core.interfaces import SiestaModule
 from siesta_framework.core.storageFactory import get_storage_manager, get_metadata
-from .parse_log import parse_xml
+from .parse_log import parse_log_file
 
 
 class Preprocessor(SiestaModule):
@@ -22,7 +22,7 @@ class Preprocessor(SiestaModule):
         match module:
             case ["testparse"]:
                 print("Running testparse...")
-                events_rdd = parse_xml()
+                events_rdd = parse_log_file()
                 
                 storage = get_storage_manager()
                 metadata = get_metadata()

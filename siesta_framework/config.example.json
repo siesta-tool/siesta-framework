@@ -3,6 +3,7 @@
   "storage_type": "s3",
   "log_name": "example_log",
   "storage_namespace": "siesta",
+  "log_path": "datasets/test.xes",
   "s3_access_key": "minioadmin",
   "s3_secret_key": "minioadmin",
   "s3_endpoint": "http://localhost:9000",

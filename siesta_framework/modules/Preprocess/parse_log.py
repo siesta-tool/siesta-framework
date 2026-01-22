@@ -7,23 +7,22 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import StringType, TimestampType
 from pyspark import RDD
 from datetime import datetime
+import os
 
+def parse_log_file() -> RDD:
+    """
+    Generic parsing function that determines the format and path from config.
+    """
+    config = get_config()
+    log_path = config.get("log_path")
+    
+    
+    if not log_path:
+        raise ValueError("Log path not specified in configuration")
 
-def parse_xml(log_format: str = 'xes') -> RDD:
-    """
-    Parse_xml: Parses XES log file using Spark-XML and creates an RDD of Event objects.
-    This approach is scalable and handles large files without loading everything into driver memory.
-    
-    Args:
-        log_format: Log format type ('xes', 'csv', or custom defined in config)
-    
-    Returns:
-        RDD containing Event objects
-    """
-    # Get config from global accessor and create EventConfig
-    system_config = get_config()
-    config = EventConfig.from_system_config(system_config, log_format)
-    
+    if not os.path.exists(log_path):
+        raise FileNotFoundError(f"Log file not found at path: {log_path}")
+
     spark = get_spark_session()
     if spark is None:
         raise RuntimeError("Spark session is not initialized.")
@@ -32,12 +31,43 @@ def parse_xml(log_format: str = 'xes') -> RDD:
     if not storage:
         raise RuntimeError("Storage manager is not initialized.")
 
-    local_xes_path = "../../test.xes"
-    xes_filename = local_xes_path.split("/")[-1]
+    filename = os.path.basename(log_path)
     
-    print(f"Uploading {local_xes_path} to storage...")
-    s3_path = storage.upload_file(local_xes_path, xes_filename)
+    print(f"Uploading {log_path} to storage...")
+    s3_path = storage.upload_file(log_path, filename)
     print(f"File uploaded to: {s3_path}")
+
+    _, ext = os.path.splitext(log_path)
+    log_format = ext.lower().lstrip('.')
+    
+    if log_format == 'xes':
+        return parse_xml(s3_path, spark, config)
+    elif log_format == 'csv':
+        return parse_csv(s3_path, spark, config)
+    else:
+        raise ValueError(f"Unsupported log format: {log_format}")
+
+def parse_csv(s3_path: str, spark: SparkSession, system_config: dict) -> RDD:
+    """
+    Placeholder for CSV parsing function.
+    """
+    pass
+
+
+def parse_xml(s3_path: str, spark: SparkSession, system_config: dict) -> RDD:
+    """
+    Parse_xml: Parses XES log file using Spark-XML and creates an RDD of Event objects.
+    This approach is scalable and handles large files without loading everything into driver memory.
+    
+    Args:
+        s3_path: S3 Path to the log file
+        spark: Active Spark Session
+        system_config: System configuration dictionary
+    
+    Returns:
+        RDD containing Event objects
+    """
+    config = EventConfig.from_system_config(system_config, "xes")
     
     traces_df = spark.read.format("xml") \
         .option("rowTag", "trace") \

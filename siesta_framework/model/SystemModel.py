@@ -6,6 +6,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "storage_type": "s3",
     "log_name": "default_log",
     "storage_namespace": "siesta",
+    "log_path": "datasets/test.xes",
     
     # S3/MinIO configuration
     "s3_access_key": "",
