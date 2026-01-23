@@ -25,16 +25,16 @@
       "trace_id": "concept:name",
       "position": null,
       "start_timestamp": "time:timestamp",
-      "end_timestamp": "time:timestamp"
+      "attributes" : ["*"]
     },
     "csv": {
-      "activity": "Activity",
-      "trace_id": "CaseID",
-      "position": null,
-      "start_timestamp": "Timestamp",
-      "end_timestamp": "Timestamp"
+      "activity": "activity",
+      "trace_id": "trace_id",
+      "position": "position",
+      "start_timestamp": "timestamp",
+      "attributes" : ["resource", "cost"]
     }
   },
   "trace_level_fields": ["trace_id"],
-  "timestamp_fields": ["start_timestamp", "end_timestamp"]
+  "timestamp_fields": ["start_timestamp"]
 }

@@ -13,7 +13,8 @@ class EventConfig:
     def __init__(self, 
                  field_mappings: dict[str, Optional[str]],
                  trace_level_fields: set[str],
-                 timestamp_fields: set[str]):
+                 timestamp_fields: set[str],
+                 attributes_mapping: Optional[list[str]] = None):
         """
         Initialize EventConfig with field mappings.
         
@@ -22,10 +23,13 @@ class EventConfig:
                           Use None as value for computed fields.
             trace_level_fields: Set of fields extracted from trace level
             timestamp_fields: Set of fields containing timestamps
+            attributes_mapping: List of source keys to include in attributes. 
+                              None/Empty means store nothing. ["*"] means store all unmapped.
         """
         self.field_mappings = field_mappings
         self.trace_level_fields = trace_level_fields
         self.timestamp_fields = timestamp_fields
+        self.attributes_mapping = attributes_mapping
     
     @staticmethod
     def from_system_config(config: dict, log_format: str = 'xes') -> 'EventConfig':
@@ -38,7 +42,9 @@ class EventConfig:
         Returns:
             EventConfig initialized from system config
         """
-        field_mappings = config.get('field_mappings', {}).get(log_format, {})
+        field_mappings = config.get('field_mappings', {}).get(log_format, {}).copy()
+
+        attributes_mapping = field_mappings.pop('attributes', None)
 
         if not field_mappings:
             # Fallback to default XES for default Event class
@@ -46,8 +52,7 @@ class EventConfig:
                 'activity': 'concept:name',
                 'trace_id': 'concept:name',
                 'position': None,
-                'start_timestamp': 'time:timestamp',
-                'end_timestamp': 'time:timestamp',
+                'start_timestamp': 'time:timestamp'
             }
         
         expected_attrs = set(dir(Event()))
@@ -58,7 +63,8 @@ class EventConfig:
         return EventConfig(
             field_mappings=field_mappings,
             trace_level_fields=set(config.get('trace_level_fields', ['trace_id'])),
-            timestamp_fields=set(config.get('timestamp_fields', ['start_timestamp', 'end_timestamp']))
+            timestamp_fields=set(config.get('timestamp_fields', ['start_timestamp'])),
+            attributes_mapping=attributes_mapping
         )
     
     def get_event_fields(self) -> dict[str, Optional[str]]:
@@ -85,7 +91,6 @@ class Event:
     position: int
     
     start_timestamp: Optional[datetime]
-    end_timestamp: Optional[datetime]
 
     attributes: Optional[dict[str, str | datetime | int | float | bool]]
 
@@ -96,7 +101,6 @@ class Event:
         self.trace_id = trace_id
         self.position = position
         self.start_timestamp = start_timestamp
-        self.end_timestamp = end_timestamp
         self.attributes = attributes if attributes else {}
         
         # Support dynamic field assignment for extensibility
@@ -112,21 +116,19 @@ class Event:
     def get_schema() -> StructType:
         """Return the Spark schema for Event serialization."""
         return StructType([
-            StructField("activity", StringType(), True),
+            StructField("activity", StringType(), False),
             StructField("trace_id", StringType(), True),
-            StructField("position", IntegerType(), True),
+            StructField("position", IntegerType(), False),
             StructField("start_timestamp", StringType(), True),
-            StructField("end_timestamp", StringType(), True),
             StructField("attributes", MapType(StringType(), StringType()), True)
         ])
 
     def to_dict(self) -> dict:
         r = {
             "activity": self.activity,
-            "trace_id": self.trace_id,
+            "trace_id": self.trace_id if self.trace_id else None,
             "position": self.position,
             "start_timestamp": self.start_timestamp.isoformat() if self.start_timestamp else None,
-            "end_timestamp": self.end_timestamp.isoformat() if self.end_timestamp else None,
             "attributes": self.attributes if self.attributes else {}
         }
         return r
@@ -147,9 +149,7 @@ class EventPair:
     @property
     def start_timestamp(self) -> Optional[datetime]:
         return self.source.start_timestamp
-    @property
-    def end_timestamp(self) -> Optional[datetime]:
-        return self.target.end_timestamp
+    
     @property
     def position_diff(self) -> int:
         return self.target.position - self.source.position
@@ -186,8 +186,12 @@ class Trace:
         return None
     @property
     def end_timestamp(self) -> Optional[datetime]:
-        return self.events[-1].end_timestamp
-
+        if self.events[-1].end_timestamp:
+            return self.events[-1].end_timestamp
+        if "end_timestamp" in self.events[-1].attributes:
+            return self.events[-1].attributes["end_timestamp"]
+        return None
+    
     def to_dict(self) -> dict:
         return {
             "trace_id": self.trace_id,

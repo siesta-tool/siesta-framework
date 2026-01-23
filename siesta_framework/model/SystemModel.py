@@ -30,16 +30,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "trace_id": "concept:name",
             "position": None,  # Computed from sequence
             "start_timestamp": "time:timestamp",
-            "end_timestamp": "time:timestamp",
         },
         "csv": {
-            "activity": "Activity",
-            "trace_id": "CaseID",
-            "position": None,
+            "activity": "activity",
+            "trace_id": "caseID",
+            "position": "position",
             "start_timestamp": "Timestamp",
-            "end_timestamp": "Timestamp",
         }
     },
     "trace_level_fields": ["trace_id"],
-    "timestamp_fields": ["start_timestamp", "end_timestamp"],
+    "timestamp_fields": ["start_timestamp"],
 }
