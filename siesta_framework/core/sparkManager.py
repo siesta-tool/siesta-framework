@@ -3,7 +3,6 @@ from pyspark.sql import SparkSession
 import os
 import socket
 import subprocess
-import shutil
 import zipfile
 from pathlib import Path
 
