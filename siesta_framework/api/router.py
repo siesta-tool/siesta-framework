@@ -1,5 +1,5 @@
 from core.app import Siesta
-from fastapi import FastAPI, APIRouter, Request
+from fastapi import FastAPI, APIRouter
 import uvicorn
 
 """
