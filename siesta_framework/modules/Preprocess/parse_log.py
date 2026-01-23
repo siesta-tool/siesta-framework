@@ -4,7 +4,6 @@ from siesta_framework.core.config import get_config
 from siesta_framework.model.DataModel import Event, EventConfig
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql import functions as F
-from pyspark.sql.types import StringType, TimestampType
 from pyspark import RDD
 from datetime import datetime
 import os
