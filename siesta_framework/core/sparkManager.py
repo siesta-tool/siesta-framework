@@ -1,7 +1,6 @@
 from typing import Any, Dict
 from pyspark.sql import SparkSession
 import os
-import socket
 import subprocess
 import zipfile
 from pathlib import Path
