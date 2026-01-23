@@ -36,6 +36,9 @@ MANIFEST
 pip-log.txt
 pip-delete-this-directory.txt
 
+BPI Challenge 2017.xes
+BPI Challenge 2018.xes
+
 # Unit test / coverage reports
 htmlcov/
 .tox/
