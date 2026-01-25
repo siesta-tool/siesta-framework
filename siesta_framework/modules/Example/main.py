@@ -1,4 +1,4 @@
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Tuple, TypeAlias
 from siesta_framework.core.interfaces import SiestaModule
 from siesta_framework.core.storageFactory import get_or_create_metadata, get_storage_manager
 
@@ -9,8 +9,8 @@ class Example(SiestaModule):
     name = "Example Module"
     version = "1.0.0"
 
-    type exampleSimpleType = int | str
-    type exampleComplicatedType = Dict[str, Tuple[int, exampleSimpleType]]
+    exampleSimpleType:  TypeAlias = int | str
+    exampleComplicatedType: TypeAlias = Dict[str, Tuple[int, exampleSimpleType]]
 
     def startup(self):
         print(f"{self.name} v{self.version} initialized.")

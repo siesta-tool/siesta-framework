@@ -1,4 +1,4 @@
-from typing import Any, Callable, Dict, ClassVar, Literal, Tuple
+from typing import Any, Callable, Dict, ClassVar, Literal, Tuple, TypeAlias
 from abc import ABC, abstractmethod
 from pyspark import RDD
 
@@ -22,9 +22,9 @@ class SiestaModule(ABC):
     name: ClassVar[str] = "Unnamed Module"
     version: ClassVar[str] = "unversioned"
 
-    type ApiMethod = Literal["GET", "POST", "PUT", "DELETE"]
-    type ApiRoute = Tuple[ApiMethod, Callable] | Tuple[ApiMethod, Callable, Dict[str, Any]]
-    type ApiRoutes = Dict[str, ApiRoute]
+    ApiMethod: TypeAlias = Literal["GET", "POST", "PUT", "DELETE"]
+    ApiRoute: TypeAlias = Tuple[ApiMethod, Callable] | Tuple[ApiMethod, Callable, Dict[str, Any]]
+    ApiRoutes: TypeAlias = Dict[str, ApiRoute]
 
     # @abstractmethod
     def register_routes(self) -> ApiRoutes | None:
