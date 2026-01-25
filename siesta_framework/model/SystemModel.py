@@ -36,6 +36,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "trace_id": "caseID",
             "position": "position",
             "start_timestamp": "Timestamp",
+        }, 
+        "json": {
+            "activity": "activity",
+            "trace_id": "caseID",
+            "position": "position",
+            "start_timestamp": "Timestamp",
         }
     },
     "trace_level_fields": ["trace_id"],

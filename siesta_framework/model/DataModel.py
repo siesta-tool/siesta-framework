@@ -37,7 +37,7 @@ class EventConfig:
         
         Args:
             config: System configuration dictionary
-            log_format: Log format to use ('xes', 'csv', or custom defined in config)
+            log_format: Log format to use ('xes', 'csv', 'json', or custom defined in config)
             
         Returns:
             EventConfig initialized from system config
@@ -82,6 +82,10 @@ class EventConfig:
     def is_computed_field(self, field_name: str) -> bool:
         """Check if a field is computed (not extracted from source)."""
         return self.field_mappings.get(field_name) is None
+
+    def get_event_schema(self) -> StructType:
+        """Return the Spark schema for Event based on field mappings."""
+        return StructType([StructField(x, StringType(), True) for x in self.field_mappings.items()])
 
 
 class Event:

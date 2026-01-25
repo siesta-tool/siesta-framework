@@ -15,6 +15,14 @@
   "spark_app_name": "SiestaFramework",
   "spark_driver_memory": "8g",
   "spark_executor_memory": "4g",
+  "enable_streaming": "False",
+  "kafka_bootstrap_servers": "localhost:9092",
+  "kafka_topic": "log_events",
+  "kafka_additional_fields": [
+    {"name": "resource", "type": "string"},
+    {"name": "cost", "type": "string"},
+    {"name": "priority", "type": "string"}
+  ],
   "api": {
     "host": "0.0.0.0",
     "port": 8000
@@ -33,6 +41,12 @@
       "position": "position",
       "start_timestamp": "timestamp",
       "attributes" : ["resource", "cost"]
+    },
+    "json": {
+        "activity": "activity",
+        "trace_id": "caseID",
+        "position": "position",
+        "start_timestamp": "Timestamp"
     }
   },
   "trace_level_fields": ["trace_id"],

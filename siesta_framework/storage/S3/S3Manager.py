@@ -5,7 +5,7 @@ from pyspark import RDD
 from pyspark.sql import DataFrame
 from siesta_framework.core.interfaces import StorageManager
 from siesta_framework.model.StorageModel import MetaData
-from siesta_framework.model.DataModel import Event
+from siesta_framework.model.DataModel import Event, EventConfig
 
 
 class S3Manager(StorageManager):
@@ -65,6 +65,37 @@ class S3Manager(StorageManager):
             self.spark.conf.set("spark.hadoop.fs.s3a.endpoint", config["s3_endpoint"])
         else:
             self.spark.conf.se
+
+
+        # If streaming is enabled, begin listening to kafka
+        if config.get("enable_streaming", False):
+            from pyspark.sql.functions import col, from_json
+            from pyspark.sql.types import StructType, StructField, StringType, IntegerType, LongType
+            
+            # Define schema for incoming JSON events
+            schema = EventConfig.from_system_config(config,"json").get_event_schema()
+                        
+            # Read streaming data from Kafka
+            raw_events_streaming_df = (self.spark.readStream
+                .format("kafka")
+                .option("kafka.bootstrap.servers", config.get("kafka_bootstrap_servers", "localhost:9092"))
+                .option("subscribe", config.get("kafka_topic", "log_events"))
+                .option("startingOffsets", "latest")
+                .load())
+
+            # Parse JSON from Kafka value field and write as JSON Lines
+            parsed_events_df = raw_events_streaming_df.select(
+                from_json(col("value").cast("string"), schema).alias("data")
+            ).select("data.*")
+            
+            # Store parsed events as JSON lines by 1-min triggering to bundle rows into file
+            raw_rt_query = (parsed_events_df
+                .writeStream
+                .format("json")
+                .option("path", config.get("s3_raw_events_location", "s3a://siesta/raw_events/rt/"))
+                .option("checkpointLocation", config.get("s3_checkpoint_location", "s3a://siesta/checkpoints/rt/"))
+                .trigger(processingTime='1 minute')
+                .start())
         
         print("S3Manager: Spark session configured for S3 access.")
     
