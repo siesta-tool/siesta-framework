@@ -6,6 +6,7 @@ from pyspark.sql import DataFrame
 from siesta_framework.core.interfaces import StorageManager
 from siesta_framework.model.StorageModel import MetaData
 from siesta_framework.model.DataModel import Event
+from fastapi import UploadFile
 
 
 class S3Manager(StorageManager):
@@ -214,7 +215,6 @@ class S3Manager(StorageManager):
         Returns:
             The S3A URI to access the uploaded file
         """
-        import os
         
         key = destination_path
         if key.startswith("/"):
@@ -223,6 +223,32 @@ class S3Manager(StorageManager):
         print(f"S3Manager: Uploading '{local_path}' to bucket '{self.storage_namespace}' with key '{key}'...")
         try:
             self.s3_client.upload_file(local_path, self.storage_namespace, key)
+            print("S3Manager: Upload successful.")
+            
+            # Construct S3A URI for Spark
+            return f"s3a://{self.storage_namespace}/{key}"
+        except Exception as e:
+            print(f"S3Manager: Upload failed: {e}")
+            raise
+    
+    def upload_file_object(self, file: UploadFile, destination_path: str) -> str:
+        """
+        Upload an in-memory file (UploadFile) to S3.
+        
+        Args:
+            file: UploadFile object containing the file data
+            destination_path: Path/Name for the file in storage (key)
+        Returns:
+            The S3A URI to access the uploaded file
+        """
+        
+        key = destination_path
+        if key.startswith("/"):
+            key = key[1:]
+        
+        print(f"S3Manager: Uploading in-memory file to bucket '{self.storage_namespace}' with key '{key}'...")
+        try:
+            self.s3_client.upload_fileobj(file.file, self.storage_namespace, key)
             print("S3Manager: Upload successful.")
             
             # Construct S3A URI for Spark

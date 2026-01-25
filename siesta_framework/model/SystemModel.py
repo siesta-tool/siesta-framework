@@ -4,9 +4,7 @@ from typing import Dict, Any
 DEFAULT_CONFIG: Dict[str, Any] = {
     # Storage configuration
     "storage_type": "s3",
-    "log_name": "default_log",
     "storage_namespace": "siesta",
-    "log_path": "datasets/test.xes",
     
     # S3/MinIO configuration
     "s3_access_key": "",
@@ -22,24 +20,4 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # Spark configuration
     "spark_master": "local",
     "spark_app_name": "SiestaFramework",
-    
-    # Log parsing configuration
-    "field_mappings": {
-        "xes": {
-            "activity": "concept:name",
-            "trace_id": "concept:name",
-            "position": None,  # Computed from sequence
-            "start_timestamp": "time:timestamp",
-            "end_timestamp": "time:timestamp",
-        },
-        "csv": {
-            "activity": "Activity",
-            "trace_id": "CaseID",
-            "position": None,
-            "start_timestamp": "Timestamp",
-            "end_timestamp": "Timestamp",
-        }
-    },
-    "trace_level_fields": ["trace_id"],
-    "timestamp_fields": ["start_timestamp", "end_timestamp"],
 }

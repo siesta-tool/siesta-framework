@@ -1,17 +1,20 @@
 import importlib
 import pkgutil
+from pathlib import Path
 from typing import Callable, List, Tuple, Type, Dict, Any
 from siesta_framework.core.interfaces import SiestaModule, StorageManager
 import siesta_framework.modules as modules
+import siesta_framework as siesta_framework_package
 import siesta_framework.core.sparkManager as sparkManager
 from siesta_framework.core.storageFactory import StorageManagerFactory, set_storage_manager, set_active_log
 from siesta_framework.core.config import initialize_config, load_config
-from siesta_framework.model.SystemModel import DEFAULT_CONFIG
 import argparse
 
 class Siesta:
+    __DEFAULT_CONFIG_PATH = str(Path(siesta_framework_package.__file__).parent / 'config' / 'siesta.config.json')
+
     def __init__(self, config_path: str|None = None) -> None:
-        self.config = load_config(config_path)
+        self.config = load_config(config_path or self.__DEFAULT_CONFIG_PATH)
         self.storage_manager = None
         self.registered_routes: Dict[str, SiestaModule.ApiRoutes|None] = {}
 
@@ -26,12 +29,12 @@ class Siesta:
             An instance of Siesta
         """
         parser = argparse.ArgumentParser(description="Siesta Framework Initialization")
-        parser.add_argument('--config', type=str, help='Path to configuration JSON file')
+        parser.add_argument('--config', type=str, help='Path to configuration JSON file', required=False)
         parser.add_argument('module', type=str, help='Module to run')
         
         parsed_args, unknown_args = parser.parse_known_args(args)
         
-        app = cls(config_path=parsed_args.config)
+        app = cls(config_path=parsed_args.config if parsed_args.config else None)
         app.startup(cli_mode=True)
 
         for module in app.discovered_modules:

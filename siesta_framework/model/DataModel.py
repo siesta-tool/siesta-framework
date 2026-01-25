@@ -28,7 +28,7 @@ class EventConfig:
         self.timestamp_fields = timestamp_fields
     
     @staticmethod
-    def from_system_config(config: dict, log_format: str = 'xes') -> 'EventConfig':
+    def from_preprocess_config(config: dict, log_format: str = 'xes') -> 'EventConfig':
         """Create EventConfig from system configuration.
         
         Args:

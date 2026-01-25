@@ -1,19 +1,53 @@
 from siesta_framework.core.sparkManager import get_spark_session
 from siesta_framework.core.storageFactory import get_storage_manager
-from siesta_framework.core.config import get_config
 from siesta_framework.model.DataModel import Event, EventConfig
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql import functions as F
 from pyspark import RDD
 from datetime import datetime
 import os
+from fastapi import UploadFile
 
-def parse_log_file() -> RDD:
+
+def upload_log_file_object(file: UploadFile, destination_path: str) -> str:
+    """
+    Uploads an in-memory log file (UploadFile) to storage and returns the S3 path.
+    """
+    storage = get_storage_manager()
+    if not storage:
+        raise RuntimeError("Storage manager is not initialized.")
+
+    print(f"Uploading file object to storage as {destination_path}...")
+    s3_path = storage.upload_file_object(file, destination_path)
+    print(f"File uploaded to: {s3_path}")
+    #TODO: handle s3 path
+    return s3_path
+
+def parse_log_file_object(preprocess_config: dict, s3_path: str) -> RDD:
+    """
+    Parses an in-memory log file (UploadFile) based on its format and returns an RDD of Event objects.
+    """
+    #TODO: properly get a file name
+    log_path = preprocess_config.get("log_path")
+    if not log_path:
+        raise ValueError("Log path not specified in configuration")
+    
+    filename = os.path.basename(log_path)
+    _, ext = os.path.splitext(filename)
+    log_format = ext.lower().lstrip('.')
+    
+    if log_format == 'xes':
+        return parse_xml(s3_path, get_spark_session(), preprocess_config)
+    elif log_format == 'csv':
+        return parse_csv(s3_path, get_spark_session(), preprocess_config)
+    else:
+        raise ValueError(f"Unsupported log format: {log_format}")
+
+def parse_local_log_file(preprocess_config: dict) -> RDD:
     """
     Generic parsing function that determines the format and path from config.
     """
-    config = get_config()
-    log_path = config.get("log_path")
+    log_path = preprocess_config.get("log_path")
     
     
     if not log_path:
@@ -40,20 +74,20 @@ def parse_log_file() -> RDD:
     log_format = ext.lower().lstrip('.')
     
     if log_format == 'xes':
-        return parse_xml(s3_path, spark, config)
+        return parse_xml(s3_path, spark, preprocess_config)
     elif log_format == 'csv':
-        return parse_csv(s3_path, spark, config)
+        return parse_csv(s3_path, spark, preprocess_config)
     else:
         raise ValueError(f"Unsupported log format: {log_format}")
 
-def parse_csv(s3_path: str, spark: SparkSession, system_config: dict) -> RDD:
+def parse_csv(s3_path: str, spark: SparkSession, preprocess_config: dict) -> RDD:
     """
     Placeholder for CSV parsing function.
     """
     pass
 
 
-def parse_xml(s3_path: str, spark: SparkSession, system_config: dict) -> RDD:
+def parse_xml(s3_path: str, spark: SparkSession, preprocess_config: dict) -> RDD:
     """
     Parse_xml: Parses XES log file using Spark-XML and creates an RDD of Event objects.
     This approach is scalable and handles large files without loading everything into driver memory.
@@ -61,12 +95,12 @@ def parse_xml(s3_path: str, spark: SparkSession, system_config: dict) -> RDD:
     Args:
         s3_path: S3 Path to the log file
         spark: Active Spark Session
-        system_config: System configuration dictionary
+        preprocess_config: Preprocess configuration dictionary
     
     Returns:
         RDD containing Event objects
     """
-    config = EventConfig.from_system_config(system_config, "xes")
+    config = EventConfig.from_preprocess_config(preprocess_config, "xes")
     
     traces_df = spark.read.format("xml") \
         .option("rowTag", "trace") \

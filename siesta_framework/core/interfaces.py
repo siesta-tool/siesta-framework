@@ -1,4 +1,4 @@
-from typing import Any, Callable, Dict, ClassVar, Literal, Tuple, TypeAlias
+from typing import Any, Callable, Dict, ClassVar, List, Literal, Tuple, TypeAlias
 from abc import ABC, abstractmethod
 from pyspark import RDD
 
@@ -35,7 +35,7 @@ class SiestaModule(ABC):
         """Lifecycle hook: Called when the framework starts."""
         pass
 
-    def run(*args: Any, **kwargs: Any) -> Any:
+    def run(args: Any, **kwargs: Any) -> Any:
         """Main execution method for the module."""
         pass
 
