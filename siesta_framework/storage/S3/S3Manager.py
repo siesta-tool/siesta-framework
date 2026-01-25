@@ -44,6 +44,27 @@ class S3Manager(StorageManager):
         self.initialize_spark(config)
         self.initialize_db(config)
     
+    def _resolve_kafka_servers(self, config: Dict[str, Any]) -> str:
+        # Resolve Kafka address based on Spark deployment mode
+        kafka_servers = config.get("kafka_bootstrap_servers", "localhost:9092")
+        spark_master = config.get("spark_master", "local[*]")
+        
+        # If using remote Spark cluster (Docker), use Docker bridge IP for Kafka
+        # This IP is accessible from BOTH the host (driver) and Docker containers (executors)
+        if spark_master.startswith("spark://"):
+            if "localhost" in kafka_servers or "127.0.0.1" in kafka_servers:
+                try:
+                    bridge_ip = self.spark_manager.get_docker_bridge_ip()
+                    kafka_servers = kafka_servers.replace("localhost", bridge_ip).replace("127.0.0.1", bridge_ip)
+                    print(f"S3Manager: Using Docker bridge IP for Kafka: {kafka_servers}")
+                except Exception as e:
+                    print(f"S3Manager: Warning - could not get bridge IP: {e}")
+        else:
+            # Local mode - localhost works fine
+            print(f"S3Manager: Using local Kafka address: {kafka_servers}")
+        return kafka_servers
+
+
     def initialize_spark(self, config: Dict[str, Any]) -> None:
         """
         Initialize the Spark session configuration for S3 access.
@@ -69,18 +90,21 @@ class S3Manager(StorageManager):
 
         # If streaming is enabled, begin listening to kafka
         if config.get("enable_streaming", False):
+            print("S3Manager: Setting up streaming from Kafka...")
             from pyspark.sql.functions import col, from_json
-            from pyspark.sql.types import StructType, StructField, StringType, IntegerType, LongType
             
-            # Define schema for incoming JSON events
-            schema = EventConfig.from_system_config(config,"json").get_event_schema()
-                        
+            # Define schema for incoming JSON events using source field names
+            schema = EventConfig.from_system_config(config, "json").get_source_schema()
+            
+            kafka_servers = self._resolve_kafka_servers(config)
+
             # Read streaming data from Kafka
             raw_events_streaming_df = (self.spark.readStream
                 .format("kafka")
-                .option("kafka.bootstrap.servers", config.get("kafka_bootstrap_servers", "localhost:9092"))
+                .option("kafka.bootstrap.servers", kafka_servers)
                 .option("subscribe", config.get("kafka_topic", "log_events"))
                 .option("startingOffsets", "latest")
+                .option("failOnDataLoss", "false")
                 .load())
 
             # Parse JSON from Kafka value field and write as JSON Lines
@@ -89,13 +113,16 @@ class S3Manager(StorageManager):
             ).select("data.*")
             
             # Store parsed events as JSON lines by 1-min triggering to bundle rows into file
-            raw_rt_query = (parsed_events_df
+            self.streaming_query = (parsed_events_df
                 .writeStream
                 .format("json")
                 .option("path", config.get("s3_raw_events_location", "s3a://siesta/raw_events/rt/"))
                 .option("checkpointLocation", config.get("s3_checkpoint_location", "s3a://siesta/checkpoints/rt/"))
+                .outputMode("append")
                 .trigger(processingTime='1 minute')
                 .start())
+            
+            print(f"S3Manager: Started streaming query from Kafka topic '{config.get('kafka_topic', 'log_events')}' to S3.")
         
         print("S3Manager: Spark session configured for S3 access.")
     

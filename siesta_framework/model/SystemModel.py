@@ -18,11 +18,17 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "clear_existing": False,
     "is_continued": False,
     "is_streaming": False,
+
+    "enable_streaming": True,
     
     # Spark configuration
-    "spark_master": "local",
+    "spark_master": "spark://localhost:7077",
     "spark_app_name": "SiestaFramework",
     
+    # Kafka configuration
+    "kafka_bootstrap_servers": "localhost:9092",
+    "kafka_topic": "log_events",
+
     # Log parsing configuration
     "field_mappings": {
         "xes": {

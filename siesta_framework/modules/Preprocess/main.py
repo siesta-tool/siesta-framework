@@ -22,6 +22,11 @@ class Preprocessor(SiestaModule):
         match module:
             case ["testparse"]:
                 print("Running testparse...")
+                import time
+                # while True:
+                time.sleep(10)
+                    # break
+                exit(0)
                 events_rdd = parse_log_file()
                 
                 storage = get_storage_manager()

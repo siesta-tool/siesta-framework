@@ -85,7 +85,15 @@ class EventConfig:
 
     def get_event_schema(self) -> StructType:
         """Return the Spark schema for Event based on field mappings."""
-        return StructType([StructField(x, StringType(), True) for x in self.field_mappings.items()])
+        return StructType([StructField(str(x), StringType(), True) for x in self.field_mappings.keys()])
+    
+    def get_source_schema(self) -> StructType:
+        """Return the Spark schema using source field names for parsing raw data."""
+        fields = []
+        for event_field, source_field in self.field_mappings.items():
+            if source_field is not None:  # Skip computed fields
+                fields.append(StructField(str(source_field), StringType(), True))
+        return StructType(fields)
 
 
 class Event:

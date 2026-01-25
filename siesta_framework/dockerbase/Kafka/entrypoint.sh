@@ -1,6 +1,22 @@
 #!/bin/bash
 set -e
 
+# Detect Host IP (Docker Gateway) dynamically
+# This ensures that the advertised listener matches the bridge IP that 
+# Spark executors (in containers) use to reach the host/kafka.
+HOST_IP=$(ip route show | awk '/default/ {print $3}')
+if [ -z "$HOST_IP" ]; then
+    echo "Warning: Could not detect host IP, falling back to 172.17.0.1"
+    HOST_IP="172.17.0.1"
+fi
+echo "Detected Host IP: $HOST_IP"
+
+# Replace placeholder in KAFKA_ADVERTISED_LISTENERS
+if [[ "$KAFKA_ADVERTISED_LISTENERS" == *"ADVERTISED_HOST_IP"* ]]; then
+    export KAFKA_ADVERTISED_LISTENERS=${KAFKA_ADVERTISED_LISTENERS/ADVERTISED_HOST_IP/$HOST_IP}
+    echo "Configured KAFKA_ADVERTISED_LISTENERS: $KAFKA_ADVERTISED_LISTENERS"
+fi
+
 # Start Kafka in the background
 /usr/bin/start-kafka.sh &
 KAFKA_PID=$!

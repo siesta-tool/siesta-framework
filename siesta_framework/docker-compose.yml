@@ -97,6 +97,12 @@ services:
       - zookeeper_data:/opt/zookeeper-3.4.13/data
     networks:
       - siesta-net
+    # Uncomment for docker swarm
+    # deploy:
+    #   replicas: 1
+    #   placement:
+    #     constraints:
+    #       - 'node.labels.host == node-name-4'
 
   kafka:
     container_name: kafka
@@ -111,7 +117,8 @@ services:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INSIDE:PLAINTEXT,OUTSIDE:PLAINTEXT
-      KAFKA_ADVERTISED_LISTENERS: INSIDE://:9093,OUTSIDE://localhost:9092
+      # ADVERTISED_HOST_IP is replaced by the container's gateway IP at runtime
+      KAFKA_ADVERTISED_LISTENERS: INSIDE://:9093,OUTSIDE://ADVERTISED_HOST_IP:9092
       KAFKA_LISTENERS: INSIDE://:9093,OUTSIDE://:9092
       KAFKA_INTER_BROKER_LISTENER_NAME: INSIDE
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
@@ -124,6 +131,12 @@ services:
       - siesta-net
     volumes:
       - kafka_data:/kafka
+    # Uncomment for docker swarm
+    # deploy:
+    #   replicas: 1
+    #   placement:
+    #     constraints:
+    #       - 'node.labels.host == node-name-4'
 
 volumes:
   minio-data: {}

@@ -166,7 +166,7 @@ def main():
     print(f"Using field mappings: {field_mappings}")
     
     # Get connection parameters from config or args
-    bootstrap_servers = args.bootstrap_servers or config.get('kafka_bootstrap_servers', 'localhost:9092')
+    bootstrap_servers = args.bootstrap_servers or config.get('kafka_bootstrap_servers', '172.17.0.1:9092')
     topic = args.topic or config.get('kafka_topic', 'log_events')
     trace_id_field = field_mappings.get('trace_id', 'trace_id')
     

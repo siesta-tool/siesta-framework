@@ -33,7 +33,7 @@ def create_consumer(bootstrap_servers: str, group_id: str = "kafka-consumer-scri
 
 def consume_messages(
     topic: str,
-    bootstrap_servers: str = "localhost:9092",
+    bootstrap_servers: str = "172.17.0.1:9092",
     group_id: str = "kafka-consumer-script",
     max_messages: int = None,
     timeout: float = 1.0
