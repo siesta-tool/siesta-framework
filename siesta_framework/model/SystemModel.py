@@ -28,6 +28,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # Kafka configuration
     "kafka_bootstrap_servers": "localhost:9092",
     "kafka_topic": "log_events",
+    "raw_events_dir": "raw_events",
+    "checkpoint_dir": "checkpoints",
 
     # Log parsing configuration
     "field_mappings": {

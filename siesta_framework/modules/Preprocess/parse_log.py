@@ -2,7 +2,7 @@ from siesta_framework.core.sparkManager import get_spark_session
 from siesta_framework.core.storageFactory import get_storage_manager
 from siesta_framework.core.config import get_config
 from siesta_framework.model.DataModel import Event, EventConfig
-from pyspark.sql import SparkSession
+from pyspark.sql import SparkSession, DataFrame
 from pyspark import RDD
 from datetime import datetime
 import os
@@ -203,6 +203,30 @@ def parse_csv(storage_path: str, spark: SparkSession, system_config: dict) -> RD
         .option("inferSchema", "true") \
         .load(storage_path)
     
+    return _parse_rows(config, df)
+
+def parse_json(storage_path: str, spark: SparkSession, system_config: dict) -> RDD:
+    """
+    Parse_json: Parses JSON log file using Spark JSON reader and creates an RDD of Event objects.
+    
+    Args:
+        storage_path: Path to the log file in storage
+        spark: Active Spark Session
+        system_config: System configuration dictionary
+    
+    Returns:
+        RDD containing Event objects
+    """
+    config = EventConfig.from_system_config(system_config, "json")
+    
+    # Read JSON into DataFrame
+    df = spark.read.format("json") \
+        .option("multiline", "true") \
+        .load(storage_path) 
+    
+    return _parse_rows(config, df)
+
+def _parse_rows(config: EventConfig, df: DataFrame) -> RDD:
     fields = config.get_event_fields().items() | config.get_trace_fields().items()
     source_keys = [source_key for _, source_key in fields if source_key]
 
@@ -239,6 +263,4 @@ def parse_csv(storage_path: str, spark: SparkSession, system_config: dict) -> RD
         return Event.from_dict(event_field_values)
     
     # Process event rows to RDD of Event objects
-    events_rdd = df.rdd.map(row_to_event)
-
-    return events_rdd
+    return df.rdd.map(row_to_event)

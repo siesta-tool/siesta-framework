@@ -6,6 +6,7 @@ from pyspark.sql import DataFrame
 from siesta_framework.core.interfaces import StorageManager
 from siesta_framework.model.StorageModel import MetaData
 from siesta_framework.model.DataModel import Event, EventConfig
+from siesta_framework.core.config import get_config
 
 
 class S3Manager(StorageManager):
@@ -21,7 +22,7 @@ class S3Manager(StorageManager):
     name = "S3 Storage Manager"
     version = "1.0.0"
    
-    def __init__(self, spark_manager, config: Dict[str, Any]):
+    def __init__(self, spark_manager, config: Dict[str, Any] = None):
         """Initialize the S3Manager with a spark manager instance and configuration.
         
         Args:
@@ -30,21 +31,23 @@ class S3Manager(StorageManager):
         """
         self.spark_manager = spark_manager
         self.spark = None
-        self.config = config
-        self.storage_namespace = config.get("storage_namespace", "siesta")
+        self.config = config if config is not None else get_config()
+        self.storage_namespace = self.config.get("storage_namespace", "siesta")
         
         # Initialize boto3 S3 client
         try:
-            self.s3_client = self._create_s3_client(config)
+            self.s3_client = self._create_s3_client(self.config)
         except Exception as e:
             print(f"Error initializing S3 client: {e}")
             raise
         
         # Initialize Spark and database
-        self.initialize_spark(config)
-        self.initialize_db(config)
+        self.initialize_spark(self.config)
+        self.initialize_db(self.config)
     
-    def _resolve_kafka_servers(self, config: Dict[str, Any]) -> str:
+    def _resolve_kafka_servers(self, config: Dict[str, Any] = None) -> str:
+        if config is None:
+            config = self.config
         # Resolve Kafka address based on Spark deployment mode
         kafka_servers = config.get("kafka_bootstrap_servers", "localhost:9092")
         spark_master = config.get("spark_master", "local[*]")
@@ -64,8 +67,49 @@ class S3Manager(StorageManager):
             print(f"S3Manager: Using local Kafka address: {kafka_servers}")
         return kafka_servers
 
+    def initialize_streaming_collector(self, config: Dict[str, Any] = None) -> None:
+        """
+        Set up streaming from Kafka to S3 if enabled in configuration.
+        Args:
+            config: Configuration dictionary containing streaming settings
+        """
+        # Begin listening to kafka
+        print("S3Manager: Setting up streaming from Kafka...")
+        from pyspark.sql.functions import col, from_json
+        
+        # Define schema for incoming JSON events using source field names
+        schema = EventConfig.from_system_config(config, "json").get_source_schema()
+        
+        kafka_servers = self._resolve_kafka_servers(config)
 
-    def initialize_spark(self, config: Dict[str, Any]) -> None:
+        # Read streaming data from Kafka
+        raw_events_streaming_df = (self.spark.readStream
+            .format("kafka")
+            .option("kafka.bootstrap.servers", kafka_servers)
+            .option("subscribe", config.get("kafka_topic", "log_events"))
+            .option("startingOffsets", "latest")
+            .option("failOnDataLoss", "false")
+            .load())
+
+        # Parse JSON from Kafka value field and write as JSON Lines
+        parsed_events_df = raw_events_streaming_df.select(
+            from_json(col("value").cast("string"), schema).alias("data")
+        ).select("data.*")
+        
+        # Store parsed events as JSON lines by 1-min triggering to bundle rows into file
+        self.streaming_query = (parsed_events_df
+            .writeStream
+            .format("json")
+            .option("path", f"s3a://{config.get('storage_namespace', 'siesta')}/{config.get('log_name', 'default_log')}/{config.get('raw_events_dir', 'raw_events')}/rt/")
+            .option("checkpointLocation", f"s3a://{config.get('storage_namespace', 'siesta')}/{config.get('log_name', 'default_log')}/{config.get('checkpoint_dir', 'checkpoints')}/rt/")
+            .outputMode("append")
+            .trigger(processingTime='1 minute')
+            .start())
+        
+        print(f"S3Manager: Started streaming query from Kafka topic '{config.get('kafka_topic', 'log_events')}' to S3.")
+    
+
+    def initialize_spark(self, config: Dict[str, Any] = None) -> None:
         """
         Initialize the Spark session configuration for S3 access.
         Assumes spark manager has already been started.
@@ -73,6 +117,8 @@ class S3Manager(StorageManager):
         Args:
             config: Configuration dictionary containing Spark and S3 settings
         """
+        if config is None:
+            config = self.config
         self.spark = self.spark_manager.get_spark_session()
         
         if self.spark is None:
@@ -86,47 +132,10 @@ class S3Manager(StorageManager):
             self.spark.conf.set("spark.hadoop.fs.s3a.endpoint", config["s3_endpoint"])
         else:
             self.spark.conf.se
-
-
-        # If streaming is enabled, begin listening to kafka
-        if config.get("enable_streaming", False):
-            print("S3Manager: Setting up streaming from Kafka...")
-            from pyspark.sql.functions import col, from_json
-            
-            # Define schema for incoming JSON events using source field names
-            schema = EventConfig.from_system_config(config, "json").get_source_schema()
-            
-            kafka_servers = self._resolve_kafka_servers(config)
-
-            # Read streaming data from Kafka
-            raw_events_streaming_df = (self.spark.readStream
-                .format("kafka")
-                .option("kafka.bootstrap.servers", kafka_servers)
-                .option("subscribe", config.get("kafka_topic", "log_events"))
-                .option("startingOffsets", "latest")
-                .option("failOnDataLoss", "false")
-                .load())
-
-            # Parse JSON from Kafka value field and write as JSON Lines
-            parsed_events_df = raw_events_streaming_df.select(
-                from_json(col("value").cast("string"), schema).alias("data")
-            ).select("data.*")
-            
-            # Store parsed events as JSON lines by 1-min triggering to bundle rows into file
-            self.streaming_query = (parsed_events_df
-                .writeStream
-                .format("json")
-                .option("path", config.get("s3_raw_events_location", "s3a://siesta/raw_events/rt/"))
-                .option("checkpointLocation", config.get("s3_checkpoint_location", "s3a://siesta/checkpoints/rt/"))
-                .outputMode("append")
-                .trigger(processingTime='1 minute')
-                .start())
-            
-            print(f"S3Manager: Started streaming query from Kafka topic '{config.get('kafka_topic', 'log_events')}' to S3.")
-        
+    
         print("S3Manager: Spark session configured for S3 access.")
     
-    def _create_s3_client(self, config: Dict[str, Any]):
+    def _create_s3_client(self, config: Dict[str, Any] = None):
         """Create and configure boto3 S3 client.
         
         Args:
@@ -135,6 +144,8 @@ class S3Manager(StorageManager):
         Returns:
             boto3 S3 client
         """
+        if config is None:
+            config = self.config
         s3_config = {}
         
         if config.get("s3_access_key") and config.get("s3_secret_key"):
@@ -146,7 +157,7 @@ class S3Manager(StorageManager):
         
         return boto3.client('s3', **s3_config)
     
-    def initialize_db(self, config: Dict[str, Any]) -> None:
+    def initialize_db(self, config: Dict[str, Any] = None) -> None:
         """
         Create the appropriate table structure in S3.
         
@@ -155,6 +166,8 @@ class S3Manager(StorageManager):
         Args:
             config: Configuration dictionary containing database settings
         """
+        if config is None:
+            config = self.config
         log_name = config.get("log_name", "default")
         
         # Ensure bucket exists
@@ -195,9 +208,9 @@ class S3Manager(StorageManager):
             except ClientError as e:
                 print(f"S3Manager: Error clearing existing data: {e}")
         
-        print(f"S3Manager: Database structure initialized at s3://{self.storage_namespace}/{log_name}")
-    
-    def get_metadata(self, config: Dict[str, Any]) -> MetaData:
+        print(f"S3Manager: Database structure initialized at s3a://{self.storage_namespace}/{log_name}")
+
+    def get_metadata(self, config: Dict[str, Any] = None) -> MetaData:
         """
         Construct metadata by loading existing metadata from S3 or creating new.
         
@@ -207,6 +220,8 @@ class S3Manager(StorageManager):
         Returns:
             MetaData object containing the metadata
         """
+        if config is None:
+            config = self.config
         log_name = config.get("log_name", "default")
         metadata = MetaData(storage_namespace=self.storage_namespace, log_name=log_name)
         

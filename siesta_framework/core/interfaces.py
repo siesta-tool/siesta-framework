@@ -85,6 +85,16 @@ class StorageManager(ABC):
         pass
     
     @abstractmethod
+    def initialize_streaming_collector(self, config: Dict[str, Any] = None) -> None:
+        """
+        Initialize streaming context if necessary.
+
+        Args:
+            config: Configuration dictionary containing streaming settings
+        """
+        pass
+    
+    @abstractmethod
     def get_metadata(self, config: Dict[str, Any]) -> Any:
         """
         Construct metadata based on data already stored in the database and new configuration.
