@@ -35,7 +35,7 @@ class SiestaModule(ABC):
         """Lifecycle hook: Called when the framework starts."""
         pass
 
-    def run(args: Any, **kwargs: Any) -> Any:
+    def run(self, args: Any, **kwargs: Any) -> Any:
         """Main execution method for the module."""
         pass
 
