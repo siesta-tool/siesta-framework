@@ -9,8 +9,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "log_path": "datasets/test.xes",
     
     # S3/MinIO configuration
-    "s3_access_key": "",
-    "s3_secret_key": "",
+    "s3_access_key": "minioadmin",
+    "s3_secret_key": "minioadmin",
     "s3_endpoint": "http://localhost:9000",
     "s3_region": "us-east-1",
     
@@ -27,7 +27,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     
     # Kafka configuration
     "kafka_bootstrap_servers": "localhost:9092",
-    "kafka_topic": "log_events",
+    "kafka_topic": "default_log", # Should match log_name
     "raw_events_dir": "raw_events",
     "checkpoint_dir": "checkpoints",
 

@@ -8,7 +8,36 @@ This script consumes messages from a Kafka topic and prints them to stdout.
 import argparse
 import json
 import sys
+from pathlib import Path
+from typing import Dict, Any, Optional
 from confluent_kafka import Consumer, KafkaError
+
+# Import default config from SystemModel
+try:
+    from siesta_framework.model.SystemModel import DEFAULT_CONFIG
+except ImportError:
+    # Fallback if running from different location
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from model.SystemModel import DEFAULT_CONFIG
+
+
+def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
+    """Load configuration from JSON file or use defaults.
+    
+    Args:
+        config_path: Path to config file. If None or file doesn't exist, uses DEFAULT_CONFIG.
+        
+    Returns:
+        Configuration dictionary
+    """
+    if config_path and Path(config_path).exists():
+        with open(config_path, 'r') as f:
+            return json.load(f)
+    elif config_path:
+        print(f"Warning: Config file '{config_path}' not found, using DEFAULT_CONFIG from SystemModel")
+    
+    # Use default config from SystemModel
+    return DEFAULT_CONFIG
 
 
 def create_consumer(bootstrap_servers: str, group_id: str = "kafka-consumer-script") -> Consumer:
@@ -116,17 +145,21 @@ def main():
     )
     
     parser.add_argument(
+        '--config',
+        type=str,
+        help='Path to config file (optional, defaults to SystemModel.DEFAULT_CONFIG)'
+    )
+    
+    parser.add_argument(
         '--topic',
         type=str,
-        default='log_events',
-        help='Kafka topic to consume from'
+        help='Kafka topic to consume from (overrides config)'
     )
     
     parser.add_argument(
         '--bootstrap-server',
         type=str,
-        default='localhost:9092',
-        help='Kafka bootstrap server address (host:port)'
+        help='Kafka bootstrap server address (host:port) (overrides config)'
     )
     
     parser.add_argument(
@@ -152,10 +185,21 @@ def main():
     
     args = parser.parse_args()
     
+    # Load configuration (uses DEFAULT_CONFIG if no config file specified)
+    print("Loading configuration...")
+    config = load_config(args.config)
+    
+    # Get connection parameters from config or args
+    bootstrap_servers = args.bootstrap_server or config.get('kafka_bootstrap_servers', '172.17.0.1:9092')
+    topic = args.topic or config.get('kafka_topic', 'log_events')
+    
+    print(f"Using topic: {topic}")
+    print(f"Using bootstrap servers: {bootstrap_servers}")
+    
     try:
         consume_messages(
-            topic=args.topic,
-            bootstrap_servers=args.bootstrap_server,
+            topic=topic,
+            bootstrap_servers=bootstrap_servers,
             group_id=args.group_id,
             max_messages=args.max_messages,
             timeout=args.timeout

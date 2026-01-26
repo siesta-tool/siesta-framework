@@ -4,8 +4,64 @@ from siesta_framework.core.config import get_config
 from siesta_framework.model.DataModel import Event, EventConfig
 from pyspark.sql import SparkSession, DataFrame
 from pyspark import RDD
+from pyspark.sql.types import StringType, IntegerType, MapType
 from datetime import datetime
 import os
+
+
+def _cast_value_by_schema(field_name: str, value, config: EventConfig):
+    """Cast a value to the appropriate type based on Event schema.
+    
+    Args:
+        field_name: Name of the Event field
+        value: Raw value to cast
+        config: EventConfig instance for timestamp field detection
+    
+    Returns:
+        Casted value according to Event schema
+    """
+    if value is None:
+        return None
+    
+    schema = Event.get_schema()
+    field_type = None
+    
+    # Find the field type in schema
+    for field in schema.fields:
+        if field.name == field_name:
+            field_type = field.dataType
+            break
+    
+    if field_type is None:
+        # Field not in schema, return as string
+        return str(value)
+    
+    # Cast based on type
+    if isinstance(field_type, IntegerType):
+        try:
+            return int(value)
+        except (ValueError, TypeError):
+            return None
+    elif isinstance(field_type, StringType):
+        # For timestamp fields, convert to ISO format string if needed
+        if config.is_timestamp_field(field_name):
+            if isinstance(value, datetime):
+                return value.isoformat()
+            elif isinstance(value, str):
+                try:
+                    dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+                    return dt.isoformat()
+                except:
+                    return value
+        return str(value)
+    elif isinstance(field_type, MapType):
+        # For attributes, ensure it's a dict with string values
+        if isinstance(value, dict):
+            return {str(k): str(v) for k, v in value.items()}
+        return {}
+    
+    return value
+
 
 def parse_log_file() -> RDD:
     """
@@ -140,16 +196,8 @@ def parse_xml(storage_path: str, spark: SparkSession, system_config: dict) -> RD
                         if matching_field:
                             mapped = True
                             event_field_name, source_key = matching_field
-                            # Parse timestamps if needed
-                            if config.is_timestamp_field(event_field_name):
-                                if isinstance(attr_value, str):
-                                    try:
-                                        attr_value = datetime.fromisoformat(attr_value.replace('Z', '+00:00'))
-                                    except:
-                                        attr_value = None
-                            else:
-                                attr_value = str(attr_value)
-                            
+                            # Cast value according to Event schema
+                            attr_value = _cast_value_by_schema(event_field_name, attr_value, config)
                             event_field_values[event_field_name] = attr_value
                         
                         # If not mapped to a field, store in extra attributes
@@ -238,13 +286,8 @@ def _parse_rows(config: EventConfig, df: DataFrame) -> RDD:
         for field_name, source_key in fields:
             if source_key and source_key in row.__fields__:
                 value = row[source_key]
-                # Parse timestamps if needed
-                if config.is_timestamp_field(field_name):
-                    if isinstance(value, str):
-                        try:
-                            value = datetime.fromisoformat(value.replace('Z', '+00:00'))
-                        except:
-                            value = None
+                # Cast value according to Event schema
+                value = _cast_value_by_schema(field_name, value, config)
                 event_field_values[field_name] = value
             elif config.is_computed_field(field_name):
                 # Handle computed fields if needed

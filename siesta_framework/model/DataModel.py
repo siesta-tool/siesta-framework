@@ -94,6 +94,10 @@ class EventConfig:
             if source_field is not None:  # Skip computed fields
                 fields.append(StructField(str(source_field), StringType(), True))
         return StructType(fields)
+    
+    def __reduce__(self):
+        return (self.__class__, (self.field_mappings, self.trace_level_fields, 
+                             self.timestamp_fields, self.attributes_mapping))
 
 
 class Event:
@@ -140,7 +144,7 @@ class Event:
             "activity": self.activity,
             "trace_id": self.trace_id if self.trace_id else None,
             "position": self.position,
-            "start_timestamp": self.start_timestamp.isoformat() if self.start_timestamp else None,
+            "start_timestamp": self.start_timestamp.isoformat() if self.start_timestamp and hasattr(self.start_timestamp, "isoformat") else self.start_timestamp,
             "attributes": self.attributes if self.attributes else {}
         }
         return r

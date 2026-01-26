@@ -124,7 +124,7 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       # Auto-create topics: format is "topic_name:partitions:replication_factor"
       # Multiple topics can be separated by commas
-      KAFKA_CREATE_TOPICS: "log_events:1:1"
+      KAFKA_CREATE_TOPICS: "log_events:1:1,default_log:1:1"
     depends_on:
       - zookeeper
     networks:

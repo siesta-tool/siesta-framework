@@ -74,7 +74,7 @@ class S3Manager(StorageManager):
             config: Configuration dictionary containing streaming settings
         """
         # Begin listening to kafka
-        print("S3Manager: Setting up streaming from Kafka...")
+        print("S3Manager: Setting up streaming from Kafka for log " + config.get("log_name", "default_log") + "...")
         from pyspark.sql.functions import col, from_json
         
         # Define schema for incoming JSON events using source field names
@@ -86,7 +86,7 @@ class S3Manager(StorageManager):
         raw_events_streaming_df = (self.spark.readStream
             .format("kafka")
             .option("kafka.bootstrap.servers", kafka_servers)
-            .option("subscribe", config.get("kafka_topic", "log_events"))
+            .option("subscribe", config.get("kafka_topic", "default_log"))
             .option("startingOffsets", "latest")
             .option("failOnDataLoss", "false")
             .load())
@@ -97,17 +97,43 @@ class S3Manager(StorageManager):
         ).select("data.*")
         
         # Store parsed events as JSON lines by 1-min triggering to bundle rows into file
-        self.streaming_query = (parsed_events_df
+        streaming_query = (parsed_events_df
             .writeStream
             .format("json")
-            .option("path", f"s3a://{config.get('storage_namespace', 'siesta')}/{config.get('log_name', 'default_log')}/{config.get('raw_events_dir', 'raw_events')}/rt/")
-            .option("checkpointLocation", f"s3a://{config.get('storage_namespace', 'siesta')}/{config.get('log_name', 'default_log')}/{config.get('checkpoint_dir', 'checkpoints')}/rt/")
+            .option("path", self.get_steaming_collector_path(config))
+            .option("checkpointLocation", f"s3a://{config.get('storage_namespace', 'siesta')}/{config.get('log_name', 'default_log')}/{config.get('checkpoint_dir', 'checkpoints')}/")
             .outputMode("append")
             .trigger(processingTime='1 minute')
             .start())
         
-        print(f"S3Manager: Started streaming query from Kafka topic '{config.get('kafka_topic', 'log_events')}' to S3.")
+        print(f"S3Manager: Started streaming query from Kafka topic '{config.get('kafka_topic', 'default_log')}' to S3.")
     
+    def get_steaming_collector_path(self, config: Dict[str, Any]) -> str:
+        """
+        Get the S3 path where the streaming collector stores data.
+        
+        Args:
+            config: Configuration dictionary containing streaming settings
+            
+        Returns:
+            Path as a string
+        """
+        return f"s3a://{config.get('storage_namespace', 'siesta')}/{config.get('log_name', 'default_log')}/{config.get('raw_events_dir', 'raw_events')}/"
+    
+    def get_checkpoint_location(self, config: Dict[str, Any] = None, checkpoint_type: str = "table") -> str:
+        """
+        Get the S3 path for streaming checkpoint location.
+        
+        Args:
+            config: Configuration dictionary containing checkpoint settings
+            checkpoint_type: Type of checkpoint (e.g., 'index', 'collector')
+            
+        Returns:
+            Path as a string
+        """
+        if config is None:
+            config = self.config
+        return f"s3a://{config.get('storage_namespace', 'siesta')}/{config.get('log_name', 'default_log')}/{config.get('checkpoint_dir', 'checkpoints')}/{checkpoint_type}/"
 
     def initialize_spark(self, config: Dict[str, Any] = None) -> None:
         """
@@ -299,7 +325,7 @@ class S3Manager(StorageManager):
             print("S3Manager: Upload successful.")
             
             # Construct S3A URI for Spark
-            return f"s3a://{self.storage_namespace}/{key}"
+            return f"s3a://{self.storage_namespace}/{self.config.get('log_name', 'default_log')}/batches/{key}"
         except Exception as e:
             print(f"S3Manager: Upload failed: {e}")
             raise
@@ -418,39 +444,39 @@ class S3Manager(StorageManager):
         except Exception as e:
             print(f"S3Manager: Error writing CountTable: {e}")
     
-    def write_sequence_table(self, sequence_rdd: RDD, metadata: MetaData) -> None:
-        """
-        Write traces to the SequenceTable in S3.
+    # def write_sequence_table(self, sequence_rdd: RDD, metadata: MetaData) -> None:
+    #     """
+    #     Write traces to the SequenceTable in S3.
         
-        The RDD should already be persisted and should not be modified.
-        Updates the metadata object.
+    #     The RDD should already be persisted and should not be modified.
+    #     Updates the metadata object.
         
-        Args:
-            sequence_rdd: RDD containing traces with new events (Event objects or dicts)
-            metadata: MetaData object containing the metadata
-        """
-        try:
-            if sequence_rdd.isEmpty():
-                print("S3Manager: Sequence RDD is empty, skipping write.")
-                return
+    #     Args:
+    #         sequence_rdd: RDD containing traces with new events (Event objects or dicts)
+    #         metadata: MetaData object containing the metadata
+    #     """
+    #     try:
+    #         if sequence_rdd.isEmpty():
+    #             print("S3Manager: Sequence RDD is empty, skipping write.")
+    #             return
 
-            from siesta_framework.model.StorageModel import SequenceTableEntry
+    #         from siesta_framework.model.StorageModel import SequenceTableEntry
             
-            # Use the schema from SequenceTableEntry to ensure consistency
-            schema = SequenceTableEntry.get_schema()
+    #         # Use the schema from SequenceTableEntry to ensure consistency
+    #         schema = SequenceTableEntry.get_schema()
             
-            first_element = sequence_rdd.first()
-            if not isinstance(first_element, dict):
-                event_dicts_rdd = sequence_rdd.map(lambda event: event.to_dict())
-            else:
-                event_dicts_rdd = sequence_rdd
+    #         first_element = sequence_rdd.first()
+    #         if not isinstance(first_element, dict):
+    #             event_dicts_rdd = sequence_rdd.map(lambda event: event.to_dict())
+    #         else:
+    #             event_dicts_rdd = sequence_rdd
 
-            df = self.spark.createDataFrame(event_dicts_rdd, schema=schema)
-            df.write.mode("append").parquet(metadata.sequence_table_path)
+    #         df = self.spark.createDataFrame(event_dicts_rdd, schema=schema)
+    #         df.write.mode("append").parquet(metadata.sequence_table_path)
             
-            print(f"S3Manager: Wrote traces to {metadata.sequence_table_path}")
-        except Exception as e:
-            print(f"S3Manager: Error writing SequenceTable: {e}")
+    #         print(f"S3Manager: Wrote traces to {metadata.sequence_table_path}")
+    #     except Exception as e:
+    #         print(f"S3Manager: Error writing SequenceTable: {e}")
     
     def write_single_table(self, sequence_rdd: RDD, metadata: MetaData) -> None:
         """
@@ -501,3 +527,30 @@ class S3Manager(StorageManager):
             print(f"S3Manager: Wrote {metadata.pair_count} pairs to {metadata.index_table_path}")
         except Exception as e:
             print(f"S3Manager: Error writing IndexTable: {e}")
+    
+
+    def write_sequence_table(self, events_df: DataFrame, config: Dict[str, Any] = None) -> None:
+        """
+        Write processed events to S3 in Delta format.
+        
+        Args:
+            events_df: DataFrame containing processed events
+            config: Configuration dictionary containing storage settings
+        """
+        if config is None:
+            config = self.config
+        
+        log_name = config.get("log_name", "default_log")
+        seq_table_path = f"s3a://{self.storage_namespace}/{log_name}/sequence_table/"
+        
+        try:
+            events_df.write \
+                .format("delta") \
+                .mode("append") \
+                .option("mergeSchema", "true") \
+                .save(seq_table_path)
+            
+            print(f"S3Manager: Wrote {events_df.count()} processed events to {seq_table_path}")
+        except Exception as e:
+            print(f"S3Manager: Error writing processed events: {e}")
+            raise

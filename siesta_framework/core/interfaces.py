@@ -95,6 +95,20 @@ class StorageManager(ABC):
         pass
     
     @abstractmethod
+    def get_steaming_collector_path(self, config: Dict[str, Any]) -> str:
+        """
+        Get the path where the streaming collector stores data.
+
+        Args:
+            config: Configuration dictionary containing streaming settings
+
+        Returns:
+            Path as a string
+        """
+        pass
+        
+    
+    @abstractmethod
     def get_metadata(self, config: Dict[str, Any]) -> Any:
         """
         Construct metadata based on data already stored in the database and new configuration.

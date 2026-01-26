@@ -9,6 +9,7 @@ to a Kafka topic for streaming processing.
 import json
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional
 from confluent_kafka import Producer
@@ -134,7 +135,7 @@ def generate_sample_events(field_mappings: Dict[str, str], count: int = 10):
         if position_field:
             event[position_field] = str((i % 4))  # Position in trace (0-based)
         if timestamp_field:
-            event[timestamp_field] = str(int(time.time() * 1000))  # milliseconds as string
+            event[timestamp_field] = datetime.now().isoformat()
         
         yield event
 

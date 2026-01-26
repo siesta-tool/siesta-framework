@@ -24,6 +24,12 @@ RUN curl -L -O https://repo1.maven.org/maven2/org/apache/spark/spark-sql-kafka-0
 # Create symlink so /usr/bin/python3 points to the Bitnami Python
 RUN ln -sf /opt/bitnami/python/bin/python3 /usr/bin/python3
 
+# Install Python dependencies required by siesta_framework
+RUN /opt/bitnami/python/bin/pip install --no-cache-dir \
+    boto3>=1.26.0 \
+    kafka-python>=2.0.0 \
+    pyspark>=3.5.0
+
 ENV SPARK_CONF_DIR=/opt/bitnami/spark/conf
 RUN echo "spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension" >> $SPARK_CONF_DIR/spark-defaults.conf && \
     echo "spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog" >> $SPARK_CONF_DIR/spark-defaults.conf
