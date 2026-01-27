@@ -24,7 +24,16 @@ RUN curl -L -O https://repo1.maven.org/maven2/org/apache/spark/spark-sql-kafka-0
 # Create symlink so /usr/bin/python3 points to the Bitnami Python
 RUN ln -sf /opt/bitnami/python/bin/python3 /usr/bin/python3
 
+
+
 # Install Python dependencies required by siesta_framework
+
+# If many dependencies are finally needed to exist in workers, 
+# use the following (update context in compose with ".") instead
+# RUN /opt/bitnami/python/bin/pip install --no-cache-dir --upgrade pip && \
+#     find /tmp/siesta_framework_build -name "requirements.txt" -type f -exec \
+#     /opt/bitnami/python/bin/pip install --no-cache-dir -r {} \; && \
+#     rm -rf /tmp/siesta_framework_build
 RUN /opt/bitnami/python/bin/pip install --no-cache-dir \
     boto3>=1.26.0 \
     kafka-python>=2.0.0 \
