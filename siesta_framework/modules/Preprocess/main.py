@@ -19,7 +19,6 @@ class Preprocessor(SiestaModule):
         
     name = "preprocess"
     version = "1.2.0"
-    __DEFAULT_PREPROCESS_CONFIG_PATH = str(Path(siesta_framework_package.__file__).parent / 'config' / 'siesta.config.json')
     spark: SparkSession
     storage: StorageManager
     preprocess_config: Dict[str, Any]
@@ -136,18 +135,16 @@ class Preprocessor(SiestaModule):
             # Check if the provided path exists
             if not Path(config_path).exists():
                 raise FileNotFoundError(f"Config file {config_path} not found.")
-        else:
-            config_path = self.__DEFAULT_PREPROCESS_CONFIG_PATH
 
-        # Load configuration
-        try:
-            with open(config_path, 'r') as f:
-                user_preprocess_config = json.load(f)
-                # Merge user config with defaults
-                self.load_preprocess_config(user_preprocess_config)
-                print(f"Configuration loaded from {config_path}")
-        except Exception as e:
-            raise RuntimeError(f"Error loading config from {config_path}: {e}")
+            # Load configuration
+            try:
+                with open(config_path, 'r') as f:
+                    user_preprocess_config = json.load(f)
+                    # Merge user config with defaults
+                    self.load_preprocess_config(user_preprocess_config)
+                    print(f"Configuration loaded from {config_path}")
+            except Exception as e:
+                raise RuntimeError(f"Error loading config from {config_path}: {e}")
                 
         print("Begin preprocessing...")
         events_rdd = parse_local_log_file(self.preprocess_config)

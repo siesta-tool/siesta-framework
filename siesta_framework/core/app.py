@@ -11,10 +11,9 @@ from siesta_framework.core.config import initialize_config, load_config
 import argparse
 
 class Siesta:
-    __DEFAULT_CONFIG_PATH = str(Path(siesta_framework_package.__file__).parent / 'config' / 'siesta.config.json')
 
     def __init__(self, config_path: str|None = None) -> None:
-        self.config = load_config(config_path or self.__DEFAULT_CONFIG_PATH)
+        self.config = load_config()
         self.storage_manager = None
         self.registered_routes: Dict[str, SiestaModule.ApiRoutes|None] = {}
 
