@@ -9,7 +9,7 @@ multiple layers.
 from typing import Dict, Any, Optional
 from pathlib import Path
 import json
-from siesta_framework.model.SystemModel import DEFAULT_CONFIG
+from siesta_framework.model.SystemModel import DEFAULT_SYSTEM_CONFIG
 
 _config: Optional[Dict[str, Any]] = None
 
@@ -24,7 +24,7 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
         Dictionary containing configuration merged with defaults
     """
     # Start with default config
-    config = DEFAULT_CONFIG.copy()
+    config = DEFAULT_SYSTEM_CONFIG.copy()
     
     if not config_path:
         return config
@@ -58,14 +58,14 @@ def initialize_config(config: Dict[str, Any]) -> None:
     _config = config
 
 
-def get_config() -> Dict[str, Any]:
+def get_system_config() -> Dict[str, Any]:
     """Get the current system configuration.
     
     Returns:
         Configuration dictionary. Returns DEFAULT_CONFIG if not initialized.
     """
     if _config is None:
-        return DEFAULT_CONFIG
+        return DEFAULT_SYSTEM_CONFIG
     return _config
 
 
@@ -79,7 +79,7 @@ def get_config_value(key: str, default: Any = None) -> Any:
     Returns:
         Configuration value or default
     """
-    config = get_config()
+    config = get_system_config()
     return config.get(key, default)
 
 

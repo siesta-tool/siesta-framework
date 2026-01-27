@@ -9,14 +9,26 @@
     <event>
       <string key="concept:name" value="A"/>
       <date key="time:timestamp" value="2025-01-01T09:00:00.000+00:00"/>
+      <string key="org:resource" value="r1"/>
+      <string key="org:role" value="clerk"/>
+      <float key="cost" value="5.0"/>
+      <string key="lifecycle:transition" value="complete"/>
     </event>
     <event>
       <string key="concept:name" value="B"/>
       <date key="time:timestamp" value="2025-01-01T09:05:00.000+00:00"/>
+      <string key="org:resource" value="r2"/>
+      <string key="org:role" value="analyst"/>
+      <float key="cost" value="7.5"/>
+      <string key="lifecycle:transition" value="complete"/>
     </event>
     <event>
       <string key="concept:name" value="C"/>
       <date key="time:timestamp" value="2025-01-01T09:10:00.000+00:00"/>
+      <string key="org:resource" value="r3"/>
+      <string key="org:role" value="system"/>
+      <float key="cost" value="2.0"/>
+      <string key="lifecycle:transition" value="complete"/>
     </event>
   </trace>
 
@@ -25,10 +37,18 @@
     <event>
       <string key="concept:name" value="A"/>
       <date key="time:timestamp" value="2025-01-01T10:00:00.000+00:00"/>
+      <string key="org:resource" value="r1"/>
+      <string key="org:role" value="clerk"/>
+      <float key="cost" value="5.0"/>
+      <string key="lifecycle:transition" value="complete"/>
     </event>
     <event>
       <string key="concept:name" value="C"/>
       <date key="time:timestamp" value="2025-01-01T10:07:00.000+00:00"/>
+      <string key="org:resource" value="r3"/>
+      <string key="org:role" value="system"/>
+      <float key="cost" value="2.0"/>
+      <string key="lifecycle:transition" value="complete"/>
     </event>
   </trace>
 
@@ -37,14 +57,26 @@
     <event>
       <string key="concept:name" value="B"/>
       <date key="time:timestamp" value="2025-01-01T11:00:00.000+00:00"/>
+      <string key="org:resource" value="r2"/>
+      <string key="org:role" value="analyst"/>
+      <float key="cost" value="7.5"/>
+      <string key="lifecycle:transition" value="complete"/>
     </event>
     <event>
       <string key="concept:name" value="C"/>
       <date key="time:timestamp" value="2025-01-01T11:03:00.000+00:00"/>
+      <string key="org:resource" value="r3"/>
+      <string key="org:role" value="system"/>
+      <float key="cost" value="2.0"/>
+      <string key="lifecycle:transition" value="complete"/>
     </event>
     <event>
       <string key="concept:name" value="D"/>
       <date key="time:timestamp" value="2025-01-01T11:15:00.000+00:00"/>
+      <string key="org:resource" value="r4"/>
+      <string key="org:role" value="manager"/>
+      <float key="cost" value="12.0"/>
+      <string key="lifecycle:transition" value="complete"/>
     </event>
   </trace>
 
@@ -53,10 +85,18 @@
     <event>
       <string key="concept:name" value="A"/>
       <date key="time:timestamp" value="2025-01-01T12:00:00.000+00:00"/>
+      <string key="org:resource" value="r1"/>
+      <string key="org:role" value="clerk"/>
+      <float key="cost" value="5.0"/>
+      <string key="lifecycle:transition" value="complete"/>
     </event>
     <event>
       <string key="concept:name" value="D"/>
       <date key="time:timestamp" value="2025-01-01T12:20:00.000+00:00"/>
+      <string key="org:resource" value="r4"/>
+      <string key="org:role" value="manager"/>
+      <float key="cost" value="12.0"/>
+      <string key="lifecycle:transition" value="complete"/>
     </event>
   </trace>
 

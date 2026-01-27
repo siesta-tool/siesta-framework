@@ -31,7 +31,7 @@ def get_docker_bridge_ip():
     # Fallback to default
     return "172.17.0.1"
 
-def startup(config: Dict[str, Any] = None) -> None:
+def startup(config: Dict[str, Any] = {}) -> None:
     """Initialize Spark session with configuration.
     
     Args:
@@ -68,20 +68,28 @@ def startup(config: Dict[str, Any] = None) -> None:
             "--add-opens=java.security.jgss/sun.security.krb5=ALL-UNNAMED"
         )
         
-        # Hadoop AWS packages for S3 support
-        packages = "org.apache.hadoop:hadoop-aws:3.4.1,com.amazonaws:aws-java-sdk-bundle:1.12.540"
+        # Hadoop AWS packages for S3 support and Delta Lake and Kafka
+        packages = "org.apache.hadoop:hadoop-aws:3.4.1,com.amazonaws:aws-java-sdk-bundle:1.12.540,io.delta:delta-spark_2.13:4.0.0,io.delta:delta-storage:4.0.0,org.apache.spark:spark-sql-kafka-0-10_2.13:4.0.0"
         
         builder = builder \
             .config("spark.driver.extraJavaOptions", java_options) \
             .config("spark.executor.extraJavaOptions", java_options) \
             .config("spark.driver.memory", driver_memory) \
             .config("spark.executor.memory", executor_memory) \
+            .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
+            .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
             .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem") \
             .config("spark.hadoop.fs.s3a.path.style.access", "true") \
             .config("spark.pyspark.python", "/opt/bitnami/python/bin/python3") \
             .config("spark.pyspark.driver.python", "python3") \
             .config("spark.executorEnv.PYSPARK_PYTHON", "/opt/bitnami/python/bin/python3") \
-            .config("spark.jars.packages", packages)
+            .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
+            .config("spark.databricks.delta.optimizeWrite.enabled", "true") \
+            .config("spark.databricks.delta.autoCompact.enabled", "true") \
+            .config("spark.delta.logStore.class", "org.apache.spark.sql.delta.storage.S3SingleDriverLogStore") \
+            .config("spark.hadoop.fs.s3a.fast.upload", "true") \
+            .config("spark.hadoop.fs.s3a.multipart.size", "104857600") \
+            .config("spark.jars.packages", packages) 
         
         # Configure S3 credentials if provided
         if config and config.get("s3_access_key") and config.get("s3_secret_key"):
@@ -125,7 +133,13 @@ def startup(config: Dict[str, Any] = None) -> None:
     except Exception as e:
         raise RuntimeError(f"Failed to initialize SparkSession: {e}")
 
-def get_spark_session():
+def get_spark_session() -> SparkSession:
+    """Get the active Spark session.
+    Returns:
+        Active SparkSession instance.
+    """
+    if spark_session is None:
+        raise RuntimeError("SparkSession not initialized. Call startup() first.")
     return spark_session
 
 def shutdown():

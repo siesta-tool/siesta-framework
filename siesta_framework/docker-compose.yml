@@ -66,7 +66,7 @@ services:
     #       - 'node.labels.host == node-name-2'
 
   minio:
-    container_name: minio
+    container_name: minio-server
     image: minio/minio:latest
     environment:
       s3_access_key: minioadmin
@@ -86,5 +86,59 @@ services:
     #     constraints:
     #       - 'node.labels.host == node-name-3'
 
+  zookeeper:
+    container_name: zookeeper
+    image: wurstmeister/zookeeper:latest
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+    volumes:
+      - zookeeper_data:/opt/zookeeper-3.4.13/data
+    networks:
+      - siesta-net
+    # Uncomment for docker swarm
+    # deploy:
+    #   replicas: 1
+    #   placement:
+    #     constraints:
+    #       - 'node.labels.host == node-name-4'
+
+  kafka:
+    container_name: kafka
+    image: siesta/kafka:latest
+    build:
+      context: dockerbase/Kafka
+      dockerfile: Kafka.dockerfile
+    ports:
+      - "9092:9092"
+      - "9093:9093"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INSIDE:PLAINTEXT,OUTSIDE:PLAINTEXT
+      # ADVERTISED_HOST_IP is replaced by the container's gateway IP at runtime
+      KAFKA_ADVERTISED_LISTENERS: INSIDE://:9093,OUTSIDE://ADVERTISED_HOST_IP:9092
+      KAFKA_LISTENERS: INSIDE://:9093,OUTSIDE://:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: INSIDE
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      # Auto-create topics: format is "topic_name:partitions:replication_factor"
+      # Multiple topics can be separated by commas
+      KAFKA_CREATE_TOPICS: "log_events:1:1,default_log:1:1"
+    depends_on:
+      - zookeeper
+    networks:
+      - siesta-net
+    volumes:
+      - kafka_data:/kafka
+    # Uncomment for docker swarm
+    # deploy:
+    #   replicas: 1
+    #   placement:
+    #     constraints:
+    #       - 'node.labels.host == node-name-4'
+
 volumes:
   minio-data: {}
+  kafka_data: {}
+  zookeeper_data: {}

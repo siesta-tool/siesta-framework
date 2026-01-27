@@ -1,3 +1,9 @@
+#!/usr/bin/env python3
+
+"""
+Script to install all dependencies from requirements.txt files in the project.
+"""
+
 import os
 import subprocess
 import sys
@@ -11,7 +17,7 @@ def install_dependencies():
         requirements_files.append("requirements.txt")
 
     # 2. Find all requirements
-    dirs = ["core", "modules", "storage", "api"]
+    dirs = ["core", "modules", "storage", "api", "scripts"]
     for dir in dirs:
         modele_dir = os.path.join(root, dir)
         if os.path.exists(modele_dir):
