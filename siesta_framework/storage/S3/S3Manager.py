@@ -1,12 +1,14 @@
 from typing import Any, Dict
 import boto3
 from botocore.exceptions import ClientError
+from fastapi import UploadFile
 from pyspark import RDD
 from pyspark.sql import DataFrame
 from siesta_framework.core.interfaces import StorageManager
 from siesta_framework.model.StorageModel import MetaData
 from siesta_framework.model.DataModel import Event, EventConfig
-from siesta_framework.core.config import get_config
+from siesta_framework.core.config import get_system_config
+import siesta_framework.core.sparkManager as SparkManager
 
 
 class S3Manager(StorageManager):
@@ -22,32 +24,26 @@ class S3Manager(StorageManager):
     name = "S3 Storage Manager"
     version = "1.0.0"
    
-    def __init__(self, spark_manager, config: Dict[str, Any] = None):
-        """Initialize the S3Manager with a spark manager instance and configuration.
+    def __init__(self):
+        """Initialize the S3Manager with a spark manager instance and configuration."""
         
-        Args:
-            spark_manager: The spark manager module that provides get_spark_session()
-            config: Configuration dictionary containing Spark and S3 settings
-        """
-        self.spark_manager = spark_manager
-        self.spark = None
-        self.config = config if config is not None else get_config()
-        self.storage_namespace = self.config.get("storage_namespace", "siesta")
+        self.spark = SparkManager.get_spark_session()
+        config = get_system_config()
+        self.storage_namespace = config.get("storage_namespace", "siesta")
         
         # Initialize boto3 S3 client
         try:
-            self.s3_client = self._create_s3_client(self.config)
+            self.s3_client = self._create_s3_client(config)
         except Exception as e:
             print(f"Error initializing S3 client: {e}")
             raise
         
         # Initialize Spark and database
-        self.initialize_spark(self.config)
-        self.initialize_db(self.config)
+        self.initialize_spark(config)
+        self.initialize_db(config)
     
-    def _resolve_kafka_servers(self, config: Dict[str, Any] = None) -> str:
-        if config is None:
-            config = self.config
+    def _resolve_kafka_servers(self) -> str:
+        config = get_system_config()
         # Resolve Kafka address based on Spark deployment mode
         kafka_servers = config.get("kafka_bootstrap_servers", "localhost:9092")
         spark_master = config.get("spark_master", "local[*]")
@@ -57,7 +53,7 @@ class S3Manager(StorageManager):
         if spark_master.startswith("spark://"):
             if "localhost" in kafka_servers or "127.0.0.1" in kafka_servers:
                 try:
-                    bridge_ip = self.spark_manager.get_docker_bridge_ip()
+                    bridge_ip = SparkManager.get_docker_bridge_ip()
                     kafka_servers = kafka_servers.replace("localhost", bridge_ip).replace("127.0.0.1", bridge_ip)
                     print(f"S3Manager: Using Docker bridge IP for Kafka: {kafka_servers}")
                 except Exception as e:
@@ -67,26 +63,27 @@ class S3Manager(StorageManager):
             print(f"S3Manager: Using local Kafka address: {kafka_servers}")
         return kafka_servers
 
-    def initialize_streaming_collector(self, config: Dict[str, Any] = None) -> None:
+    def initialize_streaming_collector(self, preprocess_config: Dict[str, Any] = {}) -> None:
         """
         Set up streaming from Kafka to S3 if enabled in configuration.
         Args:
-            config: Configuration dictionary containing streaming settings
+            preprocess_config: Configuration dictionary containing event settings
         """
+        config = get_system_config()
         # Begin listening to kafka
-        print("S3Manager: Setting up streaming from Kafka for log " + config.get("log_name", "default_log") + "...")
+        print("S3Manager: Setting up streaming from Kafka for log " + preprocess_config.get("log_name", "default_log") + "...")
         from pyspark.sql.functions import col, from_json
         
         # Define schema for incoming JSON events using source field names
-        schema = EventConfig.from_system_config(config, "json").get_source_schema()
+        schema = EventConfig.from_preprocess_config(preprocess_config, "json").get_source_schema()
         
-        kafka_servers = self._resolve_kafka_servers(config)
+        kafka_servers = self._resolve_kafka_servers()
 
         # Read streaming data from Kafka
-        raw_events_streaming_df = (self.spark.readStream
+        raw_events_streaming_df = (self.spark.readStream # type: ignore
             .format("kafka")
             .option("kafka.bootstrap.servers", kafka_servers)
-            .option("subscribe", config.get("kafka_topic", "default_log"))
+            .option("subscribe", preprocess_config.get("kafka_topic", "default_log"))
             .option("startingOffsets", "latest")
             .option("failOnDataLoss", "false")
             .load())
@@ -100,42 +97,42 @@ class S3Manager(StorageManager):
         streaming_query = (parsed_events_df
             .writeStream
             .format("json")
-            .option("path", self.get_steaming_collector_path(config))
-            .option("checkpointLocation", f"s3a://{config.get('storage_namespace', 'siesta')}/{config.get('log_name', 'default_log')}/{config.get('checkpoint_dir', 'checkpoints')}/")
+            .option("path", self.get_steaming_collector_path(preprocess_config))
+            .option("checkpointLocation", f"s3a://{config.get('storage_namespace', 'siesta')}/{preprocess_config.get('log_name', 'default_log')}/{config.get('checkpoint_dir', 'checkpoints')}/")
             .outputMode("append")
             .trigger(processingTime='1 minute')
             .start())
         
-        print(f"S3Manager: Started streaming query from Kafka topic '{config.get('kafka_topic', 'default_log')}' to S3.")
+        print(f"S3Manager: Started streaming query from Kafka topic '{preprocess_config.get('kafka_topic', 'default_log')}' to S3.")
     
-    def get_steaming_collector_path(self, config: Dict[str, Any]) -> str:
+    def get_steaming_collector_path(self, preprocess_config: Dict[str, Any]) -> str:
         """
         Get the S3 path where the streaming collector stores data.
         
         Args:
-            config: Configuration dictionary containing streaming settings
+            preprocess_config: Configuration dictionary containing streaming settings
             
         Returns:
             Path as a string
         """
-        return f"s3a://{config.get('storage_namespace', 'siesta')}/{config.get('log_name', 'default_log')}/{config.get('raw_events_dir', 'raw_events')}/"
+        config = get_system_config()
+        return f"s3a://{config.get('storage_namespace', 'siesta')}/{preprocess_config.get('log_name', 'default_log')}/{config.get('raw_events_dir', 'raw_events')}/"
     
-    def get_checkpoint_location(self, config: Dict[str, Any] = None, checkpoint_type: str = "table") -> str:
+    def get_checkpoint_location(self, preprocess_config: Dict[str, Any] = {}, checkpoint_type: str = "table") -> str:
         """
         Get the S3 path for streaming checkpoint location.
         
         Args:
-            config: Configuration dictionary containing checkpoint settings
+            preprocess_config: Configuration dictionary containing checkpoint settings
             checkpoint_type: Type of checkpoint (e.g., 'index', 'collector')
             
         Returns:
             Path as a string
         """
-        if config is None:
-            config = self.config
-        return f"s3a://{config.get('storage_namespace', 'siesta')}/{config.get('log_name', 'default_log')}/{config.get('checkpoint_dir', 'checkpoints')}/{checkpoint_type}/"
+        config = get_system_config()
+        return f"s3a://{config.get('storage_namespace', 'siesta')}/{preprocess_config.get('log_name', 'default_log')}/{preprocess_config.get('checkpoint_dir', 'checkpoints')}/{checkpoint_type}/" #TODO: Maybe checkpoint dir should be in system config?
 
-    def initialize_spark(self, config: Dict[str, Any] = None) -> None:
+    def initialize_spark(self, config: Dict[str, Any] = {}) -> None:
         """
         Initialize the Spark session configuration for S3 access.
         Assumes spark manager has already been started.
@@ -143,9 +140,7 @@ class S3Manager(StorageManager):
         Args:
             config: Configuration dictionary containing Spark and S3 settings
         """
-        if config is None:
-            config = self.config
-        self.spark = self.spark_manager.get_spark_session()
+        self.spark = SparkManager.get_spark_session()
         
         if self.spark is None:
             raise RuntimeError("Spark session not available. Ensure spark manager is started before initializing S3Manager.")
@@ -156,12 +151,12 @@ class S3Manager(StorageManager):
         
         if config.get("s3_endpoint"):
             self.spark.conf.set("spark.hadoop.fs.s3a.endpoint", config["s3_endpoint"])
-        else:
-            self.spark.conf.se
+        # else:
+        #     self.spark.conf.se
     
         print("S3Manager: Spark session configured for S3 access.")
     
-    def _create_s3_client(self, config: Dict[str, Any] = None):
+    def _create_s3_client(self, config: Dict[str, Any] = {}):
         """Create and configure boto3 S3 client.
         
         Args:
@@ -183,18 +178,17 @@ class S3Manager(StorageManager):
         
         return boto3.client('s3', **s3_config)
     
-    def initialize_db(self, config: Dict[str, Any] = None) -> None:
+    def initialize_db(self, preprocess_config: Dict[str, Any] = {}) -> None:
         """
         Create the appropriate table structure in S3.
         
         This method can optionally clear previous data based on configuration.
         
         Args:
-            config: Configuration dictionary containing database settings
+            preprocess_config: Configuration dictionary containing database settings
         """
-        if config is None:
-            config = self.config
-        log_name = config.get("log_name", "default")
+        
+        log_name = preprocess_config.get("log_name", "default")
         
         # Ensure bucket exists
         try:
@@ -215,7 +209,7 @@ class S3Manager(StorageManager):
                 raise
         
         # If clear_existing is True, delete all objects under the log_name prefix
-        if config.get("clear_existing", False):
+        if preprocess_config.get("clear_existing", False):
             prefix = f"{log_name}/"
             try:
                 # List and delete all objects with this prefix
@@ -236,7 +230,7 @@ class S3Manager(StorageManager):
         
         print(f"S3Manager: Database structure initialized at s3a://{self.storage_namespace}/{log_name}")
 
-    def get_metadata(self, config: Dict[str, Any] = None) -> MetaData:
+    def get_metadata(self, preprocess_config: Dict[str, Any] = {}) -> MetaData:
         """
         Construct metadata by loading existing metadata from S3 or creating new.
         
@@ -246,31 +240,30 @@ class S3Manager(StorageManager):
         Returns:
             MetaData object containing the metadata
         """
-        if config is None:
-            config = self.config
-        log_name = config.get("log_name", "default")
+        
+        log_name = preprocess_config.get("log_name", "default")
         metadata = MetaData(storage_namespace=self.storage_namespace, log_name=log_name)
         
         # Try to load existing metadata
         try:
-            metadata_df = self.spark.read.parquet(metadata.metadata_table_path)
+            metadata_df = self.spark.read.parquet(metadata.metadata_table_path) # type: ignore
             if metadata_df.count() > 0:
                 row = metadata_df.first()
                 # Populate MetaData object from DataFrame row
-                metadata.trace_count = row.get("trace_count", 0)
-                metadata.event_count = row.get("event_count", 0)
-                metadata.pair_count = row.get("pair_count", 0)
-                metadata.is_continued = row.get("is_continued", False)
-                metadata.is_streaming = row.get("is_streaming", False)
-                metadata.start_timestamp = row.get("start_timestamp")
-                metadata.end_timestamp = row.get("end_timestamp")
-                metadata.last_mined_timestamp = row.get("last_mined_timestamp")
+                metadata.trace_count = row.get("trace_count", 0) # type: ignore
+                metadata.event_count = row.get("event_count", 0) # type: ignore
+                metadata.pair_count = row.get("pair_count", 0) # type: ignore
+                metadata.is_continued = row.get("is_continued", False) # type: ignore
+                metadata.is_streaming = row.get("is_streaming", False) # type: ignore
+                metadata.start_timestamp = row.get("start_timestamp") # type: ignore
+                metadata.end_timestamp = row.get("end_timestamp") # type: ignore
+                metadata.last_mined_timestamp = row.get("last_mined_timestamp") # type: ignore
                 print(f"S3Manager: Loaded existing metadata for {log_name}")
         except Exception as e:
             print(f"S3Manager: No existing metadata found, creating new. Error: {e}")
             # Initialize with defaults from config
-            metadata.is_continued = config.get("is_continued", False)
-            metadata.is_streaming = config.get("is_streaming", False)
+            metadata.is_continued = preprocess_config.get("is_continued", False)
+            metadata.is_streaming = preprocess_config.get("is_streaming", False)
             metadata.trace_count = 0
             metadata.event_count = 0
             metadata.pair_count = 0
@@ -298,26 +291,27 @@ class S3Manager(StorageManager):
         }
         
         # Create DataFrame and write to S3
-        metadata_df = self.spark.createDataFrame([metadata_dict])
+        metadata_df = self.spark.createDataFrame([metadata_dict]) # type: ignore
         metadata_df.write.mode("overwrite").parquet(metadata.metadata_table_path)
         print(f"S3Manager: Metadata written to {metadata.metadata_table_path}")
 
-    def upload_file(self, local_path: str, destination_path: str) -> str:
+    def upload_file(self, preprocess_config: Dict[str, Any], local_path: str, destination_path: str) -> str:
         """
         Upload a local file to S3.
         
         Args:
+            preprocess_config: Configuration dictionary passed during execution
             local_path: Path to the local file
             destination_path: Path/Name for the file in storage (key)
             
         Returns:
             The S3A URI to access the uploaded file
         """
-        import os
         
         key = destination_path
         if key.startswith("/"):
             key = key[1:]
+        key = f"{preprocess_config.get('log_name', 'default_log')}/batches/{key}"
             
         print(f"S3Manager: Uploading '{local_path}' to bucket '{self.storage_namespace}' with key '{key}'...")
         try:
@@ -325,14 +319,41 @@ class S3Manager(StorageManager):
             print("S3Manager: Upload successful.")
             
             # Construct S3A URI for Spark
-            return f"s3a://{self.storage_namespace}/{self.config.get('log_name', 'default_log')}/batches/{key}"
+            return f"s3a://{self.storage_namespace}/{key}"
+        except Exception as e:
+            print(f"S3Manager: Upload failed: {e}")
+            raise
+    
+    def upload_file_object(self, preprocess_config: Dict[str, Any], file_obj: UploadFile, destination_path: str) -> str:
+        """
+        Upload an in-memory file (UploadFile) to S3.
+        
+        Args:
+            preprocess_config: Configuration dictionary passed during execution
+            file_obj: UploadFile object containing the file data
+            destination_path: Path/Name for the file in storage (key)
+        Returns:
+            The S3A URI to access the uploaded file
+        """
+        
+        key = destination_path
+        if key.startswith("/"):
+            key = key[1:]
+        
+        print(f"S3Manager: Uploading in-memory file to bucket '{self.storage_namespace}' with key '{key}'...")
+        try:
+            self.s3_client.upload_fileobj(file_obj.file, self.storage_namespace, key)
+            print("S3Manager: Upload successful.")
+            
+            # Construct S3A URI for Spark
+            return f"s3a://{self.storage_namespace}/{preprocess_config.get('log_name', 'default_log')}/batches/{key}"
         except Exception as e:
             print(f"S3Manager: Upload failed: {e}")
             raise
     
     def close_spark(self) -> None:
         """Close the Spark connection using sparkManager."""
-        self.spark_manager.shutdown()
+        SparkManager.shutdown()
         self.spark = None
         # Note: boto3 clients don't need explicit closing
         print("S3Manager: Spark session closed.")
@@ -354,7 +375,7 @@ class S3Manager(StorageManager):
                 return False
             raise
     
-    def read_sequence_table(self, metadata: MetaData) -> RDD:
+    def read_sequence_table(self, metadata: MetaData, detailed: bool = False) -> RDD:
         """
         Read data as an RDD from the SequenceTable stored in S3.
         
@@ -366,13 +387,13 @@ class S3Manager(StorageManager):
             RDD containing EventTrait objects (Trace objects)
         """
         try:
-            df = self.spark.read.parquet(metadata.sequence_table_path)
+            df = self.spark.read.parquet(metadata.sequence_table_path) # type: ignore
             rdd = df.rdd
             print(f"S3Manager: Read {rdd.count()} records from SequenceTable")
             return rdd
         except Exception as e:
             print(f"S3Manager: Error reading SequenceTable: {e}")
-            return self.spark.sparkContext.emptyRDD()
+            return self.spark.sparkContext.emptyRDD() # type: ignore
     
     def read_single_table(self, metadata: MetaData) -> RDD:
         """
@@ -385,13 +406,13 @@ class S3Manager(StorageManager):
             RDD containing Event objects
         """
         try:
-            df = self.spark.read.parquet(metadata.single_table_path)
+            df = self.spark.read.parquet(metadata.single_table_path) # type: ignore
             rdd = df.rdd
             print(f"S3Manager: Read {rdd.count()} records from SingleTable")
             return rdd
         except Exception as e:
             print(f"S3Manager: Error reading SingleTable: {e}")
-            return self.spark.sparkContext.emptyRDD()
+            return self.spark.sparkContext.emptyRDD() # type: ignore
     
     def read_last_checked_table(self, metadata: MetaData) -> RDD:
         """
@@ -404,13 +425,13 @@ class S3Manager(StorageManager):
             RDD with last timestamps per event type pair per trace
         """
         try:
-            df = self.spark.read.parquet(metadata.last_checked_table_path)
+            df = self.spark.read.parquet(metadata.last_checked_table_path) # type: ignore
             rdd = df.rdd
             print(f"S3Manager: Read {rdd.count()} records from LastCheckedTable")
             return rdd
         except Exception as e:
             print(f"S3Manager: Error reading LastCheckedTable: {e}")
-            return self.spark.sparkContext.emptyRDD()
+            return self.spark.sparkContext.emptyRDD() # type: ignore
     
     def write_last_checked_table(self, last_checked: RDD, metadata: MetaData) -> None:
         """
@@ -422,7 +443,7 @@ class S3Manager(StorageManager):
         """
         try:
             # Convert RDD to DataFrame
-            df = self.spark.createDataFrame(last_checked)
+            df = self.spark.createDataFrame(last_checked) # type: ignore
             df.write.mode("append").parquet(metadata.last_checked_table_path)
             print(f"S3Manager: Wrote last checked data to {metadata.last_checked_table_path}")
         except Exception as e:
@@ -438,7 +459,7 @@ class S3Manager(StorageManager):
         """
         try:
             # Convert RDD to DataFrame
-            df = self.spark.createDataFrame(counts)
+            df = self.spark.createDataFrame(counts) # type: ignore
             df.write.mode("overwrite").parquet(metadata.count_table_path)
             print(f"S3Manager: Wrote count data to {metadata.count_table_path}")
         except Exception as e:
@@ -494,7 +515,7 @@ class S3Manager(StorageManager):
             sequence_rdd.persist()
             
             # Convert RDD to DataFrame
-            df = self.spark.createDataFrame(sequence_rdd.map(lambda event: event.to_dict()))
+            df = self.spark.createDataFrame(sequence_rdd.map(lambda event: event.to_dict())) # type: ignore
             df.write.mode("append").parquet(metadata.single_table_path)
             
             # Update metadata
@@ -519,7 +540,7 @@ class S3Manager(StorageManager):
         """
         try:
             # Convert RDD to DataFrame
-            df = self.spark.createDataFrame(new_pairs)
+            df = self.spark.createDataFrame(new_pairs) # type: ignore
             df.write.mode("append").parquet(metadata.index_table_path)
             
             # Update metadata
@@ -529,18 +550,16 @@ class S3Manager(StorageManager):
             print(f"S3Manager: Error writing IndexTable: {e}")
     
 
-    def write_sequence_table(self, events_df: DataFrame, config: Dict[str, Any] = None) -> None:
+    def write_sequence_table(self, events_df: DataFrame, preprocess_config: Dict[str, Any] = {}, detailed: bool = False) -> None:
         """
         Write processed events to S3 in Delta format.
         
         Args:
             events_df: DataFrame containing processed events
-            config: Configuration dictionary containing storage settings
+            preprocess_config: Configuration dictionary containing storage settings
         """
-        if config is None:
-            config = self.config
         
-        log_name = config.get("log_name", "default_log")
+        log_name = preprocess_config.get("log_name", "default_log")
         seq_table_path = f"s3a://{self.storage_namespace}/{log_name}/sequence_table/"
         
         try:

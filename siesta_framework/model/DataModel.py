@@ -32,15 +32,15 @@ class EventConfig:
         self.attributes_mapping = attributes_mapping
     
     @staticmethod
-    def from_system_config(config: dict, log_format: str = 'xes') -> 'EventConfig':
-        """Create EventConfig from system configuration.
+    def from_preprocess_config(config: dict, log_format: str = 'xes') -> 'EventConfig':
+        """Create EventConfig from preprocess configuration.
         
         Args:
-            config: System configuration dictionary
+            config: Preprocess configuration dictionary
             log_format: Log format to use ('xes', 'csv', 'json', or custom defined in config)
             
         Returns:
-            EventConfig initialized from system config
+            EventConfig initialized from preprocess config
         """
         field_mappings = config.get('field_mappings', {}).get(log_format, {}).copy()
 
@@ -58,6 +58,8 @@ class EventConfig:
         expected_attrs = set(dir(Event()))
         field_mappings_keys = set(field_mappings.keys())
         if not field_mappings_keys <= expected_attrs:
+            print(f"Given field mappings: {field_mappings_keys}")
+            print(f"Expected Event fields: {expected_attrs}")
             raise Exception("Incompatible field mappings given in Config")
         
         return EventConfig(

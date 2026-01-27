@@ -16,12 +16,13 @@ from confluent_kafka import Producer
 
 # Import default config from SystemModel
 try:
-    from siesta_framework.model.SystemModel import DEFAULT_CONFIG
+    from siesta_framework.model.SystemModel import DEFAULT_SYSTEM_CONFIG, DEFAULT_PREPROCESS_CONFIG
+    DEFAULT_SYSTEM_CONFIG = DEFAULT_SYSTEM_CONFIG | DEFAULT_PREPROCESS_CONFIG
 except ImportError:
     # Fallback if running from different location
     sys.path.insert(0, str(Path(__file__).parent.parent))
-    from model.SystemModel import DEFAULT_CONFIG
-
+    from model.SystemModel import DEFAULT_SYSTEM_CONFIG, DEFAULT_PREPROCESS_CONFIG
+    DEFAULT_SYSTEM_CONFIG = DEFAULT_SYSTEM_CONFIG | DEFAULT_PREPROCESS_CONFIG
 
 def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
     """Load configuration from JSON file or use defaults.
@@ -39,7 +40,7 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
         print(f"Warning: Config file '{config_path}' not found, using DEFAULT_CONFIG from SystemModel")
     
     # Use default config from SystemModel
-    return DEFAULT_CONFIG
+    return DEFAULT_SYSTEM_CONFIG
 
 
 def get_json_field_mappings(config: Dict[str, Any]) -> Dict[str, str]:

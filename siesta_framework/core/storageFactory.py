@@ -2,7 +2,7 @@ from typing import Dict, Any, Optional
 from siesta_framework.core.interfaces import StorageManager
 from siesta_framework.storage.S3.S3Manager import S3Manager
 from siesta_framework.model.StorageModel import MetaData
-from siesta_framework.core.config import get_config
+from siesta_framework.core.config import get_system_config
 
 # Global storage manager instance
 _storage_manager: Optional[StorageManager] = None
@@ -47,7 +47,7 @@ def get_or_create_metadata(log_name: str) -> MetaData:
     if log_name in _metadata_cache:
         return _metadata_cache[log_name]
     
-    config = get_config()
+    config = get_system_config()
     if not config:
         raise RuntimeError("Configuration not available. Ensure framework is started.")
     
@@ -92,12 +92,14 @@ def clear_metadata_cache() -> None:
     _active_log_name = None
 
 
-def get_storage_manager() -> Optional[StorageManager]:
+def get_storage_manager() -> StorageManager:
     """Get the global storage manager instance.
     
     Returns:
-        The initialized StorageManager instance, or None if not initialized.
+        The initialized StorageManager instance.
     """
+    if _storage_manager is None:
+        raise RuntimeError("StorageManager not initialized. Call startup() first.")
     return _storage_manager
 
 
@@ -174,7 +176,7 @@ class StorageManagerFactory:
                 )
             
             print(f"Creating storage manager: {storage_type} ({manager_class.name} v{manager_class.version})")
-            return manager_class(spark_manager, config)
+            return manager_class()
             
         except (ValueError, RuntimeError) as e:
             print(f"Error initializing storage manager: {e}")
