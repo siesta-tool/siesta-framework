@@ -18,6 +18,7 @@ DEFAULT_SYSTEM_CONFIG: Dict[str, Any] = {
     "is_streaming": False,
 
     "enable_streaming": True,
+    "enable_timing": True,
     
     # Spark configuration
     "spark_master": "spark://localhost:7077",

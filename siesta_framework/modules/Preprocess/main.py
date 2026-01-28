@@ -6,12 +6,14 @@ from siesta_framework.model.SystemModel import DEFAULT_PREPROCESS_CONFIG
 from siesta_framework.modules.Example.main import Example
 from siesta_framework.core.interfaces import SiestaModule, StorageManager
 from siesta_framework.core.config import get_system_config
+from siesta_framework.core.logger import timed
 from siesta_framework.core.storageFactory import get_storage_manager, get_metadata
 from siesta_framework.model.DataModel import EventConfig, Event
 from siesta_framework.core.sparkManager import get_spark_session
-from siesta_framework.modules.Preprocess.parse_log import _parse_rows, parse_log_file, upload_log_file_object, _process_events_batch, build_sequence_table
+from siesta_framework.modules.Preprocess.parsers import _parse_rows, parse_log_file, upload_log_file_object, process_events_batch, build_sequence_table
 from pyspark.sql import SparkSession
-import siesta_framework as siesta_framework_package
+import timeit
+from builders import build_sequence_table
 import json
 
 
@@ -54,13 +56,17 @@ class Preprocessor(SiestaModule):
             
             # events_df = parse_log_file_object(parsed_config, self.log_path)
             events_df = parse_log_file(self.preprocess_config, local=False)
-            _process_events_batch(self.preprocess_config, events_df)
+            process_events_batch(self.preprocess_config, events_df)
             return self.preprocess_config["log_path"]
 
 
     
 
     def run(self, args: Any, **kwargs: Any) -> Any:
+        """
+        Entry point for Preprocess via the command line.
+        """
+
         print(f"{self.name} is running with args: {args} and kwargs: {kwargs}")
 
         parser = argparse.ArgumentParser(description="Siesta Preprocess module")
@@ -86,13 +92,8 @@ class Preprocessor(SiestaModule):
             except Exception as e:
                 raise RuntimeError(f"Error loading config from {config_path}: {e}")
                 
-        print("Begin preprocessing...")
-        events_df = parse_log_file(self.preprocess_config, local=True)
-        
-        storage = get_storage_manager()
-        metadata = get_metadata()
-        if storage and metadata:
-            storage.write_sequence_table(events_df, preprocess_config=self.preprocess_config)
+        print("Preprocess: Begin preprocessing...")
+        timed(build_sequence_table, "Preprocess: ", self.preprocess_config)
     
 
     def load_preprocess_config(self, config: Dict[str, Any]):
