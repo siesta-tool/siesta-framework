@@ -5,6 +5,10 @@ DEFAULT_SYSTEM_CONFIG: Dict[str, Any] = {
     # Storage configuration
     "storage_type": "s3",
     "storage_namespace": "siesta",
+    "api": {
+    "host": "0.0.0.0",
+    "port": 8000
+    },
     
     # S3/MinIO configuration
     "s3_access_key": "minioadmin",
@@ -18,6 +22,7 @@ DEFAULT_SYSTEM_CONFIG: Dict[str, Any] = {
     "is_streaming": False,
 
     "enable_streaming": True,
+    "enable_timing": True,
     
     # Spark configuration
     "spark_master": "spark://localhost:7077",

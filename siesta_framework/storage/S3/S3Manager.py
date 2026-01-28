@@ -339,14 +339,15 @@ class S3Manager(StorageManager):
         key = destination_path
         if key.startswith("/"):
             key = key[1:]
-        
+        key = f"{preprocess_config.get('log_name', 'default_log')}/batches/{key}"
+
         print(f"S3Manager: Uploading in-memory file to bucket '{self.storage_namespace}' with key '{key}'...")
         try:
             self.s3_client.upload_fileobj(file_obj.file, self.storage_namespace, key)
             print("S3Manager: Upload successful.")
             
             # Construct S3A URI for Spark
-            return f"s3a://{self.storage_namespace}/{preprocess_config.get('log_name', 'default_log')}/batches/{key}"
+            return f"s3a://{self.storage_namespace}/{key}"
         except Exception as e:
             print(f"S3Manager: Upload failed: {e}")
             raise
@@ -375,7 +376,7 @@ class S3Manager(StorageManager):
                 return False
             raise
     
-    def read_sequence_table(self, metadata: MetaData, detailed: bool = False) -> RDD:
+    def read_sequence_table(self, metadata: MetaData, detailed: bool = False) -> DataFrame:
         """
         Read data as an RDD from the SequenceTable stored in S3.
         
@@ -384,18 +385,17 @@ class S3Manager(StorageManager):
             detailed: Whether to include detailed information
             
         Returns:
-            RDD containing EventTrait objects (Trace objects)
+            DataFrame containing EventTrait objects (Trace objects)
         """
         try:
             df = self.spark.read.parquet(metadata.sequence_table_path) # type: ignore
-            rdd = df.rdd
-            print(f"S3Manager: Read {rdd.count()} records from SequenceTable")
-            return rdd
+            print(f"S3Manager: Read {df.count()} records from SequenceTable")
+            return df
         except Exception as e:
             print(f"S3Manager: Error reading SequenceTable: {e}")
-            return self.spark.sparkContext.emptyRDD() # type: ignore
+            return self.spark.createDataFrame([], schema=Event.get_schema()) # type: ignore
     
-    def read_single_table(self, metadata: MetaData) -> RDD:
+    def read_single_table(self, metadata: MetaData) -> DataFrame:
         """
         Load the single inverted index from S3 (stored in SingleTable).
         
@@ -403,18 +403,17 @@ class S3Manager(StorageManager):
             metadata: MetaData object containing the metadata
             
         Returns:
-            RDD containing Event objects
+            DataFrame containing Event objects
         """
         try:
             df = self.spark.read.parquet(metadata.single_table_path) # type: ignore
-            rdd = df.rdd
-            print(f"S3Manager: Read {rdd.count()} records from SingleTable")
-            return rdd
+            print(f"S3Manager: Read {df.count()} records from SingleTable")
+            return df
         except Exception as e:
             print(f"S3Manager: Error reading SingleTable: {e}")
-            return self.spark.sparkContext.emptyRDD() # type: ignore
+            return self.spark.createDataFrame([], schema=Event.get_schema()) # type: ignore
     
-    def read_last_checked_table(self, metadata: MetaData) -> RDD:
+    def read_last_checked_table(self, metadata: MetaData) -> DataFrame:
         """
         Load data from the LastCheckedTable in S3.
         
@@ -422,23 +421,22 @@ class S3Manager(StorageManager):
             metadata: MetaData object containing the metadata
             
         Returns:
-            RDD with last timestamps per event type pair per trace
+            DataFrame with last timestamps per event type pair per trace
         """
         try:
             df = self.spark.read.parquet(metadata.last_checked_table_path) # type: ignore
-            rdd = df.rdd
-            print(f"S3Manager: Read {rdd.count()} records from LastCheckedTable")
-            return rdd
+            print(f"S3Manager: Read {df.count()} records from LastCheckedTable")
+            return df
         except Exception as e:
             print(f"S3Manager: Error reading LastCheckedTable: {e}")
-            return self.spark.sparkContext.emptyRDD() # type: ignore
+            return self.spark.createDataFrame([], schema=Event.get_schema()) # type: ignore
     
-    def write_last_checked_table(self, last_checked: RDD, metadata: MetaData) -> None:
+    def write_last_checked_table(self, last_checked: DataFrame, metadata: MetaData) -> None:
         """
         Store new records for last checked timestamps to S3.
         
         Args:
-            last_checked: RDD containing timestamp of last completion for each event type pair per trace
+            last_checked: DataFrame containing timestamp of last completion for each event type pair per trace
             metadata: MetaData object containing the metadata
         """
         try:

@@ -1,5 +1,7 @@
-from typing import Any, Callable, Dict, ClassVar, Literal, Tuple, TypeAlias
+from typing import Annotated, Any, Callable, Dict, ClassVar, Literal, Tuple, TypeAlias
 from abc import ABC, abstractmethod
+from fastapi import UploadFile
+from fastapi.params import Form
 from pyspark.sql import DataFrame
 from pyspark import RDD
 
@@ -36,8 +38,12 @@ class SiestaModule(ABC):
         """Lifecycle hook: Called when the framework starts."""
         pass
 
-    def run(self, args: Any, **kwargs: Any) -> Any:
+    def cli_run(self, args: Any, **kwargs: Any) -> Any:
         """Main execution method for the module."""
+        pass
+
+    def api_run(self, args: Any, **kwargs: Any) -> Any:
+        """Main execution method for the module via API."""
         pass
 
 
@@ -176,21 +182,21 @@ class StorageManager(ABC):
     
     
     @abstractmethod
-    def read_sequence_table(self, metadata: Any, detailed: bool = False) -> RDD:
+    def read_sequence_table(self, metadata: Any, detailed: bool = False) -> DataFrame:
         """
-        Read data as an RDD from the SequenceTable.
+        Read data as an DataFrame from the SequenceTable.
         
         Args:
             metadata: MetaData object containing the metadata
             detailed: Whether to include detailed information
             
         Returns:
-            RDD containing EventTrait objects
+            DataFrame containing EventTrait objects
         """
         pass
     
     @abstractmethod
-    def read_single_table(self, metadata: Any) -> RDD:
+    def read_single_table(self, metadata: Any) -> DataFrame:
         """
         Load the single inverted index from the database (stored in SingleTable).
         
@@ -198,12 +204,12 @@ class StorageManager(ABC):
             metadata: MetaData object containing the metadata
             
         Returns:
-            RDD containing Event objects
+            DataFrame containing Event objects
         """
         pass
     
     @abstractmethod
-    def read_last_checked_table(self, metadata: Any) -> RDD:
+    def read_last_checked_table(self, metadata: Any) -> DataFrame:
         """
         Load data from the LastCheckedTable, containing the last timestamp per event type pair per trace.
         
@@ -211,17 +217,17 @@ class StorageManager(ABC):
             metadata: MetaData object containing the metadata
             
         Returns:
-            RDD with last timestamps per event type pair per trace
+            DataFrame with last timestamps per event type pair per trace
         """
         pass
     
     @abstractmethod
-    def write_last_checked_table(self, last_checked: RDD, metadata: Any) -> None:
+    def write_last_checked_table(self, last_checked: DataFrame, metadata: Any) -> None:
         """
         Store new records for last checked timestamps back in the database.
         
         Args:
-            last_checked: RDD containing timestamp of last completion for each event type pair per trace
+            last_checked: DataFrame containing timestamp of last completion for each event type pair per trace
             metadata: MetaData object containing the metadata
         """
         pass
