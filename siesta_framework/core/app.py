@@ -1,17 +1,19 @@
 import importlib
 import pkgutil
+from pathlib import Path
 from typing import Callable, List, Tuple, Type, Dict, Any
 from siesta_framework.core.interfaces import SiestaModule, StorageManager
 import siesta_framework.modules as modules
-import siesta_framework.core.sparkManager as sparkManager
+import siesta_framework as siesta_framework_package
+import siesta_framework.core.sparkManager as SparkManager
 from siesta_framework.core.storageFactory import StorageManagerFactory, set_storage_manager, set_active_log
 from siesta_framework.core.config import initialize_config, load_config
-from siesta_framework.model.SystemModel import DEFAULT_CONFIG
 import argparse
 
 class Siesta:
+
     def __init__(self, config_path: str|None = None) -> None:
-        self.config = load_config(config_path)
+        self.config = load_config()
         self.storage_manager = None
         self.registered_routes: Dict[str, SiestaModule.ApiRoutes|None] = {}
 
@@ -26,17 +28,19 @@ class Siesta:
             An instance of Siesta
         """
         parser = argparse.ArgumentParser(description="Siesta Framework Initialization")
-        parser.add_argument('--config', type=str, help='Path to configuration JSON file')
+        parser.add_argument('--config', type=str, help='Path to configuration JSON file', required=False)
         parser.add_argument('module', type=str, help='Module to run')
         
         parsed_args, unknown_args = parser.parse_known_args(args)
         
-        app = cls(config_path=parsed_args.config)
+        app = cls(config_path=parsed_args.config if parsed_args.config else None)
         app.startup(cli_mode=True)
 
         for module in app.discovered_modules:
             if module.name == parsed_args.module:
-                module().run(unknown_args)
+                mod = module()
+                mod.startup()
+                mod.cli_run(unknown_args)
                 return app
         
         print(f"Module {parsed_args.module} not found")
@@ -83,10 +87,10 @@ class Siesta:
             print("API mode: No active log set (logs created per-request)")
         
         # Start Spark Manager
-        sparkManager.startup(self.config)
+        SparkManager.startup(self.config)
         
         # Setup Storage Manager and set global accessor
-        self.storage_manager = StorageManagerFactory.create_storage_manager(self.config, sparkManager)
+        self.storage_manager = StorageManagerFactory.create_storage_manager(self.config, SparkManager)
         set_storage_manager(self.storage_manager)
         
         # Initialize Modules
@@ -124,4 +128,4 @@ class Siesta:
 
     def shutdown(self) -> None:
         print("--- Shutting Down Framework ---")
-        sparkManager.shutdown()
+        SparkManager.shutdown()

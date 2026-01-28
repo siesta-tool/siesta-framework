@@ -66,7 +66,7 @@ services:
     #       - 'node.labels.host == node-name-2'
 
   minio:
-    container_name: minio
+    container_name: minio-server
     image: minio/minio:latest
     environment:
       s3_access_key: minioadmin

@@ -31,7 +31,7 @@ def get_docker_bridge_ip():
     # Fallback to default
     return "172.17.0.1"
 
-def startup(config: Dict[str, Any] = None) -> None:
+def startup(config: Dict[str, Any] = {}) -> None:
     """Initialize Spark session with configuration.
     
     Args:
@@ -133,7 +133,13 @@ def startup(config: Dict[str, Any] = None) -> None:
     except Exception as e:
         raise RuntimeError(f"Failed to initialize SparkSession: {e}")
 
-def get_spark_session():
+def get_spark_session() -> SparkSession:
+    """Get the active Spark session.
+    Returns:
+        Active SparkSession instance.
+    """
+    if spark_session is None:
+        raise RuntimeError("SparkSession not initialized. Call startup() first.")
     return spark_session
 
 def shutdown():

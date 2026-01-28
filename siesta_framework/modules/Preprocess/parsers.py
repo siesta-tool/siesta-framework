@@ -1,12 +1,31 @@
+from typing import Any, Dict
 from siesta_framework.core.sparkManager import get_spark_session
 from siesta_framework.core.storageFactory import get_storage_manager
-from siesta_framework.core.config import get_config
 from siesta_framework.model.DataModel import Event, EventConfig
 from pyspark.sql import SparkSession, DataFrame
-from pyspark import RDD
 from pyspark.sql.types import StringType, IntegerType, MapType
 from datetime import datetime
 import os
+
+    
+def process_events_batch(preprocess_config: Dict, batch_df, batch_id=None) -> None:
+    """
+    Core processing logic for event batches; parses and stores events in Sequence Table.
+    Args:
+        batch_df: DataFrame containing the batch of events
+        batch_id: Optional batch identifier for logging
+    """
+    if batch_df.isEmpty():
+        return
+    try:
+        event_config = EventConfig.from_preprocess_config(preprocess_config, "json")
+        events_df = _parse_rows(event_config, batch_df)
+        
+        get_storage_manager().write_sequence_table(events_df, preprocess_config)
+    except Exception as e:
+        batch_info = f"batch {batch_id}" if batch_id is not None else "batch"
+        print(f"Error processing {batch_info}: {e}")
+
 
 
 def _cast_value_by_schema(field_name: str, value, config: EventConfig):
@@ -63,20 +82,14 @@ def _cast_value_by_schema(field_name: str, value, config: EventConfig):
     return value
 
 
-def parse_log_file() -> RDD:
+def process_event_log(preprocess_config: dict) -> None:
     """
     Generic parsing function that determines the format and path from config.
     """
-    config = get_config()
-    log_path = config.get("log_path")
-    
-    
+    log_path = preprocess_config.get("log_path")
     if not log_path:
         raise ValueError("Log path not specified in configuration")
-
-    if not os.path.exists(log_path):
-        raise FileNotFoundError(f"Log file not found at path: {log_path}")
-
+    filename = os.path.basename(log_path)
     spark = get_spark_session()
     if spark is None:
         raise RuntimeError("Spark session is not initialized.")
@@ -84,45 +97,49 @@ def parse_log_file() -> RDD:
     storage = get_storage_manager()
     if not storage:
         raise RuntimeError("Storage manager is not initialized.")
-
-    filename = os.path.basename(log_path)
     
-    print(f"Uploading {log_path} to storage...")
-    storage_path = storage.upload_file(log_path, filename)
-    print(f"File uploaded to: {storage_path}")
+    # If local, verify file exists and upload
+    if os.path.exists(log_path):
+        print(f"Uploading {log_path} to storage...")
+        log_path = storage.upload_file(preprocess_config, log_path, filename)
+        print(f"File uploaded to: {log_path}")
+    
+    # Else, assume log_path is already in storage (e.g., s3a://...)
 
-    _, ext = os.path.splitext(log_path)
+    _, ext = os.path.splitext(filename)
     log_format = ext.lower().lstrip('.')
     
     if log_format == 'xes':
-        return parse_xml(storage_path, spark, config)
+        events_df = parse_xml(log_path, spark, preprocess_config)
+        get_storage_manager().write_sequence_table(events_df, preprocess_config)
     elif log_format == 'csv':
-        return parse_csv(storage_path, spark, config)
+        events_df = parse_csv(log_path, spark, preprocess_config)
+        get_storage_manager().write_sequence_table(events_df, preprocess_config)
     else:
         raise ValueError(f"Unsupported log format: {log_format}")
 
 
-def parse_xml(storage_path: str, spark: SparkSession, system_config: dict) -> RDD:
+def parse_xml(storage_path: str, spark: SparkSession, preprocess_config: dict) -> DataFrame:
     """
-    Parse_xml: Parses XES log file using Spark-XML and creates an RDD of Event objects.
+    Parse_xml: Parses XES log file using Spark-XML and creates an DataFrame of Event objects.
     This approach is scalable and handles large files without loading everything into driver memory.
     
     Args:
         storage_path: Path to the log file in storage
         spark: Active Spark Session
-        system_config: System configuration dictionary
+        preprocess_config: Preprocess configuration dictionary
     
     Returns:
-        RDD containing Event objects
+        DataFrame containing Event objects
     """
-    config = EventConfig.from_system_config(system_config, "xes")
+    eventConfig = EventConfig.from_preprocess_config(preprocess_config, "xes")
     
     traces_df = spark.read.format("xml") \
         .option("rowTag", "trace") \
         .load(storage_path)
     
     
-    # Transform traces DataFrame to events RDD
+    # Transform traces row to event RDD row
     def process_trace(row):
         """Process a single trace row and yield Event dicts"""
 
@@ -130,7 +147,7 @@ def parse_xml(storage_path: str, spark: SparkSession, system_config: dict) -> RD
         
         # Extract trace-level fields
         trace_field_values = {}
-        trace_fields_config = config.get_trace_fields()
+        trace_fields_config = eventConfig.get_trace_fields()
         
         """
         Check if there's string columns -> Turn them into an iterable list, which we call attributes.
@@ -155,7 +172,7 @@ def parse_xml(storage_path: str, spark: SparkSession, system_config: dict) -> RD
         
         # Extract events from trace
         if not hasattr(row, 'event') or row.event is None:
-            return events
+            return get_spark_session().sparkContext.emptyRDD()
             
         event_list = row.event if isinstance(row.event, list) else [row.event]
         
@@ -164,7 +181,7 @@ def parse_xml(storage_path: str, spark: SparkSession, system_config: dict) -> RD
             event_field_values = trace_field_values.copy()
             
             # Get event-level field mappings (excludes trace-level fields)
-            event_fields_config = config.get_event_fields()
+            event_fields_config = eventConfig.get_event_fields()
             
             # Storage for unmapped attributes
             extra_attributes = {}
@@ -196,18 +213,18 @@ def parse_xml(storage_path: str, spark: SparkSession, system_config: dict) -> RD
                         if matching_field:
                             mapped = True
                             event_field_name, source_key = matching_field
-                            # Cast value according to Event schema
-                            attr_value = _cast_value_by_schema(event_field_name, attr_value, config)
+                            # Cast value according to Event schema eg. timestamps, floats etc.
+                            attr_value = _cast_value_by_schema(event_field_name, attr_value, eventConfig)
                             event_field_values[event_field_name] = attr_value
                         
                         # If not mapped to a field, store in extra attributes
                         if not mapped:
-                            if config.attributes_mapping and ("*" in config.attributes_mapping or attr_key in config.attributes_mapping):
+                            if eventConfig.attributes_mapping and ("*" in eventConfig.attributes_mapping or attr_key in eventConfig.attributes_mapping):
                                 extra_attributes[attr_key] = str(attr_value)
             
             # Handle computed fields (those with None as source_key)
             for event_field_name, source_key in event_fields_config.items():
-                if config.is_computed_field(event_field_name):
+                if eventConfig.is_computed_field(event_field_name):
                     # Handle position specially
                     if event_field_name == 'position':
                         event_field_values[event_field_name] = position
@@ -226,14 +243,15 @@ def parse_xml(storage_path: str, spark: SparkSession, system_config: dict) -> RD
         return events
 
     # Process traces in parallel and flatten to events
-    events_rdd = traces_df.rdd.flatMap(process_trace)
-    
-    return events_rdd
+    events_dict_rdd = traces_df.rdd.flatMap(process_trace).map(lambda event: event.to_dict())
+    events_df = get_spark_session().createDataFrame(events_dict_rdd, schema=Event.get_schema())
+
+    return events_df
 
 
-def parse_csv(storage_path: str, spark: SparkSession, system_config: dict) -> RDD:
+def parse_csv(storage_path: str, spark: SparkSession, system_config: dict) -> DataFrame:
     """
-    Parse_csv: Parses CSV log file using Spark CSV reader and creates an RDD of Event objects.
+    Parse_csv: Parses CSV log file using Spark CSV reader and creates a DataFrame of Event objects.
     
     Args:
         storage_path: Path to the log file in storage
@@ -241,9 +259,9 @@ def parse_csv(storage_path: str, spark: SparkSession, system_config: dict) -> RD
         system_config: System configuration dictionary
     
     Returns:
-        RDD containing Event objects
+        DataFrame containing Event objects
     """
-    config = EventConfig.from_system_config(system_config, "csv")
+    config = EventConfig.from_preprocess_config(system_config, "csv")
     
     # Read CSV into DataFrame
     df = spark.read.format("csv") \
@@ -253,9 +271,9 @@ def parse_csv(storage_path: str, spark: SparkSession, system_config: dict) -> RD
     
     return _parse_rows(config, df)
 
-def parse_json(storage_path: str, spark: SparkSession, system_config: dict) -> RDD:
+def parse_json(storage_path: str, spark: SparkSession, system_config: dict) -> DataFrame:
     """
-    Parse_json: Parses JSON log file using Spark JSON reader and creates an RDD of Event objects.
+    Parse_json: Parses JSON log file using Spark JSON reader and creates an DataFrame of Event objects.
     
     Args:
         storage_path: Path to the log file in storage
@@ -263,9 +281,9 @@ def parse_json(storage_path: str, spark: SparkSession, system_config: dict) -> R
         system_config: System configuration dictionary
     
     Returns:
-        RDD containing Event objects
+        DataFrame containing Event objects
     """
-    config = EventConfig.from_system_config(system_config, "json")
+    config = EventConfig.from_preprocess_config(system_config, "json")
     
     # Read JSON into DataFrame
     df = spark.read.format("json") \
@@ -274,7 +292,7 @@ def parse_json(storage_path: str, spark: SparkSession, system_config: dict) -> R
     
     return _parse_rows(config, df)
 
-def _parse_rows(config: EventConfig, df: DataFrame) -> RDD:
+def _parse_rows(config: EventConfig, df: DataFrame) -> DataFrame:
     fields = config.get_event_fields().items() | config.get_trace_fields().items()
     source_keys = [source_key for _, source_key in fields if source_key]
 
@@ -302,8 +320,26 @@ def _parse_rows(config: EventConfig, df: DataFrame) -> RDD:
                     extra_attributes[col] = str(row[col])
         
         event_field_values['attributes'] = extra_attributes
-        
         return Event.from_dict(event_field_values)
     
-    # Process event rows to RDD of Event objects
-    return df.rdd.map(row_to_event)
+    # Create Dataframe of Event objects
+    events_rdd = df.rdd.map(row_to_event)
+    event_dicts_rdd = events_rdd.map(lambda event: event.to_dict())
+    events_df = get_spark_session().createDataFrame(event_dicts_rdd, schema=Event.get_schema())
+    return events_df
+
+
+def upload_log_file_object(preprocess_config: dict, file: Any, destination_path: str) -> str:
+    """
+    Uploads an in-memory log file (UploadFile) to storage and returns the S3 path.
+    """
+    storage = get_storage_manager()
+    if not storage:
+        raise RuntimeError("Storage manager is not initialized.")
+
+    print(f"Uploading file object to storage as {destination_path}...")
+    s3_path = storage.upload_file_object(preprocess_config, file, destination_path)
+    print(f"File uploaded to: {s3_path}")
+    #TODO: handle s3 path
+    return s3_path
+

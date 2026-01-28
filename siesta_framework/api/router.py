@@ -1,4 +1,4 @@
-from core.app import Siesta
+from siesta_framework.core.app import Siesta
 from fastapi import FastAPI, APIRouter
 import uvicorn
 

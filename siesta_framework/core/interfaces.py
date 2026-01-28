@@ -1,5 +1,8 @@
-from typing import Any, Callable, Dict, ClassVar, Literal, Tuple
+from typing import Annotated, Any, Callable, Dict, ClassVar, Literal, Tuple, TypeAlias
 from abc import ABC, abstractmethod
+from fastapi import UploadFile
+from fastapi.params import Form
+from pyspark.sql import DataFrame
 from pyspark import RDD
 
 class SiestaModule(ABC):
@@ -22,9 +25,9 @@ class SiestaModule(ABC):
     name: ClassVar[str] = "Unnamed Module"
     version: ClassVar[str] = "unversioned"
 
-    type ApiMethod = Literal["GET", "POST", "PUT", "DELETE"]
-    type ApiRoute = Tuple[ApiMethod, Callable] | Tuple[ApiMethod, Callable, Dict[str, Any]]
-    type ApiRoutes = Dict[str, ApiRoute]
+    ApiMethod: TypeAlias = Literal["GET", "POST", "PUT", "DELETE"]
+    ApiRoute: TypeAlias = Tuple[ApiMethod, Callable] | Tuple[ApiMethod, Callable, Dict[str, Any]]
+    ApiRoutes: TypeAlias = Dict[str, ApiRoute]
 
     # @abstractmethod
     def register_routes(self) -> ApiRoutes | None:
@@ -35,8 +38,12 @@ class SiestaModule(ABC):
         """Lifecycle hook: Called when the framework starts."""
         pass
 
-    def run(*args: Any, **kwargs: Any) -> Any:
+    def cli_run(self, args: Any, **kwargs: Any) -> Any:
         """Main execution method for the module."""
+        pass
+
+    def api_run(self, args: Any, **kwargs: Any) -> Any:
+        """Main execution method for the module via API."""
         pass
 
 
@@ -75,46 +82,59 @@ class StorageManager(ABC):
         pass
     
     @abstractmethod
-    def initialize_db(self, config: Dict[str, Any]) -> None:
+    def initialize_db(self, preprocess_config: Dict[str, Any]) -> None:
         """
         Create the appropriate tables and remove previous ones if necessary.
         
         Args:
-            config: Configuration dictionary containing database settings
+            preprocess_config: Configuration dictionary containing database settings
         """
         pass
     
     @abstractmethod
-    def initialize_streaming_collector(self, config: Dict[str, Any] = None) -> None:
+    def initialize_streaming_collector(self, preprocess_config: Dict[str, Any] = {}) -> None:
         """
         Initialize streaming context if necessary.
 
         Args:
-            config: Configuration dictionary containing streaming settings
+            preprocess_config: Configuration dictionary containing streaming settings
         """
         pass
     
     @abstractmethod
-    def get_steaming_collector_path(self, config: Dict[str, Any]) -> str:
+    def get_steaming_collector_path(self, preprocess_config: Dict[str, Any]) -> str:
         """
         Get the path where the streaming collector stores data.
 
         Args:
-            config: Configuration dictionary containing streaming settings
+            preprocess_config: Configuration dictionary containing streaming settings
 
         Returns:
             Path as a string
         """
         pass
-        
     
     @abstractmethod
-    def get_metadata(self, config: Dict[str, Any]) -> Any:
+    def get_checkpoint_location(self, preprocess_config: Dict[str, Any] = {}, checkpoint_type: str = "table") -> str:
+        """
+        Get the S3 path for streaming checkpoint location.
+        
+        Args:
+            preprocess_config: Configuration dictionary containing checkpoint settings
+            checkpoint_type: Type of checkpoint (e.g., 'index', 'collector')
+            
+        Returns:
+            Path as a string
+        """
+        pass
+    
+    @abstractmethod
+    def get_metadata(self, preprocess_config: Dict[str, Any]) -> Any:
         """
         Construct metadata based on data already stored in the database and new configuration.
         
         Args:
-            config: Configuration dictionary passed during execution
+            preprocess_config: Configuration dictionary passed during execution
             
         Returns:
             MetaData object containing the metadata
@@ -122,14 +142,29 @@ class StorageManager(ABC):
         pass
 
     @abstractmethod
-    def upload_file(self, local_path: str, destination_path: str) -> str:
+    def upload_file(self, preprocess_config: Dict[str, Any], local_path: str, destination_path: str) -> str:
         """
         Upload a local file to the storage system.
         
         Args:
+            preprocess_config: Configuration dictionary passed during execution
             local_path: Path to the local file
             destination_path: Path/Name for the file in storage
             
+        Returns:
+            The URI to access the uploaded file (e.g., s3a://bucket/path)
+        """
+        pass
+
+    @abstractmethod
+    def upload_file_object(self, preprocess_config: Dict[str, Any], file_obj: Any, destination_path: str) -> str:
+        """
+        Upload a file-like object to the storage system.
+        
+        Args:
+            preprocess_config: Configuration dictionary passed during execution
+            file_obj: File-like object to upload
+            destination_path: Path/Name for the file in storage
         Returns:
             The URI to access the uploaded file (e.g., s3a://bucket/path)
         """
@@ -147,21 +182,21 @@ class StorageManager(ABC):
     
     
     @abstractmethod
-    def read_sequence_table(self, metadata: Any, detailed: bool = False) -> RDD:
+    def read_sequence_table(self, metadata: Any, detailed: bool = False) -> DataFrame:
         """
-        Read data as an RDD from the SequenceTable.
+        Read data as an DataFrame from the SequenceTable.
         
         Args:
             metadata: MetaData object containing the metadata
             detailed: Whether to include detailed information
             
         Returns:
-            RDD containing EventTrait objects
+            DataFrame containing EventTrait objects
         """
         pass
     
     @abstractmethod
-    def read_single_table(self, metadata: Any) -> RDD:
+    def read_single_table(self, metadata: Any) -> DataFrame:
         """
         Load the single inverted index from the database (stored in SingleTable).
         
@@ -169,12 +204,12 @@ class StorageManager(ABC):
             metadata: MetaData object containing the metadata
             
         Returns:
-            RDD containing Event objects
+            DataFrame containing Event objects
         """
         pass
     
     @abstractmethod
-    def read_last_checked_table(self, metadata: Any) -> RDD:
+    def read_last_checked_table(self, metadata: Any) -> DataFrame:
         """
         Load data from the LastCheckedTable, containing the last timestamp per event type pair per trace.
         
@@ -182,17 +217,17 @@ class StorageManager(ABC):
             metadata: MetaData object containing the metadata
             
         Returns:
-            RDD with last timestamps per event type pair per trace
+            DataFrame with last timestamps per event type pair per trace
         """
         pass
     
     @abstractmethod
-    def write_last_checked_table(self, last_checked: RDD, metadata: Any) -> None:
+    def write_last_checked_table(self, last_checked: DataFrame, metadata: Any) -> None:
         """
         Store new records for last checked timestamps back in the database.
         
         Args:
-            last_checked: RDD containing timestamp of last completion for each event type pair per trace
+            last_checked: DataFrame containing timestamp of last completion for each event type pair per trace
             metadata: MetaData object containing the metadata
         """
         pass
@@ -209,7 +244,7 @@ class StorageManager(ABC):
         pass
     
     @abstractmethod
-    def write_sequence_table(self, sequence_rdd: RDD, metadata: Any, detailed: bool = False) -> None:
+    def write_sequence_table(self, events_df: DataFrame, preprocess_config: Dict[str, Any] = {}, detailed: bool = False) -> None:
         """
         Write traces to the SequenceTable. The RDD should already be persisted and should not be modified.
         Updates the metadata object.

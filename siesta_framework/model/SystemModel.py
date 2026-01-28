@@ -1,12 +1,14 @@
 from typing import Dict, Any
 
 
-DEFAULT_CONFIG: Dict[str, Any] = {
+DEFAULT_SYSTEM_CONFIG: Dict[str, Any] = {
     # Storage configuration
     "storage_type": "s3",
-    "log_name": "default_log",
     "storage_namespace": "siesta",
-    "log_path": "datasets/test.xes",
+    "api": {
+    "host": "0.0.0.0",
+    "port": 8000
+    },
     
     # S3/MinIO configuration
     "s3_access_key": "minioadmin",
@@ -20,6 +22,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "is_streaming": False,
 
     "enable_streaming": True,
+    "enable_timing": True,
     
     # Spark configuration
     "spark_master": "spark://localhost:7077",
@@ -30,28 +33,37 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "kafka_topic": "default_log", # Should match log_name
     "raw_events_dir": "raw_events",
     "checkpoint_dir": "checkpoints",
+}
 
-    # Log parsing configuration
-    "field_mappings": {
-        "xes": {
-            "activity": "concept:name",
-            "trace_id": "concept:name",
-            "position": None,  # Computed from sequence
-            "start_timestamp": "time:timestamp",
-        },
-        "csv": {
-            "activity": "activity",
-            "trace_id": "caseID",
-            "position": "position",
-            "start_timestamp": "Timestamp",
-        }, 
-        "json": {
-            "activity": "activity",
-            "trace_id": "caseID",
-            "position": "position",
-            "start_timestamp": "Timestamp",
-        }
+DEFAULT_PREPROCESS_CONFIG: Dict[str, Any] = {
+  "log_name": "example_log",
+  "log_path": "datasets/test.xes",
+  "clear_existing": False,
+  "is_continued": False,
+  "is_streaming": False,
+  "kafka_topic": "example_log",
+  "field_mappings": {
+    "xes": {
+      "activity": "concept:name",
+      "trace_id": "concept:name",
+      "position": None,
+      "start_timestamp": "time:timestamp",
+      "attributes" : ["*"]
     },
-    "trace_level_fields": ["trace_id"],
-    "timestamp_fields": ["start_timestamp"],
+    "csv": {
+      "activity": "activity",
+      "trace_id": "trace_id",
+      "position": "position",
+      "start_timestamp": "timestamp",
+      "attributes" : ["resource", "cost"]
+    },
+    "json": {
+        "activity": "activity",
+        "trace_id": "caseID",
+        "position": "position",
+        "start_timestamp": "Timestamp"
+    }
+  },
+  "trace_level_fields": ["trace_id"],
+  "timestamp_fields": ["start_timestamp"]
 }
