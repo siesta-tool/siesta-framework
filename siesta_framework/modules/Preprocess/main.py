@@ -27,14 +27,14 @@ class Preprocessor(SiestaModule):
         super().__init__()
 
     def register_routes(self) -> SiestaModule.ApiRoutes|None:
-        return {"run": ('POST', self.run_preprocess)}
+        return {"run": ('POST', self.api_run)}
 
     def startup(self):
         self.siesta_config = get_system_config()
         print("Preprocessor: Spark session initialized.")
 
     
-    def run_preprocess(self, preprocess_config: Annotated[str, Form()], log_file: UploadFile | None = None) -> str:
+    def api_run(self, preprocess_config: Annotated[str, Form()], log_file: UploadFile | None = None) -> Any:
         parsed_config = json.loads(preprocess_config)
         self.load_preprocess_config(parsed_config)
 
@@ -56,8 +56,7 @@ class Preprocessor(SiestaModule):
             return "Preprocess: Batch processing completed."
 
 
-
-    def run(self, args: Any, **kwargs: Any) -> Any:
+    def cli_run(self, args: Any, **kwargs: Any) -> Any:
         """
         Entry point for Preprocess via the command line.
         """

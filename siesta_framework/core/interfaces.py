@@ -1,5 +1,7 @@
-from typing import Any, Callable, Dict, ClassVar, Literal, Tuple, TypeAlias
+from typing import Annotated, Any, Callable, Dict, ClassVar, Literal, Tuple, TypeAlias
 from abc import ABC, abstractmethod
+from fastapi import UploadFile
+from fastapi.params import Form
 from pyspark.sql import DataFrame
 from pyspark import RDD
 
@@ -36,8 +38,12 @@ class SiestaModule(ABC):
         """Lifecycle hook: Called when the framework starts."""
         pass
 
-    def run(self, args: Any, **kwargs: Any) -> Any:
+    def cli_run(self, args: Any, **kwargs: Any) -> Any:
         """Main execution method for the module."""
+        pass
+
+    def api_run(self, args: Any, **kwargs: Any) -> Any:
+        """Main execution method for the module via API."""
         pass
 
 

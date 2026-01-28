@@ -40,7 +40,7 @@ class Siesta:
             if module.name == parsed_args.module:
                 mod = module()
                 mod.startup()
-                mod.run(unknown_args)
+                mod.cli_run(unknown_args)
                 return app
         
         print(f"Module {parsed_args.module} not found")

@@ -21,7 +21,7 @@ class Example(SiestaModule):
             "log_info": ("GET", self.get_log_info)
         }
     
-    def run(*args: Any, **kwargs: Any) -> Any:
+    def cli_run(*args: Any, **kwargs: Any) -> Any:
         print(f"{Example.name} is running with args: {args} and kwargs: {kwargs}")
         print("Hello from Example Module!")
 
