@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Dict
 from siesta_framework.core.sparkManager import get_spark_session
 from siesta_framework.core.storageFactory import get_storage_manager
 from siesta_framework.core.config import get_system_config
@@ -9,6 +9,60 @@ from pyspark.sql.types import StringType, IntegerType, MapType
 from datetime import datetime
 import os
 
+    
+def _process_events_batch(preprocess_config: Dict, batch_df, batch_id=None):
+    """
+    Core processing logic for event batches; parses and stores events in Sequence Table.
+    Args:
+        batch_df: DataFrame containing the batch of events
+        batch_id: Optional batch identifier for logging
+    """
+    if batch_df.isEmpty():
+        return
+    try:
+        event_config = EventConfig.from_preprocess_config(preprocess_config, "json")
+        events_df = _parse_rows(event_config, batch_df)
+        
+    
+        get_storage_manager().write_sequence_table(events_df, preprocess_config)
+    except Exception as e:
+        batch_info = f"batch {batch_id}" if batch_id is not None else "batch"
+        print(f"Error processing {batch_info}: {e}")
+
+def build_sequence_table(preprocess_config: Dict):
+    """
+    Build the Sequence Table from the log file, supporting both batch and streaming modes.
+    """
+    print("Preprocessor: Building Sequence Table...")
+    if preprocess_config.get("enable_streaming", False):
+
+        schema = EventConfig.from_preprocess_config(preprocess_config, "json").get_source_schema()
+    
+        storage = get_storage_manager()
+
+        event_stream_agg = (get_spark_session().readStream
+        .format("json")     
+        .schema(schema)
+        .option("schemaInference", "true")
+        .option("columnNameOfCorruptRecord", "_corrupt_record") 
+        .load(storage.get_steaming_collector_path(preprocess_config))) 
+
+        config = get_system_config()
+
+        def process_microbatch(batch_df, batch_id):
+            _process_events_batch(preprocess_config, batch_df, batch_id)
+
+        query = (event_stream_agg.writeStream
+            .foreachBatch(process_microbatch)
+            .outputMode("append")
+            .option("checkpointLocation", storage.get_checkpoint_location(preprocess_config, "sequence_table"))
+            .start())
+    
+    else:
+        
+        events_df = parse_log_file(preprocess_config, local=True)
+        
+        _process_events_batch(preprocess_config, events_df)
 
 def _cast_value_by_schema(field_name: str, value, config: EventConfig):
     """Cast a value to the appropriate type based on Event schema.
@@ -64,20 +118,14 @@ def _cast_value_by_schema(field_name: str, value, config: EventConfig):
     return value
 
 
-def parse_log_file(preprocess_config: dict) -> RDD:
+def parse_log_file(preprocess_config: dict, local=False) -> DataFrame:
     """
     Generic parsing function that determines the format and path from config.
     """
-    
     log_path = preprocess_config.get("log_path")
-    
-    
     if not log_path:
         raise ValueError("Log path not specified in configuration")
-
-    if not os.path.exists(log_path):
-        raise FileNotFoundError(f"Log file not found at path: {log_path}")
-
+    filename = os.path.basename(log_path)
     spark = get_spark_session()
     if spark is None:
         raise RuntimeError("Spark session is not initialized.")
@@ -85,27 +133,32 @@ def parse_log_file(preprocess_config: dict) -> RDD:
     storage = get_storage_manager()
     if not storage:
         raise RuntimeError("Storage manager is not initialized.")
-
-    filename = os.path.basename(log_path)
     
-    print(f"Uploading {log_path} to storage...")
-    storage_path = storage.upload_file(preprocess_config, log_path, filename)
-    print(f"File uploaded to: {storage_path}")
+    # If local, verify file exists and upload
+    if local:
+        if not os.path.exists(log_path):
+            raise FileNotFoundError(f"Log file not found at path: {log_path}")
 
-    _, ext = os.path.splitext(log_path)
+
+        print(f"Uploading {log_path} to storage...")
+        s3_path = storage.upload_file(preprocess_config, log_path, filename)
+        print(f"File uploaded to: {s3_path}")
+    # Else, assume log_path is already in storage (e.g., s3a://...)
+
+    _, ext = os.path.splitext(filename)
     log_format = ext.lower().lstrip('.')
     
     if log_format == 'xes':
-        return parse_xml(storage_path, spark, preprocess_config)
+        return parse_xml(log_path, spark, preprocess_config)
     elif log_format == 'csv':
-        return parse_csv(storage_path, spark, preprocess_config)
+        return parse_csv(log_path, spark, preprocess_config)
     else:
         raise ValueError(f"Unsupported log format: {log_format}")
 
 
-def parse_xml(storage_path: str, spark: SparkSession, preprocess_config: dict) -> RDD:
+def parse_xml(storage_path: str, spark: SparkSession, preprocess_config: dict) -> DataFrame:
     """
-    Parse_xml: Parses XES log file using Spark-XML and creates an RDD of Event objects.
+    Parse_xml: Parses XES log file using Spark-XML and creates an DataFrame of Event objects.
     This approach is scalable and handles large files without loading everything into driver memory.
     
     Args:
@@ -114,7 +167,7 @@ def parse_xml(storage_path: str, spark: SparkSession, preprocess_config: dict) -
         preprocess_config: Preprocess configuration dictionary
     
     Returns:
-        RDD containing Event objects
+        DataFrame containing Event objects
     """
     eventConfig = EventConfig.from_preprocess_config(preprocess_config, "xes")
     
@@ -123,7 +176,7 @@ def parse_xml(storage_path: str, spark: SparkSession, preprocess_config: dict) -
         .load(storage_path)
     
     
-    # Transform traces DataFrame to events RDD
+    # Transform traces row to event RDD row
     def process_trace(row):
         """Process a single trace row and yield Event dicts"""
 
@@ -156,7 +209,7 @@ def parse_xml(storage_path: str, spark: SparkSession, preprocess_config: dict) -
         
         # Extract events from trace
         if not hasattr(row, 'event') or row.event is None:
-            return events
+            return get_spark_session().sparkContext.emptyRDD()
             
         event_list = row.event if isinstance(row.event, list) else [row.event]
         
@@ -227,14 +280,15 @@ def parse_xml(storage_path: str, spark: SparkSession, preprocess_config: dict) -
         return events
 
     # Process traces in parallel and flatten to events
-    events_rdd = traces_df.rdd.flatMap(process_trace)
-    
-    return events_rdd
+    events_dict_rdd = traces_df.rdd.flatMap(process_trace).map(lambda event: event.to_dict())
+    events_df = get_spark_session().createDataFrame(events_dict_rdd, schema=Event.get_schema())
+
+    return events_df
 
 
-def parse_csv(storage_path: str, spark: SparkSession, system_config: dict) -> RDD:
+def parse_csv(storage_path: str, spark: SparkSession, system_config: dict) -> DataFrame:
     """
-    Parse_csv: Parses CSV log file using Spark CSV reader and creates an RDD of Event objects.
+    Parse_csv: Parses CSV log file using Spark CSV reader and creates a DataFrame of Event objects.
     
     Args:
         storage_path: Path to the log file in storage
@@ -242,7 +296,7 @@ def parse_csv(storage_path: str, spark: SparkSession, system_config: dict) -> RD
         system_config: System configuration dictionary
     
     Returns:
-        RDD containing Event objects
+        DataFrame containing Event objects
     """
     config = EventConfig.from_preprocess_config(system_config, "csv")
     
@@ -254,9 +308,9 @@ def parse_csv(storage_path: str, spark: SparkSession, system_config: dict) -> RD
     
     return _parse_rows(config, df)
 
-def parse_json(storage_path: str, spark: SparkSession, system_config: dict) -> RDD:
+def parse_json(storage_path: str, spark: SparkSession, system_config: dict) -> DataFrame:
     """
-    Parse_json: Parses JSON log file using Spark JSON reader and creates an RDD of Event objects.
+    Parse_json: Parses JSON log file using Spark JSON reader and creates an DataFrame of Event objects.
     
     Args:
         storage_path: Path to the log file in storage
@@ -264,7 +318,7 @@ def parse_json(storage_path: str, spark: SparkSession, system_config: dict) -> R
         system_config: System configuration dictionary
     
     Returns:
-        RDD containing Event objects
+        DataFrame containing Event objects
     """
     config = EventConfig.from_preprocess_config(system_config, "json")
     
@@ -275,7 +329,7 @@ def parse_json(storage_path: str, spark: SparkSession, system_config: dict) -> R
     
     return _parse_rows(config, df)
 
-def _parse_rows(config: EventConfig, df: DataFrame) -> RDD:
+def _parse_rows(config: EventConfig, df: DataFrame) -> DataFrame:
     fields = config.get_event_fields().items() | config.get_trace_fields().items()
     source_keys = [source_key for _, source_key in fields if source_key]
 
@@ -306,8 +360,11 @@ def _parse_rows(config: EventConfig, df: DataFrame) -> RDD:
         
         return Event.from_dict(event_field_values)
     
-    # Process event rows to RDD of Event objects
-    return df.rdd.map(row_to_event)
+    # Create Dataframe of Event objects
+    events_rdd = df.rdd.map(row_to_event)
+    event_dicts_rdd = events_rdd.map(lambda event: event.to_dict())
+    events_df = get_spark_session().createDataFrame(event_dicts_rdd, schema=Event.get_schema())
+    return events_df
 
 
 def upload_log_file_object(preprocess_config: dict, file: Any, destination_path: str) -> str:
@@ -324,61 +381,3 @@ def upload_log_file_object(preprocess_config: dict, file: Any, destination_path:
     #TODO: handle s3 path
     return s3_path
 
-
-def parse_log_file_object(preprocess_config: dict, s3_path: str) -> RDD:
-    """
-    Parses an in-memory log file (UploadFile) based on its format and returns an RDD of Event objects.
-    """
-    #TODO: properly get a file name
-    log_path = preprocess_config.get("log_path")
-    if not log_path:
-        raise ValueError("Log path not specified in configuration")
-    
-    filename = os.path.basename(log_path)
-    _, ext = os.path.splitext(filename)
-    log_format = ext.lower().lstrip('.')
-    
-    if log_format == 'xes':
-        return parse_xml(s3_path, get_spark_session(), preprocess_config)
-    elif log_format == 'csv':
-        return parse_csv(s3_path, get_spark_session(), preprocess_config)
-    else:
-        raise ValueError(f"Unsupported log format: {log_format}")
-
-def parse_local_log_file(preprocess_config: dict) -> RDD:
-    """
-    Generic parsing function that determines the format and path from config.
-    """
-    log_path = preprocess_config.get("log_path")
-    
-    
-    if not log_path:
-        raise ValueError("Log path not specified in configuration")
-
-    if not os.path.exists(log_path):
-        raise FileNotFoundError(f"Log file not found at path: {log_path}")
-
-    spark = get_spark_session()
-    if spark is None:
-        raise RuntimeError("Spark session is not initialized.")
-    
-    storage = get_storage_manager()
-    if not storage:
-        raise RuntimeError("Storage manager is not initialized.")
-
-    filename = os.path.basename(log_path)
-    
-    print(f"Uploading {log_path} to storage...")
-    s3_path = storage.upload_file(preprocess_config, log_path, filename)
-    print(f"File uploaded to: {s3_path}")
-
-    _, ext = os.path.splitext(log_path)
-    log_format = ext.lower().lstrip('.')
-    
-    if log_format == 'xes':
-        return parse_xml(s3_path, spark, preprocess_config)
-    elif log_format == 'csv':
-        return parse_csv(s3_path, spark, preprocess_config)
-    else:
-        raise ValueError(f"Unsupported log format: {log_format}")
-    

@@ -9,7 +9,7 @@ from siesta_framework.core.config import get_system_config
 from siesta_framework.core.storageFactory import get_storage_manager, get_metadata
 from siesta_framework.model.DataModel import EventConfig, Event
 from siesta_framework.core.sparkManager import get_spark_session
-from siesta_framework.modules.Preprocess.parse_log import parse_log_file, _parse_rows, parse_log_file_object, upload_log_file_object, parse_local_log_file
+from siesta_framework.modules.Preprocess.parse_log import _parse_rows, parse_log_file, upload_log_file_object, _process_events_batch, build_sequence_table
 from pyspark.sql import SparkSession
 import siesta_framework as siesta_framework_package
 import json
@@ -38,87 +38,27 @@ class Preprocessor(SiestaModule):
     def run_preprocess(self, preprocess_config: Annotated[str, Form()], log: UploadFile | None = None) -> str:
         parsed_config = json.loads(preprocess_config)
         self.load_preprocess_config(parsed_config)
-        parsed_config = self.preprocess_config
 
         if log is None:
             if self.preprocess_config.get("enable_streaming", False):
                 self.storage = get_storage_manager()
                 self.storage.initialize_streaming_collector(self.preprocess_config)
-                self.build_sequence_table()
+                build_sequence_table(self.preprocess_config)
             return "Streaming collector initialized."
         else:
             if not log.filename:
                 raise ValueError("Raw bytes uploaded.")
             print(f"Running preprocess with args: {log.filename}")
             print(f"File first bytes: {log.file.read(100)}")
-            self.log_path = upload_log_file_object(parsed_config, log, log.filename)
-            #TODO: store or parse the s3 path
-            events_rdd = parse_log_file_object(parsed_config, self.log_path)
-            event_dicts_rdd = events_rdd.map(lambda event: event.to_dict())
-            events_df = get_spark_session().createDataFrame(event_dicts_rdd, schema=Event.get_schema())
-                
-            self._process_events_batch(events_df)
-            return self.log_path
+            self.preprocess_config["log_path"] = upload_log_file_object(parsed_config, log, log.filename)
+            
+            # events_df = parse_log_file_object(parsed_config, self.log_path)
+            events_df = parse_log_file(self.preprocess_config, local=False)
+            _process_events_batch(self.preprocess_config, events_df)
+            return self.preprocess_config["log_path"]
+
 
     
-    def _process_events_batch(self, batch_df, batch_id=None):
-        """
-        Core processing logic for event batches; parses and stores events in Sequence Table.
-        Args:
-            batch_df: DataFrame containing the batch of events
-            batch_id: Optional batch identifier for logging
-        """
-        if batch_df.isEmpty():
-            return
-        try:
-            event_config = EventConfig.from_preprocess_config(self.preprocess_config, "json")
-            events_rdd = _parse_rows(event_config, batch_df)
-            
-            event_dicts_rdd = events_rdd.map(lambda event: event.to_dict())
-            
-            events_df = get_spark_session().createDataFrame(event_dicts_rdd, schema=Event.get_schema())
-        
-            get_storage_manager().write_sequence_table(events_df, self.preprocess_config)
-        except Exception as e:
-            batch_info = f"batch {batch_id}" if batch_id is not None else "batch"
-            print(f"Error processing {batch_info}: {e}")
-    
-
-    def build_sequence_table(self):
-        """
-        Build the Sequence Table from the log file, supporting both batch and streaming modes.
-        """
-        print("Preprocessor: Building Sequence Table...")
-        if self.preprocess_config.get("enable_streaming", False):
-
-            schema = EventConfig.from_preprocess_config(self.preprocess_config, "json").get_source_schema()
-        
-            event_stream_agg = (get_spark_session().readStream
-            .format("json")     
-            .schema(schema)
-            .option("schemaInference", "true")
-            .option("columnNameOfCorruptRecord", "_corrupt_record") 
-            .load(self.storage.get_steaming_collector_path(self.preprocess_config))) 
-
-            config = get_system_config()
-            storage = get_storage_manager()
-
-            def process_microbatch(batch_df, batch_id):
-                self._process_events_batch(batch_df, batch_id)
-
-            query = (event_stream_agg.writeStream
-                .foreachBatch(process_microbatch)
-                .outputMode("append")
-                .option("checkpointLocation", storage.get_checkpoint_location(self.preprocess_config, "sequence_table"))
-                .start())
-        
-        else:
-            
-            events_rdd = parse_log_file(self.preprocess_config)
-            event_dicts_rdd = events_rdd.map(lambda event: event.to_dict())
-            events_df = get_spark_session().createDataFrame(event_dicts_rdd, schema=Event.get_schema())
-            
-            self._process_events_batch(events_df)
 
     def run(self, args: Any, **kwargs: Any) -> Any:
         print(f"{self.name} is running with args: {args} and kwargs: {kwargs}")
@@ -147,9 +87,7 @@ class Preprocessor(SiestaModule):
                 raise RuntimeError(f"Error loading config from {config_path}: {e}")
                 
         print("Begin preprocessing...")
-        events_rdd = parse_local_log_file(self.preprocess_config)
-        event_dicts_rdd = events_rdd.map(lambda event: event.to_dict())
-        events_df = get_spark_session().createDataFrame(event_dicts_rdd, schema=Event.get_schema())
+        events_df = parse_log_file(self.preprocess_config, local=True)
         
         storage = get_storage_manager()
         metadata = get_metadata()

@@ -176,21 +176,21 @@ class StorageManager(ABC):
     
     
     @abstractmethod
-    def read_sequence_table(self, metadata: Any, detailed: bool = False) -> RDD:
+    def read_sequence_table(self, metadata: Any, detailed: bool = False) -> DataFrame:
         """
-        Read data as an RDD from the SequenceTable.
+        Read data as an DataFrame from the SequenceTable.
         
         Args:
             metadata: MetaData object containing the metadata
             detailed: Whether to include detailed information
             
         Returns:
-            RDD containing EventTrait objects
+            DataFrame containing EventTrait objects
         """
         pass
     
     @abstractmethod
-    def read_single_table(self, metadata: Any) -> RDD:
+    def read_single_table(self, metadata: Any) -> DataFrame:
         """
         Load the single inverted index from the database (stored in SingleTable).
         
@@ -198,12 +198,12 @@ class StorageManager(ABC):
             metadata: MetaData object containing the metadata
             
         Returns:
-            RDD containing Event objects
+            DataFrame containing Event objects
         """
         pass
     
     @abstractmethod
-    def read_last_checked_table(self, metadata: Any) -> RDD:
+    def read_last_checked_table(self, metadata: Any) -> DataFrame:
         """
         Load data from the LastCheckedTable, containing the last timestamp per event type pair per trace.
         
@@ -211,17 +211,17 @@ class StorageManager(ABC):
             metadata: MetaData object containing the metadata
             
         Returns:
-            RDD with last timestamps per event type pair per trace
+            DataFrame with last timestamps per event type pair per trace
         """
         pass
     
     @abstractmethod
-    def write_last_checked_table(self, last_checked: RDD, metadata: Any) -> None:
+    def write_last_checked_table(self, last_checked: DataFrame, metadata: Any) -> None:
         """
         Store new records for last checked timestamps back in the database.
         
         Args:
-            last_checked: RDD containing timestamp of last completion for each event type pair per trace
+            last_checked: DataFrame containing timestamp of last completion for each event type pair per trace
             metadata: MetaData object containing the metadata
         """
         pass
