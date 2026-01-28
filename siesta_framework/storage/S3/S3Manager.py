@@ -339,14 +339,15 @@ class S3Manager(StorageManager):
         key = destination_path
         if key.startswith("/"):
             key = key[1:]
-        
+        key = f"{preprocess_config.get('log_name', 'default_log')}/batches/{key}"
+
         print(f"S3Manager: Uploading in-memory file to bucket '{self.storage_namespace}' with key '{key}'...")
         try:
             self.s3_client.upload_fileobj(file_obj.file, self.storage_namespace, key)
             print("S3Manager: Upload successful.")
             
             # Construct S3A URI for Spark
-            return f"s3a://{self.storage_namespace}/{preprocess_config.get('log_name', 'default_log')}/batches/{key}"
+            return f"s3a://{self.storage_namespace}/{key}"
         except Exception as e:
             print(f"S3Manager: Upload failed: {e}")
             raise

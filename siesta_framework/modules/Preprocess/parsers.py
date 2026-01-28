@@ -8,7 +8,7 @@ from datetime import datetime
 import os
 
     
-def process_events_batch(preprocess_config: Dict, batch_df, batch_id=None):
+def process_events_batch(preprocess_config: Dict, batch_df, batch_id=None) -> None:
     """
     Core processing logic for event batches; parses and stores events in Sequence Table.
     Args:
@@ -21,7 +21,6 @@ def process_events_batch(preprocess_config: Dict, batch_df, batch_id=None):
         event_config = EventConfig.from_preprocess_config(preprocess_config, "json")
         events_df = _parse_rows(event_config, batch_df)
         
-    
         get_storage_manager().write_sequence_table(events_df, preprocess_config)
     except Exception as e:
         batch_info = f"batch {batch_id}" if batch_id is not None else "batch"
@@ -83,7 +82,7 @@ def _cast_value_by_schema(field_name: str, value, config: EventConfig):
     return value
 
 
-def parse_log_file(preprocess_config: dict, local=False) -> DataFrame:
+def process_event_log(preprocess_config: dict) -> None:
     """
     Generic parsing function that determines the format and path from config.
     """
@@ -100,23 +99,22 @@ def parse_log_file(preprocess_config: dict, local=False) -> DataFrame:
         raise RuntimeError("Storage manager is not initialized.")
     
     # If local, verify file exists and upload
-    if local:
-        if not os.path.exists(log_path):
-            raise FileNotFoundError(f"Log file not found at path: {log_path}")
-
-
+    if os.path.exists(log_path):
         print(f"Uploading {log_path} to storage...")
-        s3_path = storage.upload_file(preprocess_config, log_path, filename)
-        print(f"File uploaded to: {s3_path}")
+        log_path = storage.upload_file(preprocess_config, log_path, filename)
+        print(f"File uploaded to: {log_path}")
+    
     # Else, assume log_path is already in storage (e.g., s3a://...)
 
     _, ext = os.path.splitext(filename)
     log_format = ext.lower().lstrip('.')
     
     if log_format == 'xes':
-        return parse_xml(log_path, spark, preprocess_config)
+        events_df = parse_xml(log_path, spark, preprocess_config)
+        get_storage_manager().write_sequence_table(events_df, preprocess_config)
     elif log_format == 'csv':
-        return parse_csv(log_path, spark, preprocess_config)
+        events_df = parse_csv(log_path, spark, preprocess_config)
+        get_storage_manager().write_sequence_table(events_df, preprocess_config)
     else:
         raise ValueError(f"Unsupported log format: {log_format}")
 
@@ -322,7 +320,6 @@ def _parse_rows(config: EventConfig, df: DataFrame) -> DataFrame:
                     extra_attributes[col] = str(row[col])
         
         event_field_values['attributes'] = extra_attributes
-        
         return Event.from_dict(event_field_values)
     
     # Create Dataframe of Event objects

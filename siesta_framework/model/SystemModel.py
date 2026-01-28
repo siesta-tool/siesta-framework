@@ -5,6 +5,10 @@ DEFAULT_SYSTEM_CONFIG: Dict[str, Any] = {
     # Storage configuration
     "storage_type": "s3",
     "storage_namespace": "siesta",
+    "api": {
+    "host": "0.0.0.0",
+    "port": 8000
+    },
     
     # S3/MinIO configuration
     "s3_access_key": "minioadmin",

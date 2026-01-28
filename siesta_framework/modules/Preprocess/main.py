@@ -1,19 +1,16 @@
 import argparse
 from pathlib import Path
-from typing import Annotated, Any, Dict, Optional
+from typing import Annotated, Any, Dict
 from fastapi import Form, UploadFile
 from siesta_framework.model.SystemModel import DEFAULT_PREPROCESS_CONFIG
-from siesta_framework.modules.Example.main import Example
 from siesta_framework.core.interfaces import SiestaModule, StorageManager
 from siesta_framework.core.config import get_system_config
 from siesta_framework.core.logger import timed
-from siesta_framework.core.storageFactory import get_storage_manager, get_metadata
-from siesta_framework.model.DataModel import EventConfig, Event
-from siesta_framework.core.sparkManager import get_spark_session
-from siesta_framework.modules.Preprocess.parsers import _parse_rows, parse_log_file, upload_log_file_object, process_events_batch, build_sequence_table
+from siesta_framework.core.storageFactory import get_storage_manager
+from siesta_framework.modules.Preprocess.parsers import upload_log_file_object
+from siesta_framework.modules.Preprocess.builders import build_sequence_table
 from pyspark.sql import SparkSession
 import timeit
-from builders import build_sequence_table
 import json
 
 
@@ -37,30 +34,28 @@ class Preprocessor(SiestaModule):
         print("Preprocessor: Spark session initialized.")
 
     
-    def run_preprocess(self, preprocess_config: Annotated[str, Form()], log: UploadFile | None = None) -> str:
+    def run_preprocess(self, preprocess_config: Annotated[str, Form()], log_file: UploadFile | None = None) -> str:
         parsed_config = json.loads(preprocess_config)
         self.load_preprocess_config(parsed_config)
 
-        if log is None:
-            if self.preprocess_config.get("enable_streaming", False):
-                self.storage = get_storage_manager()
-                self.storage.initialize_streaming_collector(self.preprocess_config)
-                build_sequence_table(self.preprocess_config)
-            return "Streaming collector initialized."
+        if log_file is None:
+            if not self.preprocess_config.get("enable_streaming", False):
+                return "Preprocess: No log file uploaded for batch processing and streaming not enabled. Aborting."    
+            self.storage = get_storage_manager()
+            self.storage.initialize_streaming_collector(self.preprocess_config)
+            self.begin_builders()
+            return "Preprocess: Streaming collector initialized."
         else:
-            if not log.filename:
-                raise ValueError("Raw bytes uploaded.")
-            print(f"Running preprocess with args: {log.filename}")
-            print(f"File first bytes: {log.file.read(100)}")
-            self.preprocess_config["log_path"] = upload_log_file_object(parsed_config, log, log.filename)
-            
-            # events_df = parse_log_file_object(parsed_config, self.log_path)
-            events_df = parse_log_file(self.preprocess_config, local=False)
-            process_events_batch(self.preprocess_config, events_df)
-            return self.preprocess_config["log_path"]
+            if not log_file.filename:
+                return "Preprocess: Uploaded log file has no filename. Aborting."
+            # Ensure batch mode in case of file upload
+            self.preprocess_config["enable_streaming"] = False          
+            print(f"Preprocess: Running preprocess with args: {log_file.filename}")
+            self.preprocess_config["log_path"] = upload_log_file_object(parsed_config, log_file, log_file.filename)
+            self.begin_builders()
+            return "Preprocess: Batch processing completed."
 
 
-    
 
     def run(self, args: Any, **kwargs: Any) -> Any:
         """
@@ -88,14 +83,16 @@ class Preprocessor(SiestaModule):
                     user_preprocess_config = json.load(f)
                     # Merge user config with defaults
                     self.load_preprocess_config(user_preprocess_config)
-                    print(f"Configuration loaded from {config_path}")
+                    print(f"Preprocess: Configuration loaded from {config_path}")
             except Exception as e:
                 raise RuntimeError(f"Error loading config from {config_path}: {e}")
                 
-        print("Preprocess: Begin preprocessing...")
-        timed(build_sequence_table, "Preprocess: ", self.preprocess_config)
+        self.begin_builders()
     
 
     def load_preprocess_config(self, config: Dict[str, Any]):
         self.preprocess_config = DEFAULT_PREPROCESS_CONFIG.copy()
         self.preprocess_config.update(config)
+
+    def begin_builders(self):
+        timed(build_sequence_table, "Preprocess: ", self.preprocess_config)
