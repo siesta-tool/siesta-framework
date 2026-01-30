@@ -9,6 +9,7 @@ import siesta_framework.core.sparkManager as SparkManager
 from siesta_framework.core.storageFactory import StorageManagerFactory, set_storage_manager, set_active_log
 from siesta_framework.core.config import initialize_config, load_config
 import argparse
+import logging
 
 class Siesta:
 
@@ -27,6 +28,7 @@ class Siesta:
         Returns:
             An instance of Siesta
         """
+        logging.basicConfig(level=logging.INFO)
         parser = argparse.ArgumentParser(description="Siesta Framework Initialization")
         parser.add_argument('--config', type=str, help='Path to configuration JSON file', required=False)
         parser.add_argument('module', type=str, help='Module to run')

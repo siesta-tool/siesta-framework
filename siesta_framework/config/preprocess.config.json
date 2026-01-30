@@ -1,10 +1,10 @@
 {
   "log_name": "example_log",
-  "log_path": "datasets/test.xes",
+  "log_path": "datasets/test_nopos.csv",
   "clear_existing": false,
   "is_continued": false,
   "is_streaming": false,
-  "enable_streaming": "True",
+  "enable_streaming": false,
   "kafka_topic": "example_log",
   "field_mappings": {
     "xes": {

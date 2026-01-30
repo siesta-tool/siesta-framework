@@ -12,6 +12,8 @@ from siesta_framework.modules.Preprocess.builders import build_sequence_table
 from pyspark.sql import SparkSession
 import timeit
 import json
+import logging
+logger = logging.getLogger("Preprocess")
 
 
 class Preprocessor(SiestaModule):
@@ -31,7 +33,7 @@ class Preprocessor(SiestaModule):
 
     def startup(self):
         self.siesta_config = get_system_config()
-        print("Preprocessor: Spark session initialized.")
+        logger.info("Preprocessor: Spark session initialized.")
 
     
     def api_run(self, preprocess_config: Annotated[str, Form()], log_file: UploadFile | None = None) -> Any:
@@ -50,7 +52,7 @@ class Preprocessor(SiestaModule):
                 return "Preprocess: Uploaded log file has no filename. Aborting."
             # Ensure batch mode in case of file upload
             self.preprocess_config["enable_streaming"] = False          
-            print(f"Preprocess: Running preprocess with args: {log_file.filename}")
+            logger.info(f"Preprocess: Running preprocess with args: {log_file.filename}")
             self.preprocess_config["log_path"] = upload_log_file_object(parsed_config, log_file, log_file.filename)
             self.begin_builders()
             return "Preprocess: Batch processing completed."

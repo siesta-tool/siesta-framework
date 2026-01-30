@@ -1,0 +1,11 @@
+trace_id,activity,timestamp,resource,role,cost,lifecycle
+trace_1,A,2025-01-01T09:00:00.000+00:00,r1,clerk,5.0,complete
+trace_1,B,2025-01-01T09:05:00.000+00:00,r2,analyst,7.5,complete
+trace_1,C,2025-01-01T09:10:00.000+00:00,r3,system,2.0,complete
+trace_2,A,2025-01-01T10:00:00.000+00:00,r1,clerk,5.0,complete
+trace_2,C,2025-01-01T10:07:00.000+00:00,r3,system,2.0,complete
+trace_3,B,2025-01-01T11:00:00.000+00:00,r2,analyst,7.5,complete
+trace_3,C,2025-01-01T11:03:00.000+00:00,r3,system,2.0,complete
+trace_3,D,2025-01-01T11:15:00.000+00:00,r4,manager,12.0,complete
+trace_4,A,2025-01-01T12:00:00.000+00:00,r1,clerk,5.0,complete
+trace_4,D,2025-01-01T12:20:00.000+00:00,r4,manager,12.0,complete

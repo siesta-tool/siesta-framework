@@ -1,11 +1,17 @@
+import struct
 from typing import Any, Dict
+from pyspark import RDD
 from siesta_framework.core.sparkManager import get_spark_session
 from siesta_framework.core.storageFactory import get_storage_manager
 from siesta_framework.model.DataModel import Event, EventConfig
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql.types import StringType, IntegerType, MapType
+from pyspark.sql.functions import monotonically_increasing_id, lit
 from datetime import datetime
 import os
+from pyspark.sql.window import Window
+from pyspark.sql.functions import row_number
+
 
     
 def process_events_batch(preprocess_config: Dict, batch_df, batch_id=None) -> None:
@@ -137,7 +143,6 @@ def parse_xml(storage_path: str, spark: SparkSession, preprocess_config: dict) -
     traces_df = spark.read.format("xml") \
         .option("rowTag", "trace") \
         .load(storage_path)
-    
     
     # Transform traces row to event RDD row
     def process_trace(row):
@@ -322,10 +327,11 @@ def _parse_rows(config: EventConfig, df: DataFrame) -> DataFrame:
         event_field_values['attributes'] = extra_attributes
         return Event.from_dict(event_field_values)
     
-    # Create Dataframe of Event objects
+    df = df.withColumn("position", row_number().over(Window.partitionBy("trace_id").orderBy("trace_id")))  # Assign position
     events_rdd = df.rdd.map(row_to_event)
     event_dicts_rdd = events_rdd.map(lambda event: event.to_dict())
     events_df = get_spark_session().createDataFrame(event_dicts_rdd, schema=Event.get_schema())
+    
     return events_df
 
 
