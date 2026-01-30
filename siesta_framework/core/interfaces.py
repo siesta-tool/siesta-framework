@@ -42,9 +42,6 @@ class SiestaModule(ABC):
         """Main execution method for the module."""
         pass
 
-    def api_run(self, args: Any, **kwargs: Any) -> Any:
-        """Main execution method for the module via API."""
-        pass
 
 
 class StorageManager(ABC):

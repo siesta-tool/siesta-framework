@@ -4,13 +4,15 @@ from siesta_framework.core.storageFactory import get_metadata, get_storage_manag
 from siesta_framework.core.config import get_system_config
 from siesta_framework.model.DataModel import Event, EventConfig
 from siesta_framework.modules.Preprocess.parsers import process_events_batch, process_event_log
+import logging
+logger = logging.getLogger(__name__)
 
 
 def build_sequence_table(preprocess_config: Dict):
     """
     Build the Sequence Table from the log file, supporting both batch and streaming modes.
     """
-    print("Preprocess.builders: Building Sequence Table...")
+    logger.info("Preprocess.builders: Building Sequence Table...")
     if preprocess_config.get("enable_streaming", False):
 
         schema = EventConfig.from_preprocess_config(preprocess_config, "json").get_source_schema()
@@ -34,4 +36,12 @@ def build_sequence_table(preprocess_config: Dict):
             .start())
     else:
         process_event_log(preprocess_config)
-        
+
+
+def build_index_table(preprocess_config: Dict):
+    """
+    Build the Index Table from the Sequence Table.
+    """
+    logger.info("Preprocess.builders: Building Index Table...")
+    # Implementation for building index table goes here
+    pass
