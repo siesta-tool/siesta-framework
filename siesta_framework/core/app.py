@@ -6,7 +6,7 @@ from siesta_framework.core.interfaces import SiestaModule, StorageManager
 import siesta_framework.modules as modules
 import siesta_framework as siesta_framework_package
 import siesta_framework.core.sparkManager as SparkManager
-from siesta_framework.core.storageFactory import StorageManagerFactory, set_storage_manager, set_active_log
+from siesta_framework.core.storageFactory import StorageManagerFactory, set_storage_manager
 from siesta_framework.core.config import initialize_config, load_config
 import argparse
 import logging
@@ -77,16 +77,6 @@ class Siesta:
         
         # Initialize global config accessor
         initialize_config(self.config)
-        
-        # In CLI mode, set the active log from config
-        # In API mode, logs are created on-demand per request
-        if cli_mode:
-            log_name = self.config.get("log_name", "default")
-            self.metadata = set_active_log(log_name)
-            print(f"CLI mode: Active log set to '{log_name}'")
-        else:
-            self.metadata = None
-            print("API mode: No active log set (logs created per-request)")
         
         # Start Spark Manager
         SparkManager.startup(self.config)

@@ -1,8 +1,7 @@
 from typing import Any, Dict
 from siesta_framework.core.sparkManager import get_spark_session
-from siesta_framework.core.storageFactory import get_metadata, get_storage_manager
-from siesta_framework.core.config import get_system_config
-from siesta_framework.model.DataModel import Event, EventConfig
+from siesta_framework.core.storageFactory import get_storage_manager
+from siesta_framework.model.DataModel import EventConfig
 from siesta_framework.model.StorageModel import MetaData
 from siesta_framework.modules.Preprocess.parsers import process_events_batch, process_event_log
 import logging
