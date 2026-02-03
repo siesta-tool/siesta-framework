@@ -2,6 +2,7 @@ import argparse
 from pathlib import Path
 from typing import Annotated, Any, Dict
 from fastapi import Form, UploadFile
+from siesta_framework.model.StorageModel import MetaData
 from siesta_framework.model.SystemModel import DEFAULT_PREPROCESS_CONFIG
 from siesta_framework.core.interfaces import SiestaModule, StorageManager
 from siesta_framework.core.config import get_system_config
@@ -22,8 +23,11 @@ class Preprocessor(SiestaModule):
     version = "1.2.0"
     spark: SparkSession
     storage: StorageManager
-    preprocess_config: Dict[str, Any]
     siesta_config: Dict[str, Any]
+
+    preprocess_config: Dict[str, Any]
+
+    metadata: MetaData
 
     def __init__(self):
         super().__init__()
@@ -33,17 +37,21 @@ class Preprocessor(SiestaModule):
 
     def startup(self):
         self.siesta_config = get_system_config()
-        logger.info("Preprocessor: Spark session initialized.")
+        self._load_preprocess_config({})
+        logger.info("Startup complete.")
 
     
     def api_run(self, preprocess_config: Annotated[str, Form()], log_file: UploadFile | None = None) -> Any:
-        parsed_config = json.loads(preprocess_config)
-        self.load_preprocess_config(parsed_config)
+        print(f"{self.name} is running via API request.")
+
+        self.siesta_config = get_system_config()
+        self.storage = get_storage_manager()
+        self._load_preprocess_config(json.loads(preprocess_config))
+        self.storage.initialize_db(self.preprocess_config)
 
         if log_file is None:
             if not self.preprocess_config.get("enable_streaming", False):
                 return "Preprocess: No log file uploaded for batch processing and streaming not enabled. Aborting."    
-            self.storage = get_storage_manager()
             self.storage.initialize_streaming_collector(self.preprocess_config)
             self.begin_builders()
             return "Preprocess: Streaming collector initialized."
@@ -53,7 +61,7 @@ class Preprocessor(SiestaModule):
             # Ensure batch mode in case of file upload
             self.preprocess_config["enable_streaming"] = False          
             logger.info(f"Preprocess: Running preprocess with args: {log_file.filename}")
-            self.preprocess_config["log_path"] = upload_log_file_object(parsed_config, log_file, log_file.filename)
+            self.preprocess_config["log_path"] = upload_log_file_object(self.preprocess_config, log_file, log_file.filename)
             self.begin_builders()
             return "Preprocess: Batch processing completed."
 
@@ -62,8 +70,10 @@ class Preprocessor(SiestaModule):
         """
         Entry point for Preprocess via the command line.
         """
-
         print(f"{self.name} is running with args: {args} and kwargs: {kwargs}")
+
+        self.siesta_config = get_system_config()
+        self.storage = get_storage_manager()
 
         parser = argparse.ArgumentParser(description="Siesta Preprocess module")
         parser.add_argument('--preprocess_config', type=str, help='Path to configuration JSON file', required=False)
@@ -82,8 +92,10 @@ class Preprocessor(SiestaModule):
             try:
                 with open(config_path, 'r') as f:
                     user_preprocess_config = json.load(f)
-                    # Merge user config with defaults
-                    self.load_preprocess_config(user_preprocess_config)
+                    
+                    self._load_preprocess_config(user_preprocess_config)
+                    self.storage.initialize_db(self.preprocess_config)
+
                     print(f"Preprocess: Configuration loaded from {config_path}")
             except Exception as e:
                 raise RuntimeError(f"Error loading config from {config_path}: {e}")
@@ -91,9 +103,14 @@ class Preprocessor(SiestaModule):
         self.begin_builders()
     
 
-    def load_preprocess_config(self, config: Dict[str, Any]):
+    def _load_preprocess_config(self, config: Dict[str, Any]):
         self.preprocess_config = DEFAULT_PREPROCESS_CONFIG.copy()
         self.preprocess_config.update(config)
 
     def begin_builders(self):
-        timed(build_sequence_table, "Preprocess: ", self.preprocess_config)
+        # Create a metadata object that will overwrite existing metadata 
+        # according to new preprocessing task (based on the preprocess_config)
+        self.metadata = self.storage.read_metadata_table(self.preprocess_config)
+        timed(build_sequence_table, "Preprocess: ", self.preprocess_config, self.metadata)
+        
+        self.storage.write_metadata_table(self.metadata)

@@ -5,6 +5,8 @@ from fastapi.params import Form
 from pyspark.sql import DataFrame
 from pyspark import RDD
 
+from siesta_framework.model.StorageModel import MetaData
+
 class SiestaModule(ABC):
     """All Siesta modules must implement to be accessed by the framework.
        eg. ::
@@ -48,6 +50,7 @@ class StorageManager(ABC):
 
     name: ClassVar[str] = "Unnamed Storage Manager"
     version: ClassVar[str] = "unversioned"
+    type: ClassVar[str] = "generic"
 
     """
     This abstract class defines the interface that each database connector should implement.
@@ -69,22 +72,18 @@ class StorageManager(ABC):
     """
     
     @abstractmethod
-    def initialize_spark(self, config: Dict[str, Any]) -> None:
+    def initialize_spark(self) -> None:
         """
         Initialize the Spark context depending on the database requirements.
-        
-        Args:
-            config: Configuration dictionary containing Spark and database settings
+
         """
         pass
     
     @abstractmethod
-    def initialize_db(self, preprocess_config: Dict[str, Any]) -> None:
+    def initialize_db(self) -> None:
         """
         Create the appropriate tables and remove previous ones if necessary.
         
-        Args:
-            preprocess_config: Configuration dictionary containing database settings
         """
         pass
     
@@ -99,7 +98,7 @@ class StorageManager(ABC):
         pass
     
     @abstractmethod
-    def get_steaming_collector_path(self, preprocess_config: Dict[str, Any]) -> str:
+    def get_steaming_collector_path(self, log_name: str) -> str:
         """
         Get the path where the streaming collector stores data.
 
@@ -126,7 +125,7 @@ class StorageManager(ABC):
         pass
     
     @abstractmethod
-    def get_metadata(self, preprocess_config: Dict[str, Any]) -> Any:
+    def read_metadata_table(self, preprocess_config: Dict[str, Any]) -> MetaData:
         """
         Construct metadata based on data already stored in the database and new configuration.
         
@@ -168,7 +167,7 @@ class StorageManager(ABC):
         pass
     
     @abstractmethod
-    def write_metadata(self, metadata: Any) -> None:
+    def write_metadata_table(self, metadata: Any) -> None:
         """
         Persist metadata to the database.
         
@@ -179,13 +178,12 @@ class StorageManager(ABC):
     
     
     @abstractmethod
-    def read_sequence_table(self, metadata: Any, detailed: bool = False) -> DataFrame:
+    def read_sequence_table(self, metadata: Any) -> DataFrame:
         """
         Read data as an DataFrame from the SequenceTable.
         
         Args:
             metadata: MetaData object containing the metadata
-            detailed: Whether to include detailed information
             
         Returns:
             DataFrame containing EventTrait objects
@@ -241,7 +239,7 @@ class StorageManager(ABC):
         pass
     
     @abstractmethod
-    def write_sequence_table(self, events_df: DataFrame, preprocess_config: Dict[str, Any] = {}, detailed: bool = False) -> None:
+    def write_sequence_table(self, events_df: DataFrame, preprocess_config: Dict[str, Any], metadata: MetaData) -> None:
         """
         Write traces to the SequenceTable. The RDD should already be persisted and should not be modified.
         Updates the metadata object.

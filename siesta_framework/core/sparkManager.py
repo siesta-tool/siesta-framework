@@ -108,6 +108,7 @@ def startup(config: Dict[str, Any] = {}) -> None:
             print(f"S3 endpoint configured: {executor_s3_endpoint} (Docker bridge: {bridge_ip})")
         
         spark_session = builder.getOrCreate()
+        spark_session.sparkContext.setLogLevel("ERROR")
         print(f"SparkSession initialized and connected to Spark Master at {spark_master_url}.")
         
         # Ship code to executors
@@ -142,7 +143,7 @@ def get_spark_session() -> SparkSession:
         raise RuntimeError("SparkSession not initialized. Call startup() first.")
     return spark_session
 
-def shutdown():
+def __del__():
     if spark_session:
         print("Shutting down SparkSession...")
         spark_session.stop()

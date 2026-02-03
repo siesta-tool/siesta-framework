@@ -1,9 +1,8 @@
 {
   "log_name": "example_log",
   "log_path": "datasets/test_nopos.csv",
-  "clear_existing": false,
-  "is_continued": false,
-  "is_streaming": false,
+  "storage_namespace": "siesta",
+  "overwrite_data": false,
   "enable_streaming": false,
   "kafka_topic": "example_log",
   "field_mappings": {

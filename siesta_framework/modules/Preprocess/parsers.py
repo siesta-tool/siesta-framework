@@ -12,6 +12,8 @@ import os
 from pyspark.sql.window import Window
 from pyspark.sql.functions import row_number
 
+from siesta_framework.model.StorageModel import MetaData
+
 
     
 def process_events_batch(preprocess_config: Dict, batch_df, batch_id=None) -> None:
@@ -88,7 +90,7 @@ def _cast_value_by_schema(field_name: str, value, config: EventConfig):
     return value
 
 
-def process_event_log(preprocess_config: dict) -> None:
+def process_event_log(preprocess_config: dict, metadata: MetaData) -> None:
     """
     Generic parsing function that determines the format and path from config.
     """
@@ -117,10 +119,10 @@ def process_event_log(preprocess_config: dict) -> None:
     
     if log_format == 'xes':
         events_df = parse_xml(log_path, spark, preprocess_config)
-        get_storage_manager().write_sequence_table(events_df, preprocess_config)
+        get_storage_manager().write_sequence_table(events_df, preprocess_config, metadata)
     elif log_format == 'csv':
         events_df = parse_csv(log_path, spark, preprocess_config)
-        get_storage_manager().write_sequence_table(events_df, preprocess_config)
+        get_storage_manager().write_sequence_table(events_df, preprocess_config, metadata)
     else:
         raise ValueError(f"Unsupported log format: {log_format}")
 
@@ -345,7 +347,7 @@ def upload_log_file_object(preprocess_config: dict, file: Any, destination_path:
 
     print(f"Uploading file object to storage as {destination_path}...")
     s3_path = storage.upload_file_object(preprocess_config, file, destination_path)
-    print(f"File uploaded to: {s3_path}")
+    print(f"Parser: File uploaded to: {s3_path}")
     #TODO: handle s3 path
     return s3_path
 
