@@ -22,6 +22,25 @@ python3 main.py --config config/siesta.config.json
 python3 main.py --config config/preprocess.config.json preprocess
 '''
 
+import logging
+logging.getLogger('py4j.java_gateway').setLevel(logging.ERROR)
+logging.getLogger('py4j').setLevel(logging.ERROR)
+logging.getLogger('SLF4J').setLevel(logging.FATAL)
+logging.getLogger('Spark').setLevel(logging.ERROR)
+logging.getLogger('log4j').setLevel(logging.ERROR)
+
+'''
+Example usage:
+# Run API server (default config)
+python3 main.py
+
+# Run API server with specific config
+python3 main.py --config config/siesta.config.json
+
+# Run a specific module (CLI mode)
+python3 main.py --config config/preprocess.config.json preprocess
+'''
+
 args = sys.argv[1:]  # Get command-line arguments excluding the script name
 
 # Check if running in CLI mode (module name provided) or API mode
