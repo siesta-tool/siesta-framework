@@ -92,7 +92,7 @@ class Siesta:
         SparkManager.startup(self.config)
         
         # Setup Storage Manager and set global accessor
-        self.storage_manager = StorageManagerFactory.create_storage_manager(self.config, SparkManager)
+        self.storage_manager = StorageManagerFactory.create_storage_manager(self.config)
         set_storage_manager(self.storage_manager)
         
         # Initialize Modules
@@ -128,6 +128,6 @@ class Siesta:
             raise RuntimeError("StorageManager not initialized. Call startup() first.")
         return self.storage_manager
 
-    def shutdown(self) -> None:
+    def __del__(self) -> None:
         print("--- Shutting Down Framework ---")
         SparkManager.shutdown()

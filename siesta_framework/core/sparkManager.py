@@ -4,6 +4,9 @@ import os
 import subprocess
 import zipfile
 from pathlib import Path
+import logging
+_s_logger = logging.getLogger('py4j.java_gateway')
+_s_logger.setLevel(logging.ERROR)
 
 # Ensure PySpark uses its bundled Spark
 if "SPARK_HOME" in os.environ:
@@ -108,6 +111,7 @@ def startup(config: Dict[str, Any] = {}) -> None:
             print(f"S3 endpoint configured: {executor_s3_endpoint} (Docker bridge: {bridge_ip})")
         
         spark_session = builder.getOrCreate()
+        spark_session.sparkContext.setLogLevel("ERROR")
         print(f"SparkSession initialized and connected to Spark Master at {spark_master_url}.")
         
         # Ship code to executors

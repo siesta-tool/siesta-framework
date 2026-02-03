@@ -143,7 +143,7 @@ class StorageManagerFactory:
         print(f"Registered storage manager: {name} -> {manager_class.__name__}")
     
     @classmethod
-    def create_storage_manager(cls, config: Dict[str, Any], spark_manager) -> StorageManager:
+    def create_storage_manager(cls, config: Dict[str, Any]) -> StorageManager:
         """
         Create and return a storage manager instance based on configuration.
         

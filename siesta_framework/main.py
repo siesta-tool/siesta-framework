@@ -8,7 +8,6 @@ if not args:
     app =  Siesta() #Siesta(config_path=str(Path(__file__).parent / 'config.example.json'))
     app.startup()
     router.startup(app)
-    app.shutdown()
 else:
     app = Siesta.with_args(args)
     app.shutdown()

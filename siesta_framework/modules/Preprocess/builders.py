@@ -3,12 +3,13 @@ from siesta_framework.core.sparkManager import get_spark_session
 from siesta_framework.core.storageFactory import get_metadata, get_storage_manager
 from siesta_framework.core.config import get_system_config
 from siesta_framework.model.DataModel import Event, EventConfig
+from siesta_framework.model.StorageModel import MetaData
 from siesta_framework.modules.Preprocess.parsers import process_events_batch, process_event_log
 import logging
 logger = logging.getLogger(__name__)
 
 
-def build_sequence_table(preprocess_config: Dict):
+def build_sequence_table(preprocess_config: Dict, metadata: MetaData):
     """
     Build the Sequence Table from the log file, supporting both batch and streaming modes.
     """
@@ -35,7 +36,7 @@ def build_sequence_table(preprocess_config: Dict):
             .option("checkpointLocation", storage.get_checkpoint_location(preprocess_config, "sequence_table"))
             .start())
     else:
-        process_event_log(preprocess_config)
+        process_event_log(preprocess_config, metadata)
 
 
 def build_index_table(preprocess_config: Dict):

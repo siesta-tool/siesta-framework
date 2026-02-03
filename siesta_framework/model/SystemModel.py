@@ -4,7 +4,6 @@ from typing import Dict, Any
 DEFAULT_SYSTEM_CONFIG: Dict[str, Any] = {
     # Storage configuration
     "storage_type": "s3",
-    "storage_namespace": "siesta",
     "api": {
     "host": "0.0.0.0",
     "port": 8000
@@ -17,9 +16,7 @@ DEFAULT_SYSTEM_CONFIG: Dict[str, Any] = {
     "s3_region": "us-east-1",
     
     # Database configuration
-    "clear_existing": False,
-    "is_continued": False,
-    "is_streaming": False,
+    "empty_namespace": False,
 
     "enable_streaming": True,
     "enable_timing": True,
@@ -30,7 +27,6 @@ DEFAULT_SYSTEM_CONFIG: Dict[str, Any] = {
     
     # Kafka configuration
     "kafka_bootstrap_servers": "localhost:9092",
-    "kafka_topic": "default_log", # Should match log_name
     "raw_events_dir": "raw_events",
     "checkpoint_dir": "checkpoints",
 }
@@ -38,10 +34,11 @@ DEFAULT_SYSTEM_CONFIG: Dict[str, Any] = {
 DEFAULT_PREPROCESS_CONFIG: Dict[str, Any] = {
   "log_name": "example_log",
   "log_path": "datasets/test.xes",
+  "storage_namespace": "siesta",
   "clear_existing": False,
   "is_continued": False,
   "is_streaming": False,
-  "kafka_topic": "example_log",
+  "kafka_topic": "example_log", # better match the log_name
   "field_mappings": {
     "xes": {
       "activity": "concept:name",
