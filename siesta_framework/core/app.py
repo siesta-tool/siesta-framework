@@ -14,7 +14,7 @@ import logging
 class Siesta:
 
     def __init__(self, config_path: str|None = None) -> None:
-        self.config = load_config()
+        self.config = load_config(config_path)
         self.storage_manager = None
         self.registered_routes: Dict[str, SiestaModule.ApiRoutes|None] = {}
         self.module_instances: Dict[str, SiestaModule] = {}
