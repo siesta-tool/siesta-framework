@@ -4,9 +4,6 @@ import os
 import subprocess
 import zipfile
 from pathlib import Path
-import logging
-_s_logger = logging.getLogger('py4j.java_gateway')
-_s_logger.setLevel(logging.ERROR)
 
 # Ensure PySpark uses its bundled Spark
 if "SPARK_HOME" in os.environ:
@@ -146,7 +143,7 @@ def get_spark_session() -> SparkSession:
         raise RuntimeError("SparkSession not initialized. Call startup() first.")
     return spark_session
 
-def shutdown():
+def __del__():
     if spark_session:
         print("Shutting down SparkSession...")
         spark_session.stop()

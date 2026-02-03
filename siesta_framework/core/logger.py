@@ -1,7 +1,10 @@
 import time
 from siesta_framework.core.config import get_system_config
 import logging
+
+
 logger = logging.getLogger("Timer")
+
 
 def timed(func, prefix:str="",  *args, **kwargs):
     do_time = get_system_config().get("enable_timing", False)

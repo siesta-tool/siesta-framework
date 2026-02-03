@@ -17,6 +17,7 @@ class Siesta:
         self.config = load_config()
         self.storage_manager = None
         self.registered_routes: Dict[str, SiestaModule.ApiRoutes|None] = {}
+        self.module_instances: Dict[str, SiestaModule] = {}
 
     @classmethod
     def with_args(cls, args:List[str]):
@@ -38,14 +39,13 @@ class Siesta:
         app = cls(config_path=parsed_args.config if parsed_args.config else None)
         app.startup(cli_mode=True)
 
-        for module in app.discovered_modules:
-            if module.name == parsed_args.module:
-                mod = module()
-                mod.startup()
-                mod.cli_run(unknown_args)
-                return app
+        # Reuse the already-initialized module instance
+        if parsed_args.module in app.module_instances:
+            mod = app.module_instances[parsed_args.module]
+            mod.cli_run(unknown_args)
+        else:
+            print(f"Module {parsed_args.module} not found")
         
-        print(f"Module {parsed_args.module} not found")
         return app
     
     def discover_modules(self) -> List[Type[SiestaModule]]:
@@ -93,6 +93,8 @@ class Siesta:
             mod_instance = mod_class()
             print(f"--- Starting Module: {mod_instance.name} v{mod_instance.version} ---")
             mod_instance.startup()
+            # Store instance for reuse in CLI mode
+            self.module_instances[mod_instance.name] = mod_instance
 
         print("--- Framework Started ---")
     
@@ -117,7 +119,3 @@ class Siesta:
         if self.storage_manager is None:
             raise RuntimeError("StorageManager not initialized. Call startup() first.")
         return self.storage_manager
-
-    def __del__(self) -> None:
-        print("--- Shutting Down Framework ---")
-        SparkManager.shutdown()

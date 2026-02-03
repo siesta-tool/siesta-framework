@@ -37,7 +37,8 @@ class Preprocessor(SiestaModule):
 
     def startup(self):
         self.siesta_config = get_system_config()
-        logger.info("Preprocessor: Startup complete.")
+        self._load_preprocess_config({})
+        logger.info("Startup complete.")
 
     
     def api_run(self, preprocess_config: Annotated[str, Form()], log_file: UploadFile | None = None) -> Any:
