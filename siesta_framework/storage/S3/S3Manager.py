@@ -247,71 +247,6 @@ class S3Manager(StorageManager):
         log_name = metadata.log_name
         return f"s3a://{namespace}/{log_name}/{self.config.get('checkpoint_dir', 'checkpoints')}/{checkpoint_table}/"
 
-    def read_metadata_table(self, preprocess_config: Dict[str, Any], metadata: MetaData) -> MetaData:
-        """
-        Construct metadata by loading existing metadata from S3 or creating new.
-        
-        Args:
-            preprocess_config: Configuration dictionary containing storage settings
-            
-        Returns:
-            MetaData object containing the current stored metadata
-        """
-
-        log_name = preprocess_config.get("log_name", "default_log")
-        namespace = preprocess_config.get("storage_namespace", "siesta")
-
-        # Initialize MetaData object with defaults
-        metadata.trace_count = 0
-        metadata.event_count = 0
-        metadata.pair_count = 0
-        metadata.first_timestamp = None
-        metadata.last_timestamp = None
-        metadata.last_mined_timestamp = None
-        metadata.approx_unique_traces = set()
-        metadata.approx_unique_activities = set()
-        try:
-            # Try to read the Delta table directly - if it doesn't exist, an exception will be raised
-            metadata_df = self.spark.read.format("delta").load(metadata.metadata_table_path)
-            
-            row = metadata_df.head(1)
-            if row:
-                r = row[0]
-                metadata.trace_count = r.trace_count or 0
-                metadata.event_count = r.event_count or 0
-                metadata.pair_count = r.pair_count or 0
-                metadata.first_timestamp = datetime.strptime(r.first_timestamp, "%Y-%m-%dT%H:%M:%S") if r.first_timestamp is not None else None
-                metadata.last_timestamp = datetime.strptime(r.last_timestamp, "%Y-%m-%dT%H:%M:%S") if r.last_timestamp is not None else None
-                metadata.last_mined_timestamp = datetime.strptime(r.last_mined_timestamp, "%Y-%m-%dT%H:%M:%S") if r.last_mined_timestamp is not None else None
-                metadata.approx_unique_traces = set(r.approx_unique_traces) if r.approx_unique_traces is not None else set()
-                metadata.approx_unique_activities = set(r.approx_unique_activities) if r.approx_unique_activities is not None else set()
-                metadata.storage_type = "s3"
-                print(f"S3Manager: Loaded existing metadata for {log_name}")
-        except Exception as e:
-            # If table doesn't exist or can't be read, use defaults
-            print(f"S3Manager: Metadata does not exist or failed to load for {log_name}. Initialized defaults.")
-        return metadata
-    
-    def write_metadata_table(self, metadata: MetaData) -> None:
-        """
-        Persist metadata to S3 in Delta format.
-        
-        Args:
-            metadata: MetaData object containing the metadata
-        """
-        # Convert MetaData object to dictionary
-        metadata_dict = metadata.to_dict()
-
-        # Create DataFrame and store 
-        metadata_df = self.spark.createDataFrame([metadata_dict], schema=MetaData.get_schema())
-
-        metadata_df.write \
-            .format("delta") \
-            .mode("overwrite") \
-            .option("mergeSchema", "true") \
-            .save(metadata.metadata_table_path)
-        
-        print(f"S3Manager: Metadata written to {metadata.metadata_table_path}")
 
     def upload_file(self, preprocess_config: Dict[str, Any], local_path: str, destination_path: str) -> str:
         """
@@ -466,6 +401,75 @@ class S3Manager(StorageManager):
         except Exception as e:
             print(f"S3Manager: Error writing IndexTable: {e}")
     
+    ###########################################
+    ########## MetaData Table Methods #########
+    ###########################################
+
+    def read_metadata_table(self, preprocess_config: Dict[str, Any], metadata: MetaData) -> MetaData:
+        """
+        Construct metadata by loading existing metadata from S3 or creating new.
+        
+        Args:
+            preprocess_config: Configuration dictionary containing storage settings
+            
+        Returns:
+            MetaData object containing the current stored metadata
+        """
+
+        log_name = preprocess_config.get("log_name", "default_log")
+        namespace = preprocess_config.get("storage_namespace", "siesta")
+
+        # Initialize MetaData object with defaults
+        metadata.trace_count = 0
+        metadata.event_count = 0
+        metadata.pair_count = 0
+        metadata.first_timestamp = None
+        metadata.last_timestamp = None
+        metadata.last_mined_timestamp = None
+        metadata.approx_unique_traces = set()
+        metadata.approx_unique_activities = set()
+        try:
+            # Try to read the Delta table directly - if it doesn't exist, an exception will be raised
+            metadata_df = self.spark.read.format("delta").load(metadata.metadata_table_path)
+            
+            row = metadata_df.head(1)
+            if row:
+                r = row[0]
+                metadata.trace_count = r.trace_count or 0
+                metadata.event_count = r.event_count or 0
+                metadata.pair_count = r.pair_count or 0
+                metadata.first_timestamp = datetime.strptime(r.first_timestamp, "%Y-%m-%dT%H:%M:%S") if r.first_timestamp is not None else None
+                metadata.last_timestamp = datetime.strptime(r.last_timestamp, "%Y-%m-%dT%H:%M:%S") if r.last_timestamp is not None else None
+                metadata.last_mined_timestamp = datetime.strptime(r.last_mined_timestamp, "%Y-%m-%dT%H:%M:%S") if r.last_mined_timestamp is not None else None
+                metadata.approx_unique_traces = set(r.approx_unique_traces) if r.approx_unique_traces is not None else set()
+                metadata.approx_unique_activities = set(r.approx_unique_activities) if r.approx_unique_activities is not None else set()
+                metadata.storage_type = "s3"
+                print(f"S3Manager: Loaded existing metadata for {log_name}")
+        except Exception as e:
+            # If table doesn't exist or can't be read, use defaults
+            print(f"S3Manager: Metadata does not exist or failed to load for {log_name}. Initialized defaults.")
+        return metadata
+    
+    def write_metadata_table(self, metadata: MetaData) -> None:
+        """
+        Persist metadata to S3 in Delta format.
+        
+        Args:
+            metadata: MetaData object containing the metadata
+        """
+        # Convert MetaData object to dictionary
+        metadata_dict = metadata.to_dict()
+
+        # Create DataFrame and store 
+        metadata_df = self.spark.createDataFrame([metadata_dict], schema=MetaData.get_schema())
+
+        metadata_df.write \
+            .format("delta") \
+            .mode("overwrite") \
+            .option("mergeSchema", "true") \
+            .save(metadata.metadata_table_path)
+        
+        print(f"S3Manager: Metadata written to {metadata.metadata_table_path}")
 
 
 
@@ -479,7 +483,6 @@ class S3Manager(StorageManager):
 
         Args:
             events_df: DataFrame containing processed events
-            preprocess_config: Configuration dictionary containing storage settings
             metadata: MetaData object containing the metadata
         """        
         try:
@@ -491,14 +494,10 @@ class S3Manager(StorageManager):
                 .save(metadata.sequence_table_path)
             
             events_count = events_df.count()
-            locally_uninque_traces = events_df.select("trace_id").distinct().rdd.map(lambda row: hash_str(row.trace_id)).collect()
-            globally_uninque_traces = set(locally_uninque_traces) - metadata.approx_unique_traces
-            print(f"S3Manager: Wrote {events_count} new events and {len(globally_uninque_traces)} new traces to {metadata.sequence_table_path}.")
+            print(f"S3Manager: Wrote {events_count} new events to {metadata.sequence_table_path}.")
 
             # Update metadata object
-            # old_trace_count = self.read_sequence_table(metadata).select("trace_id").distinct().count()
-            # metadata.trace_count += len(globally_uninque_traces)
-            # metadata.approx_unique_traces.update(globally_uninque_traces)
+            metadata.trace_count = self.read_sequence_table(metadata).select("trace_id").distinct().count()
             metadata.event_count += events_count
             metadata.first_timestamp = metadata.first_timestamp if metadata.first_timestamp is not None else datetime.strptime(events_df.agg({"start_timestamp": "min"}).collect()[0][0], "%Y-%m-%dT%H:%M:%S")
             metadata.last_timestamp = datetime.strptime(events_df.agg({"start_timestamp": "max"}).collect()[0][0], "%Y-%m-%dT%H:%M:%S")
@@ -535,7 +534,6 @@ class S3Manager(StorageManager):
         
         Args:
             events_df: DataFrame containing processed events
-            preprocess_config: Configuration dictionary containing storage settings
             metadata: MetaData object containing the metadata
         """        
         try:

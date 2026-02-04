@@ -54,7 +54,7 @@ class Preprocessor(SiestaModule):
             if not self.preprocess_config.get("enable_streaming", False):
                 return "Preprocess: No log file uploaded for batch processing and streaming not enabled. Aborting."    
             self.storage.initialize_streaming_collector(self.preprocess_config)
-            self.begin_builders()
+            self.begin_builders(caller="api")
             return "Preprocess: Streaming collector initialized."
         else:
             if not log_file.filename:
@@ -63,7 +63,7 @@ class Preprocessor(SiestaModule):
             self.preprocess_config["enable_streaming"] = False          
             logger.info(f"Preprocess: Running preprocess with args: {log_file.filename}")
             self.preprocess_config["log_path"] = upload_log_file_object(self.preprocess_config, log_file, log_file.filename)
-            self.begin_builders()
+            self.begin_builders(caller="api")
             return "Preprocess: Batch processing completed."
 
 
@@ -104,7 +104,7 @@ class Preprocessor(SiestaModule):
         if self.preprocess_config.get("enable_streaming", False):
             self.storage.initialize_streaming_collector(self.preprocess_config)
                 
-        self.begin_builders()
+        self.begin_builders(caller="cli")
 
         if self.preprocess_config.get("enable_streaming", False):
             from siesta_framework.core.sparkManager import get_spark_session
@@ -116,7 +116,7 @@ class Preprocessor(SiestaModule):
         self.preprocess_config = DEFAULT_PREPROCESS_CONFIG.copy()
         self.preprocess_config.update(config)
 
-    def begin_builders(self, kafka_listener: Any = None):
+    def begin_builders(self, caller: str = "cli"):
         # Create a metadata object that will overwrite existing metadata 
         # according to new preprocessing task (based on the preprocess_config)
         self.metadata = MetaData(
@@ -127,15 +127,11 @@ class Preprocessor(SiestaModule):
 
         # Load existing metadata from storage if available
         self.storage.read_metadata_table(self.preprocess_config, self.metadata) 
-        
-        seq_df = timed(build_sequence_table, "Preprocess: ", preprocess_config=self.preprocess_config, metadata=self.metadata)
-        single_df = timed(build_single_table, "Preprocess: ", events_df=seq_df, metadata=self.metadata)
 
-        # if isinstance(seq_df, StreamingQuery):
-        #     logger.info("Preprocess: Streaming query started for Single Table. Awaiting termination...")
-        #     seq_df.awaitTermination()
-        #     single_df.awaitTermination()
-        #     kafka_listener.awaitTermination()
+        seq_df = timed(build_sequence_table, "Preprocess.", preprocess_config=self.preprocess_config, metadata=self.metadata)
+        single_df = timed(build_single_table, "Preprocess.", events_df=seq_df, metadata=self.metadata)
 
-        
-        # self.storage.write_metadata_table(self.metadata)
+        # In CLI mode, we want to keep streaming jobs alive until termination
+        if caller == "cli" and self.preprocess_config.get("enable_streaming", False):
+            get_spark_session().streams.awaitAnyTermination()
+
