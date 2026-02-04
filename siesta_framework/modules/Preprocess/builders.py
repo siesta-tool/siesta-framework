@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 
-def build_sequence_table(preprocess_config: Dict, metadata: MetaData) -> DataFrame | StreamingQuery | None:
+def build_sequence_table(preprocess_config: Dict, metadata: MetaData) -> DataFrame | StreamingQuery:
     """
     Build the Sequence Table from the log file, supporting both batch and streaming modes.
     
@@ -51,7 +51,7 @@ def build_sequence_table(preprocess_config: Dict, metadata: MetaData) -> DataFra
         return process_event_log(preprocess_config, metadata)
 
 
-def build_single_table(metadata: MetaData, events_df: DataFrame | StreamingQuery) -> DataFrame | None:
+def build_single_table(metadata: MetaData, events_df: DataFrame | StreamingQuery) -> DataFrame | StreamingQuery:
     """
     Build the Single Table from the Sequence Table, supporting both batch and streaming modes.
     
@@ -80,7 +80,7 @@ def build_single_table(metadata: MetaData, events_df: DataFrame | StreamingQuery
             .outputMode("append")
             .option("checkpointLocation", storage.get_checkpoint_location(metadata, "single_table"))
             .start())
-        # return write_single_job
+        return write_single_job
     
     else:
     

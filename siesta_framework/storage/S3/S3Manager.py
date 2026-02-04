@@ -114,25 +114,25 @@ class S3Manager(StorageManager):
         
 
         # Check if sequence table already exists before creating
-        # try:
-        #     sequence_path = f"s3a://{preprocess_config.get('storage_namespace', 'siesta')}/{preprocess_config.get('log_name', 'default_log')}/sequence/"
-        #     self.spark.read.format("delta").load(sequence_path)
-        #     print(f"S3Manager: Sequence table already exists at {sequence_path}")
-        # except Exception:
-        #     print(f"S3Manager: Sequence table does not exist, will create new one")
+        try:
+            sequence_path = f"s3a://{preprocess_config.get('storage_namespace', 'siesta')}/{preprocess_config.get('log_name', 'default_log')}/sequence/"
+            self.spark.read.format("delta").load(sequence_path)
+            print(f"S3Manager: Sequence table already exists at {sequence_path}")
+        except Exception:
+            print(f"S3Manager: Sequence table does not exist, will create new one")
 
-        #     metadata = MetaData(
-        #         storage_namespace=preprocess_config.get("storage_namespace", "siesta"),
-        #         log_name=preprocess_config.get("log_name", "default_log"),
-        #         storage_type=preprocess_config.get("storage_type", "s3")
-        #     )       
+            metadata = MetaData(
+                storage_namespace=preprocess_config.get("storage_namespace", "siesta"),
+                log_name=preprocess_config.get("log_name", "default_log"),
+                storage_type=preprocess_config.get("storage_type", "s3")
+            )       
 
-        #     empty_seq_df = self.spark.createDataFrame([], schema=Event.get_schema())
-        #     empty_seq_df.write \
-        #         .format("delta") \
-        #         .partitionBy("trace_id") \
-        #         .mode("overwrite") \
-        #         .save(metadata.sequence_table_path)
+            empty_seq_df = self.spark.createDataFrame([], schema=Event.get_schema())
+            empty_seq_df.write \
+                .format("delta") \
+                .partitionBy("trace_id") \
+                .mode("overwrite") \
+                .save(metadata.sequence_table_path)
 
         print(f"S3Manager: Database structure initialized at s3a://{preprocess_config.get('storage_namespace', 'siesta')}/{preprocess_config.get('log_name', 'default_log')}/")
 
@@ -490,18 +490,18 @@ class S3Manager(StorageManager):
                 .option("mergeSchema", "true") \
                 .save(metadata.sequence_table_path)
             
-            # events_count = events_df.count()
-            # locally_uninque_traces = events_df.select("trace_id").distinct().rdd.map(lambda row: hash_str(row.trace_id)).collect()
-            # globally_uninque_traces = set(locally_uninque_traces) - metadata.approx_unique_traces
-            # print(f"S3Manager: Wrote {events_count} new events and {len(globally_uninque_traces)} new traces to {metadata.sequence_table_path}.")
+            events_count = events_df.count()
+            locally_uninque_traces = events_df.select("trace_id").distinct().rdd.map(lambda row: hash_str(row.trace_id)).collect()
+            globally_uninque_traces = set(locally_uninque_traces) - metadata.approx_unique_traces
+            print(f"S3Manager: Wrote {events_count} new events and {len(globally_uninque_traces)} new traces to {metadata.sequence_table_path}.")
 
-            # # Update metadata object
-            # # old_trace_count = self.read_sequence_table(metadata).select("trace_id").distinct().count()
+            # Update metadata object
+            # old_trace_count = self.read_sequence_table(metadata).select("trace_id").distinct().count()
             # metadata.trace_count += len(globally_uninque_traces)
             # metadata.approx_unique_traces.update(globally_uninque_traces)
-            # metadata.event_count += events_count
-            # metadata.first_timestamp = metadata.first_timestamp if metadata.first_timestamp is not None else datetime.strptime(events_df.agg({"start_timestamp": "min"}).collect()[0][0], "%Y-%m-%dT%H:%M:%S")
-            # metadata.last_timestamp = datetime.strptime(events_df.agg({"start_timestamp": "max"}).collect()[0][0], "%Y-%m-%dT%H:%M:%S")
+            metadata.event_count += events_count
+            metadata.first_timestamp = metadata.first_timestamp if metadata.first_timestamp is not None else datetime.strptime(events_df.agg({"start_timestamp": "min"}).collect()[0][0], "%Y-%m-%dT%H:%M:%S")
+            metadata.last_timestamp = datetime.strptime(events_df.agg({"start_timestamp": "max"}).collect()[0][0], "%Y-%m-%dT%H:%M:%S")
         except Exception as e:
             print(f"S3Manager: Error writing on {metadata.sequence_table_path}: {e}")
             raise
@@ -551,7 +551,7 @@ class S3Manager(StorageManager):
             print(f"S3Manager: Wrote {len(globally_uninque_activities)} new activities to {metadata.single_table_path}.")
 
             # Update metadata object
-            metadata.approx_unique_activities.update(globally_uninque_activities)            
+            # metadata.approx_unique_activities.update(globally_uninque_activities)            
         except Exception as e:
             print(f"S3Manager: Error writing on {metadata.single_table_path}: {e}")
             raise

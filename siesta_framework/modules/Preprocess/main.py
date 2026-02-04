@@ -125,13 +125,11 @@ class Preprocessor(SiestaModule):
             storage_type=self.preprocess_config.get("storage_type", "s3")
         )
 
-         # Load existing metadata from storage if available
-        self.storage.read_metadata_table(self.preprocess_config, self.metadata)
-        build_sequence_table(self.preprocess_config, self.metadata)
-        # get_spark_session().streams.awaitAnyTermination()
-        # seq_df = 
-        # timed(build_sequence_table, "Preprocess: ", preprocess_config=self.preprocess_config, metadata=self.metadata)
-        # single_df = timed(build_single_table, "Preprocess: ", events_df=seq_df, metadata=self.metadata)
+        # Load existing metadata from storage if available
+        self.storage.read_metadata_table(self.preprocess_config, self.metadata) 
+        
+        seq_df = timed(build_sequence_table, "Preprocess: ", preprocess_config=self.preprocess_config, metadata=self.metadata)
+        single_df = timed(build_single_table, "Preprocess: ", events_df=seq_df, metadata=self.metadata)
 
         # if isinstance(seq_df, StreamingQuery):
         #     logger.info("Preprocess: Streaming query started for Single Table. Awaiting termination...")
