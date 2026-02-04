@@ -1,14 +1,19 @@
 from datetime import datetime
-from pyspark.sql.types import StructType, StructField, StringType, IntegerType
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType, ArrayType
 from . import DataModel
+import xxhash
 
 class MetaData:
     log_name: str
     storage_namespace: str
     storage_type: str
     
-    # trace_count: int  # Disabled to avoid costly distinct counts
+    trace_count: int
+    approx_unique_traces: set[int]
+
     event_count: int    
+    approx_unique_activities: set[int]
+
     pair_count: int
 
     first_timestamp: datetime
@@ -62,6 +67,8 @@ class MetaData:
         self.storage_namespace = storage_namespace
         self.log_name = log_name
         self.storage_type = storage_type
+        self.approx_unique_traces = set()
+        self.approx_unique_activities = set()
 
     @staticmethod
     def get_schema() -> StructType:
@@ -69,24 +76,28 @@ class MetaData:
         return StructType([
             StructField("log_name", StringType(), False),
             StructField("storage_namespace", StringType(), False),
-            # StructField("trace_count", IntegerType(), False),  # Disabled to avoid costly distinct counts
+            StructField("trace_count", IntegerType(), False),
             StructField("event_count", IntegerType(), False),
             StructField("pair_count", IntegerType(), False),
             StructField("first_timestamp", StringType(), True),
             StructField("last_timestamp", StringType(), True),
-            StructField("last_mined_timestamp", StringType(), True)
+            StructField("last_mined_timestamp", StringType(), True),
+            StructField("approx_unique_traces", ArrayType(IntegerType()), True),
+            StructField("approx_unique_activities", ArrayType(IntegerType()), True),
         ])
 
     def to_dict(self) -> dict:
         return {
             "log_name": self.log_name,
             "storage_namespace": self.storage_namespace,
-            # "trace_count": getattr(self, 'trace_count', 0),
+            "trace_count": getattr(self, 'trace_count', 0),
             "event_count": getattr(self, 'event_count', 0),
             "pair_count": getattr(self, 'pair_count', 0),
             "first_timestamp": self.first_timestamp.isoformat() if getattr(self, 'first_timestamp', None) else None,
             "last_timestamp": self.last_timestamp.isoformat() if getattr(self, 'last_timestamp', None) else None,
-            "last_mined_timestamp": self.last_mined_timestamp.isoformat() if getattr(self, 'last_mined_timestamp', None) else None
+            "last_mined_timestamp": self.last_mined_timestamp.isoformat() if getattr(self, 'last_mined_timestamp', None) else None,
+            "approx_unique_traces": list(self.approx_unique_traces) if getattr(self, 'approx_unique_traces', None) else [],
+            "approx_unique_activities": list(self.approx_unique_activities) if getattr(self, 'approx_unique_activities', None) else [],
         }
     
     def __str__(self) -> str:
@@ -110,3 +121,11 @@ class SequenceTableEntry(DataModel.Event):
     
     def to_dict(self) -> dict:
         return super().to_dict()
+    
+
+def hash_str(string: str) -> int:
+    """
+    Generate a consistent, deterministic 128-bit integer hash for a given string.
+    """
+    hash_bytes = xxhash.xxh128(string.encode('utf-8')).digest()
+    return int.from_bytes(hash_bytes, byteorder='big')

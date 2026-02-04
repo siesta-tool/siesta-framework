@@ -10,7 +10,6 @@ logging.getLogger('SLF4J').setLevel(logging.FATAL)
 logging.getLogger('Spark').setLevel(logging.ERROR)
 logging.getLogger('log4j').setLevel(logging.ERROR)
 
-
 '''
 Example usage:
 # Run API server (default config)

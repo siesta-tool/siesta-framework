@@ -16,7 +16,7 @@ from siesta_framework.model.StorageModel import MetaData
 
 
     
-def process_events_batch(preprocess_config: Dict, batch_df, batch_id=None) -> None:
+def process_events_batch(preprocess_config: Dict, batch_df, batch_id=None, metadata: MetaData = None) -> DataFrame | None:
     """
     Core processing logic for event batches; parses and stores events in Sequence Table.
     Args:
@@ -29,7 +29,8 @@ def process_events_batch(preprocess_config: Dict, batch_df, batch_id=None) -> No
         event_config = EventConfig.from_preprocess_config(preprocess_config, "json")
         events_df = _parse_rows(event_config, batch_df)
         
-        get_storage_manager().write_sequence_table(events_df, preprocess_config)
+        get_storage_manager().write_sequence_table(events_df, metadata)
+        # return events_df
     except Exception as e:
         batch_info = f"batch {batch_id}" if batch_id is not None else "batch"
         print(f"Error processing {batch_info}: {e}")
@@ -90,7 +91,7 @@ def _cast_value_by_schema(field_name: str, value, config: EventConfig):
     return value
 
 
-def process_event_log(preprocess_config: dict, metadata: MetaData) -> None:
+def process_event_log(preprocess_config: dict, metadata: MetaData) -> DataFrame:
     """
     Generic parsing function that determines the format and path from config.
     """
@@ -119,12 +120,13 @@ def process_event_log(preprocess_config: dict, metadata: MetaData) -> None:
     
     if log_format == 'xes':
         events_df = parse_xml(log_path, spark, preprocess_config)
-        get_storage_manager().write_sequence_table(events_df, preprocess_config, metadata)
+        get_storage_manager().write_sequence_table(events_df, metadata)
     elif log_format == 'csv':
         events_df = parse_csv(log_path, spark, preprocess_config)
-        get_storage_manager().write_sequence_table(events_df, preprocess_config, metadata)
+        get_storage_manager().write_sequence_table(events_df, metadata)
     else:
         raise ValueError(f"Unsupported log format: {log_format}")
+    return events_df
 
 
 def parse_xml(storage_path: str, spark: SparkSession, preprocess_config: dict) -> DataFrame:
@@ -303,6 +305,9 @@ def _parse_rows(config: EventConfig, df: DataFrame) -> DataFrame:
     fields = config.get_event_fields().items() | config.get_trace_fields().items()
     source_keys = [source_key for _, source_key in fields if source_key]
 
+    # Get the source column name for trace_id to use in partitioning
+    trace_id_source = config.field_mappings.get('trace_id')
+    
     # Convert each row to Event object
     def row_to_event(row):
         event_field_values = {}
@@ -329,7 +334,13 @@ def _parse_rows(config: EventConfig, df: DataFrame) -> DataFrame:
         event_field_values['attributes'] = extra_attributes
         return Event.from_dict(event_field_values)
     
-    df = df.withColumn("position", row_number().over(Window.partitionBy("trace_id").orderBy("trace_id")))  # Assign position
+    # Use the source field name for trace_id when partitioning
+    if trace_id_source and trace_id_source in df.columns:
+        df = df.withColumn("position", row_number().over(Window.partitionBy(trace_id_source).orderBy(trace_id_source)))
+    else:
+        # Fallback: assign global position if no trace_id available
+        df = df.withColumn("position", row_number().over(Window.orderBy(monotonically_increasing_id())))
+    
     events_rdd = df.rdd.map(row_to_event)
     event_dicts_rdd = events_rdd.map(lambda event: event.to_dict())
     events_df = get_spark_session().createDataFrame(event_dicts_rdd, schema=Event.get_schema())
