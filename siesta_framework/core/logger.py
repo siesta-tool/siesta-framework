@@ -1,4 +1,5 @@
 import time
+from typing import Any
 from siesta_framework.core.config import get_system_config
 import logging
 
@@ -6,7 +7,7 @@ import logging
 logger = logging.getLogger("Timer")
 
 
-def timed(func, prefix:str="",  *args, **kwargs):
+def timed(func, prefix:str="",  *args, **kwargs) -> Any:
     do_time = get_system_config().get("enable_timing", False)
     if not do_time:
         return func(*args, **kwargs)

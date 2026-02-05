@@ -88,7 +88,7 @@ class StorageManager(ABC):
         pass
     
     @abstractmethod
-    def initialize_streaming_collector(self, preprocess_config: Dict[str, Any] = {}) -> None:
+    def initialize_streaming_collector(self, preprocess_config: Dict[str, Any] = {}) -> Any:
         """
         Initialize streaming context if necessary.
 
@@ -98,7 +98,7 @@ class StorageManager(ABC):
         pass
     
     @abstractmethod
-    def get_steaming_collector_path(self, log_name: str) -> str:
+    def get_steaming_collector_path(self, preprocess_config: Dict[str, Any]) -> str:
         """
         Get the path where the streaming collector stores data.
 
@@ -111,12 +111,12 @@ class StorageManager(ABC):
         pass
     
     @abstractmethod
-    def get_checkpoint_location(self, preprocess_config: Dict[str, Any] = {}, checkpoint_type: str = "table") -> str:
+    def get_checkpoint_location(self, metadata: MetaData, checkpoint_type: str = "table") -> str:
         """
         Get the S3 path for streaming checkpoint location.
         
         Args:
-            preprocess_config: Configuration dictionary containing checkpoint settings
+            metadata: MetaData object containing checkpoint settings
             checkpoint_type: Type of checkpoint (e.g., 'index', 'collector')
             
         Returns:
@@ -239,26 +239,23 @@ class StorageManager(ABC):
         pass
     
     @abstractmethod
-    def write_sequence_table(self, events_df: DataFrame, preprocess_config: Dict[str, Any], metadata: MetaData) -> None:
+    def write_sequence_table(self, events_df: DataFrame, metadata: MetaData) -> None:
         """
-        Write traces to the SequenceTable. The RDD should already be persisted and should not be modified.
-        Updates the metadata object.
+        Write traces to the SequenceTable. Updates the metadata object.
         
         Args:
-            sequence_rdd: RDD containing traces with new events
+            events_df: DataFrame containing traces with new events
             metadata: MetaData object containing the metadata
-            detailed: Whether to include detailed information
         """
         pass
     
     @abstractmethod
-    def write_single_table(self, sequence_rdd: RDD, metadata: Any) -> None:
+    def write_single_table(self, events_df: DataFrame, metadata: MetaData) -> None:
         """
-        Write traces to the SingleTable. The RDD is not persisted and should be persisted by the database
-        before storing and unpersisted at the end. Updates the metadata object.
+        Write events to the SingleTable. Updates the metadata object.
         
         Args:
-            sequence_rdd: RDD containing newly indexed events in single inverted index form
+            events_df: DataFrame containing newly indexed events in single inverted index form
             metadata: MetaData object containing the metadata
         """
         pass

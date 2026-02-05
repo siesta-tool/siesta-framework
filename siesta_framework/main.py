@@ -22,19 +22,6 @@ python3 main.py --config config/siesta.config.json
 python3 main.py --config config/preprocess.config.json preprocess
 '''
 
-import logging
-logging.getLogger('py4j.java_gateway').setLevel(logging.ERROR)
-logging.getLogger('py4j').setLevel(logging.ERROR)
-logging.getLogger('SLF4J').setLevel(logging.FATAL)
-logging.getLogger('Spark').setLevel(logging.ERROR)
-logging.getLogger('log4j').setLevel(logging.ERROR)
-
-'''
-Example usage:
-python3 main.py --config config/preprocess.config.json preprocess
-python3 main.py
-'''
-
 args = sys.argv[1:]  # Get command-line arguments excluding the script name
 
 # Check if running in CLI mode (module name provided) or API mode
@@ -50,4 +37,5 @@ if not args or (len(args) >= 1 and args[0].startswith('--')):
     app.startup()
     router.startup(app)
 else:
+    # CLI mode: module name provided
     app = Siesta.with_args(args)

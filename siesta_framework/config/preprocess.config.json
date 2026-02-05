@@ -1,9 +1,8 @@
 {
   "log_name": "example_log",
-  "log_path": "datasets/test_nopos.csv",
   "storage_namespace": "siesta",
   "overwrite_data": false,
-  "enable_streaming": false,
+  "enable_streaming": true,
   "kafka_topic": "example_log",
   "field_mappings": {
     "xes": {
@@ -15,9 +14,9 @@
     },
     "csv": {
       "activity": "activity",
-      "trace_id": "trace_id",
+      "trace_id": "caseID",
       "position": "position",
-      "start_timestamp": "timestamp",
+      "start_timestamp": "Timestamp",
       "attributes" : ["resource", "cost"]
     },
     "json": {
@@ -27,6 +26,6 @@
         "start_timestamp": "Timestamp"
     }
   },
-  "trace_level_fields": ["trace_id"],
+  "trace_level_fields": ["caseID"],
   "timestamp_fields": ["start_timestamp"]
 }

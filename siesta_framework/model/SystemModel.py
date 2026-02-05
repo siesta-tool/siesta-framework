@@ -36,8 +36,6 @@ DEFAULT_PREPROCESS_CONFIG: Dict[str, Any] = {
   "log_path": "datasets/test.xes",
   "storage_namespace": "siesta",
   "clear_existing": False,
-  "is_continued": False,
-  "is_streaming": False,
   "kafka_topic": "example_log", # better match the log_name
   "field_mappings": {
     "xes": {

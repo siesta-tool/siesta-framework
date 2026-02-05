@@ -5,8 +5,9 @@ from botocore.exceptions import ClientError
 from fastapi import UploadFile
 from pyspark import RDD
 from pyspark.sql import SparkSession, DataFrame
+from pyspark.sql.streaming import StreamingQuery
 from siesta_framework.core.interfaces import StorageManager
-from siesta_framework.model.StorageModel import MetaData
+from siesta_framework.model.StorageModel import MetaData, hash_str
 from siesta_framework.model.DataModel import Event, EventConfig
 from siesta_framework.core.config import get_system_config
 import siesta_framework.core.sparkManager as SparkManager
@@ -73,7 +74,7 @@ class S3Manager(StorageManager):
         This method can optionally clear previous data based on configuration.
 
         """
-        
+
         # Ensure bucket exists
         try:
             self.s3_client.head_bucket(Bucket=preprocess_config.get("storage_namespace", "siesta"))
@@ -111,6 +112,28 @@ class S3Manager(StorageManager):
                 print(f"S3Manager: Error checking bucket: {e}")
                 raise
         
+
+        # Check if sequence table already exists before creating
+        try:
+            sequence_path = f"s3a://{preprocess_config.get('storage_namespace', 'siesta')}/{preprocess_config.get('log_name', 'default_log')}/sequence/"
+            self.spark.read.format("delta").load(sequence_path)
+            print(f"S3Manager: Sequence table already exists at {sequence_path}")
+        except Exception:
+            print(f"S3Manager: Sequence table does not exist, will create new one")
+
+            metadata = MetaData(
+                storage_namespace=preprocess_config.get("storage_namespace", "siesta"),
+                log_name=preprocess_config.get("log_name", "default_log"),
+                storage_type=preprocess_config.get("storage_type", "s3")
+            )       
+
+            empty_seq_df = self.spark.createDataFrame([], schema=Event.get_schema())
+            empty_seq_df.write \
+                .format("delta") \
+                .partitionBy("trace_id") \
+                .mode("overwrite") \
+                .save(metadata.sequence_table_path)
+
         print(f"S3Manager: Database structure initialized at s3a://{preprocess_config.get('storage_namespace', 'siesta')}/{preprocess_config.get('log_name', 'default_log')}/")
 
     def _create_s3_client(self):
@@ -133,11 +156,11 @@ class S3Manager(StorageManager):
         
         return boto3.client('s3', **s3_config)
 
+
     def _resolve_kafka_servers(self) -> str:
-        config = get_system_config()
         # Resolve Kafka address based on Spark deployment mode
-        kafka_servers = config.get("kafka_bootstrap_servers", "localhost:9092")
-        spark_master = config.get("spark_master", "local[*]")
+        kafka_servers = self.config.get("kafka_bootstrap_servers", "localhost:9092")
+        spark_master = self.config.get("spark_master", "local[*]")
         
         # If using remote Spark cluster (Docker), use Docker bridge IP for Kafka
         # This IP is accessible from BOTH the host (driver) and Docker containers (executors)
@@ -154,7 +177,7 @@ class S3Manager(StorageManager):
             print(f"S3Manager: Using local Kafka address: {kafka_servers}")
         return kafka_servers
 
-    def initialize_streaming_collector(self, preprocess_config: Dict[str, Any] = {}) -> None:
+    def initialize_streaming_collector(self, preprocess_config: Dict[str, Any] = {}) -> StreamingQuery | None:
         """
         Set up streaming from Kafka to S3 if enabled in configuration.
         
@@ -171,7 +194,7 @@ class S3Manager(StorageManager):
         kafka_servers = self._resolve_kafka_servers()
 
         # Read streaming data from Kafka
-        raw_events_streaming_df = (self.spark.readStream # type: ignore
+        raw_events_streaming_df = (self.spark.readStream
             .format("kafka")
             .option("kafka.bootstrap.servers", kafka_servers)
             .option("subscribe", preprocess_config.get("kafka_topic", "default_log"))
@@ -191,24 +214,25 @@ class S3Manager(StorageManager):
             .option("path", self.get_steaming_collector_path(preprocess_config))
             .option("checkpointLocation", f"s3a://{self.config.get('storage_namespace', 'siesta')}/{preprocess_config.get('log_name', 'default_log')}/{self.config.get('checkpoint_dir', 'checkpoints')}/")
             .outputMode("append")
-            .trigger(processingTime='1 minute')
+            .trigger(processingTime='10 seconds')
             .start())
-        
+
         print(f"S3Manager: Started streaming query from Kafka topic '{preprocess_config.get('kafka_topic', 'default_log')}' to S3.")
+        return streaming_query
     
-    def get_steaming_collector_path(self, log_name: str) -> str:
+    def get_steaming_collector_path(self, preprocess_config: Dict[str, Any]) -> str:
         """
         Get the S3 path where the streaming collector stores data.
         
         Args:
-            log_name: Name of the log
+            preprocess_config: Configuration dictionary containing event settings
             
         Returns:
             Path as a string
         """
-        return f"s3a://{self.config.get('storage_namespace', 'siesta')}/{log_name}/{self.config.get('raw_events_dir', 'raw_events')}/"
+        return f"s3a://{preprocess_config.get('storage_namespace', 'siesta')}/{preprocess_config.get('log_name', 'default_log')}/{preprocess_config.get('raw_events_dir', 'raw_events')}/"
     
-    def get_checkpoint_location(self, preprocess_config: Dict[str, Any] = {}, checkpoint_table: str = "example_table") -> str:
+    def get_checkpoint_location(self, metadata: MetaData, checkpoint_table: str = "example_table") -> str:
         """
         Get the S3 path for streaming checkpoint location.
         
@@ -219,74 +243,10 @@ class S3Manager(StorageManager):
         Returns:
             Path as a string
         """
-        namespace = preprocess_config.get("storage_namespace", "siesta")
-        log_name = preprocess_config.get("log_name", "default_log")
+        namespace = metadata.storage_namespace
+        log_name = metadata.log_name
         return f"s3a://{namespace}/{log_name}/{self.config.get('checkpoint_dir', 'checkpoints')}/{checkpoint_table}/"
 
-    def read_metadata_table(self, preprocess_config: Dict[str, Any]) -> MetaData:
-        """
-        Construct metadata by loading existing metadata from S3 or creating new.
-        
-        Args:
-            preprocess_config: Configuration dictionary containing storage settings
-            
-        Returns:
-            MetaData object containing the current stored metadata
-        """
-
-        log_name = preprocess_config.get("log_name", "default_log")
-        namespace = preprocess_config.get("storage_namespace", "siesta")
-
-        # Initialize MetaData object with defaults
-        metadata = MetaData(storage_namespace=namespace, log_name=log_name, storage_type="s3")
-        metadata.trace_count = 0
-        metadata.event_count = 0
-        metadata.pair_count = 0
-        metadata.first_timestamp = None
-        metadata.last_timestamp = None
-        metadata.last_mined_timestamp = None
-
-        try:
-            # Try to read the Delta table directly - if it doesn't exist, an exception will be raised
-            metadata_df = self.spark.read.format("delta").load(metadata.metadata_table_path)
-            
-            row = metadata_df.head(1)
-            if row:
-                r = row[0]
-                metadata.trace_count = r.trace_count or 0
-                metadata.event_count = r.event_count or 0
-                metadata.pair_count = r.pair_count or 0
-                metadata.first_timestamp = datetime.strptime(r.first_timestamp, "%Y-%m-%dT%H:%M:%S") if r.first_timestamp is not None else None
-                metadata.last_timestamp = datetime.strptime(r.last_timestamp, "%Y-%m-%dT%H:%M:%S") if r.last_timestamp is not None else None
-                metadata.last_mined_timestamp = datetime.strptime(r.last_mined_timestamp, "%Y-%m-%dT%H:%M:%S") if r.last_mined_timestamp is not None else None
-
-                print(f"S3Manager: Loaded existing metadata for {log_name}")
-        except Exception as e:
-            # If table doesn't exist or can't be read, use defaults
-            print(f"S3Manager: Metadata does not exist or failed to load for {log_name}. Initialized defaults.")
-
-        return metadata
-    
-    def write_metadata_table(self, metadata: MetaData) -> None:
-        """
-        Persist metadata to S3 as a Parquet file.
-        
-        Args:
-            metadata: MetaData object containing the metadata
-        """
-        # Convert MetaData object to dictionary
-        metadata_dict = metadata.to_dict()
-
-        # Create DataFrame and store 
-        metadata_df = self.spark.createDataFrame([metadata_dict], schema=MetaData.get_schema())
-
-        metadata_df.write \
-            .format("delta") \
-            .mode("overwrite") \
-            .option("mergeSchema", "true") \
-            .save(metadata.metadata_table_path)
-        
-        print(f"S3Manager: Metadata written to {metadata.metadata_table_path}")
 
     def upload_file(self, preprocess_config: Dict[str, Any], local_path: str, destination_path: str) -> str:
         """
@@ -352,25 +312,6 @@ class S3Manager(StorageManager):
         # Note: boto3 clients don't need explicit closing
         print("S3Manager: Spark session closed.")
     
-    
-    def read_sequence_table(self, metadata: MetaData, detailed: bool = False) -> DataFrame:
-        """
-        Read data as an RDD from the SequenceTable stored in S3.
-        
-        Args:
-            metadata: MetaData object containing the metadata
-            detailed: Whether to include detailed information
-            
-        Returns:
-            DataFrame containing EventTrait objects (Trace objects)
-        """
-        try:
-            df = self.spark.read.parquet(metadata.sequence_table_path) # type: ignore
-            print(f"S3Manager: Read {df.count()} records from SequenceTable")
-            return df
-        except Exception as e:
-            print(f"S3Manager: Error reading SequenceTable: {e}")
-            return self.spark.createDataFrame([], schema=Event.get_schema()) # type: ignore
     
     def read_single_table(self, metadata: MetaData) -> DataFrame:
         """
@@ -441,37 +382,6 @@ class S3Manager(StorageManager):
             print(f"S3Manager: Error writing CountTable: {e}")
     
     
-    def write_single_table(self, sequence_rdd: RDD, metadata: MetaData) -> None:
-        """
-        Write traces to the SingleTable in S3.
-        
-        The RDD is not persisted and should be persisted before storing and unpersisted at the end.
-        Updates the metadata object.
-        
-        Args:
-            sequence_rdd: RDD containing newly indexed events in single inverted index form
-            metadata: MetaData object containing the metadata
-        """
-        try:
-            # Persist the RDD before processing
-            sequence_rdd.persist()
-            
-            # Convert RDD to DataFrame
-            df = self.spark.createDataFrame(sequence_rdd.map(lambda event: event.to_dict())) # type: ignore
-            df.write.mode("append").parquet(metadata.single_table_path)
-            
-            # Update metadata
-            metadata.event_count = df.count()
-            print(f"S3Manager: Wrote {metadata.event_count} events to {metadata.single_table_path}")
-            
-            # Unpersist the RDD
-            sequence_rdd.unpersist()
-        except Exception as e:
-            print(f"S3Manager: Error writing SingleTable: {e}")
-            # Make sure to unpersist even on error
-            if sequence_rdd.is_cached:
-                sequence_rdd.unpersist()
-    
     def write_index_table(self, new_pairs: RDD, metadata: MetaData) -> None:
         """
         Write the combined pairs to S3 IndexTable, grouped by interval and first event.
@@ -491,34 +401,156 @@ class S3Manager(StorageManager):
         except Exception as e:
             print(f"S3Manager: Error writing IndexTable: {e}")
     
+    ###########################################
+    ########## MetaData Table Methods #########
+    ###########################################
 
-    def write_sequence_table(self, events_df: DataFrame, preprocess_config: Dict[str, Any], metadata: MetaData) -> None:
+    def read_metadata_table(self, preprocess_config: Dict[str, Any], metadata: MetaData) -> MetaData:
         """
-        Write processed events to S3 in Delta format.
+        Construct metadata by loading existing metadata from S3 or creating new.
         
         Args:
-            events_df: DataFrame containing processed events
             preprocess_config: Configuration dictionary containing storage settings
+            
+        Returns:
+            MetaData object containing the current stored metadata
+        """
+
+        log_name = preprocess_config.get("log_name", "default_log")
+        namespace = preprocess_config.get("storage_namespace", "siesta")
+
+        # Initialize MetaData object with defaults
+        metadata.trace_count = 0
+        metadata.event_count = 0
+        metadata.pair_count = 0
+        metadata.first_timestamp = None
+        metadata.last_timestamp = None
+        metadata.last_mined_timestamp = None
+        metadata.approx_unique_traces = set()
+        metadata.approx_unique_activities = set()
+        try:
+            # Try to read the Delta table directly - if it doesn't exist, an exception will be raised
+            metadata_df = self.spark.read.format("delta").load(metadata.metadata_table_path)
+            
+            row = metadata_df.head(1)
+            if row:
+                r = row[0]
+                metadata.trace_count = r.trace_count or 0
+                metadata.event_count = r.event_count or 0
+                metadata.pair_count = r.pair_count or 0
+                metadata.first_timestamp = datetime.strptime(r.first_timestamp, "%Y-%m-%dT%H:%M:%S") if r.first_timestamp is not None else None
+                metadata.last_timestamp = datetime.strptime(r.last_timestamp, "%Y-%m-%dT%H:%M:%S") if r.last_timestamp is not None else None
+                metadata.last_mined_timestamp = datetime.strptime(r.last_mined_timestamp, "%Y-%m-%dT%H:%M:%S") if r.last_mined_timestamp is not None else None
+                metadata.approx_unique_traces = set(r.approx_unique_traces) if r.approx_unique_traces is not None else set()
+                metadata.approx_unique_activities = set(r.approx_unique_activities) if r.approx_unique_activities is not None else set()
+                metadata.storage_type = "s3"
+                print(f"S3Manager: Loaded existing metadata for {log_name}")
+        except Exception as e:
+            # If table doesn't exist or can't be read, use defaults
+            print(f"S3Manager: Metadata does not exist or failed to load for {log_name}. Initialized defaults.")
+        return metadata
+    
+    def write_metadata_table(self, metadata: MetaData) -> None:
+        """
+        Persist metadata to S3 in Delta format.
+        
+        Args:
             metadata: MetaData object containing the metadata
         """
+        # Convert MetaData object to dictionary
+        metadata_dict = metadata.to_dict()
+
+        # Create DataFrame and store 
+        metadata_df = self.spark.createDataFrame([metadata_dict], schema=MetaData.get_schema())
+
+        metadata_df.write \
+            .format("delta") \
+            .mode("overwrite") \
+            .option("mergeSchema", "true") \
+            .save(metadata.metadata_table_path)
         
-        seq_table_path = metadata.sequence_table_path
-        
+        print(f"S3Manager: Metadata written to {metadata.metadata_table_path}")
+
+
+
+    ###########################################
+    ########## Sequence Table Methods #########
+    ###########################################
+
+    def write_sequence_table(self, events_df: DataFrame, metadata: MetaData) -> None:
+        """
+        Write the Sequence Table to S3 in Delta format.
+
+        Args:
+            events_df: DataFrame containing processed events
+            metadata: MetaData object containing the metadata
+        """        
         try:
             events_df.write \
                 .format("delta") \
+                .partitionBy("trace_id") \
                 .mode("append") \
                 .option("mergeSchema", "true") \
-                .save(seq_table_path)
+                .save(metadata.sequence_table_path)
             
             events_count = events_df.count()
-            print(f"S3Manager: Wrote {events_count} new processed events to {seq_table_path}")
+            print(f"S3Manager: Wrote {events_count} new events to {metadata.sequence_table_path}.")
 
             # Update metadata object
-            # metadata.trace_count update would require distinct trace IDs count from the beggining => costly
+            metadata.trace_count = self.read_sequence_table(metadata).select("trace_id").distinct().count()
             metadata.event_count += events_count
             metadata.first_timestamp = metadata.first_timestamp if metadata.first_timestamp is not None else datetime.strptime(events_df.agg({"start_timestamp": "min"}).collect()[0][0], "%Y-%m-%dT%H:%M:%S")
             metadata.last_timestamp = datetime.strptime(events_df.agg({"start_timestamp": "max"}).collect()[0][0], "%Y-%m-%dT%H:%M:%S")
         except Exception as e:
-            print(f"S3Manager: Error writing processed events: {e}")
+            print(f"S3Manager: Error writing on {metadata.sequence_table_path}: {e}")
             raise
+
+
+    def read_sequence_table(self, metadata: MetaData) -> DataFrame:
+        """
+        Read data as a DataFrame from the SequenceTable stored in S3.
+        
+        Args:
+            metadata: MetaData object containing the metadata
+        Returns:
+            DataFrame containing Event objects
+        """
+        try:
+            df = self.spark.read.format("delta").load(metadata.sequence_table_path)
+            print(f"S3Manager: Read {df.count()} records from {metadata.sequence_table_path}.")
+            return df
+        except Exception as e:
+            print(f"S3Manager: Error reading from {metadata.sequence_table_path}: {e}")
+            return self.spark.createDataFrame([], schema=Event.get_schema())
+        
+
+
+    ###########################################
+    ########## Single Table Methods ###########
+    ###########################################
+    def write_single_table(self, events_df: DataFrame, metadata: MetaData) -> None:
+        """
+        Write processed events to S3 SingleTable in Delta format.
+        
+        Args:
+            events_df: DataFrame containing processed events
+            metadata: MetaData object containing the metadata
+        """        
+        try:
+            events_df.write \
+                .format("delta") \
+                .partitionBy("activity") \
+                .mode("append") \
+                .option("mergeSchema", "true") \
+                .save(metadata.single_table_path)
+            
+            unique_activities = events_df.select("activity").distinct().rdd.map(lambda row: hash_str(row.activity)).collect()
+            globally_uninque_activities = set(unique_activities) - metadata.approx_unique_activities
+            print(f"S3Manager: Wrote {len(globally_uninque_activities)} new activities to {metadata.single_table_path}.")
+
+            # Update metadata object
+            # metadata.approx_unique_activities.update(globally_uninque_activities)            
+        except Exception as e:
+            print(f"S3Manager: Error writing on {metadata.single_table_path}: {e}")
+            raise
+

@@ -136,7 +136,7 @@ def generate_sample_events(field_mappings: Dict[str, str], count: int = 10):
         if position_field:
             event[position_field] = str((i % 4))  # Position in trace (0-based)
         if timestamp_field:
-            event[timestamp_field] = datetime.now().isoformat()
+            event[timestamp_field] = datetime.now().isoformat().split('.')[0] 
         
         yield event
 
