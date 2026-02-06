@@ -10,7 +10,7 @@ from pyspark.sql.functions import monotonically_increasing_id, lit
 from datetime import datetime
 import os
 from pyspark.sql.window import Window
-from pyspark.sql.functions import row_number
+from pyspark.sql.functions import row_number, col
 
 from siesta_framework.model.StorageModel import MetaData
 
@@ -120,12 +120,16 @@ def process_event_log(preprocess_config: dict, metadata: MetaData) -> DataFrame:
     
     if log_format == 'xes':
         events_df = parse_xml(log_path, spark, preprocess_config)
-        get_storage_manager().write_sequence_table(events_df, metadata)
     elif log_format == 'csv':
         events_df = parse_csv(log_path, spark, preprocess_config)
-        get_storage_manager().write_sequence_table(events_df, metadata)
     else:
         raise ValueError(f"Unsupported log format: {log_format}")
+    
+    # Updating positions in case of pre-existing data in sequence table
+    pre_existing_seq_table = storage.read_sequence_table(metadata)
+    max_position = pre_existing_seq_table.agg({"position": "max"}).collect()[0][0] if pre_existing_seq_table.count() > 0 else 0
+    events_df = events_df.withColumn("position", col("position") + max_position)
+    storage.write_sequence_table(events_df, metadata)
     return events_df
 
 
@@ -333,7 +337,7 @@ def _parse_rows(config: EventConfig, df: DataFrame) -> DataFrame:
         
         event_field_values['attributes'] = extra_attributes
         return Event.from_dict(event_field_values)
-    
+
     # Use the source field name for trace_id when partitioning
     if trace_id_source and trace_id_source in df.columns:
         df = df.withColumn("position", row_number().over(Window.partitionBy(trace_id_source).orderBy(trace_id_source)))
