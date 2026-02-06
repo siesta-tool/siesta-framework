@@ -130,7 +130,7 @@ class S3Manager(StorageManager):
 
         # Check if sequence table already exists before creating
         try:
-            sequence_path = f"s3a://{preprocess_config.get('storage_namespace', 'siesta')}/{preprocess_config.get('log_name', 'default_log')}/sequence/"
+            sequence_path = f"s3a://{preprocess_config.get('storage_namespace', 'siesta')}/{preprocess_config.get('log_name', 'default_log')}/sequence_table/" # To be replaced using metadata
             self.spark.read.format("delta").load(sequence_path)
             logger.info(f"Sequence table already exists at {sequence_path}")
         except Exception:
@@ -501,6 +501,11 @@ class S3Manager(StorageManager):
             metadata: MetaData object containing the metadata
         """        
         try:
+            from pyspark.sql.functions import col
+            pre_existing_seq_table = self.read_sequence_table(metadata)
+            max_position = pre_existing_seq_table.agg({"position": "max"}).collect()[0][0] if pre_existing_seq_table.count() > 0 else 0
+            events_df = events_df.withColumn("position", col("position") + max_position) # type: ignore
+
             events_df.write \
                 .format("delta") \
                 .partitionBy("trace_id") \
