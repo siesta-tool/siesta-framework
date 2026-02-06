@@ -486,10 +486,6 @@ class S3Manager(StorageManager):
             metadata: MetaData object containing the metadata
         """        
         try:
-            from pyspark.sql.functions import col
-            pre_existing_seq_table = self.read_sequence_table(metadata)
-            max_position = pre_existing_seq_table.agg({"position": "max"}).collect()[0][0] if pre_existing_seq_table.count() > 0 else 0
-            events_df = events_df.withColumn("position", col("position") + max_position) # type: ignore
 
             events_df.write \
                 .format("delta") \
