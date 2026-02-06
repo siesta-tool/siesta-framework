@@ -1,12 +1,13 @@
 from typing import Any, Dict
 import threading
 
-from pandas import DataFrame
+from pyspark.sql import DataFrame
 from siesta_framework.core.sparkManager import get_spark_session
 from siesta_framework.core.storageFactory import get_storage_manager
 from siesta_framework.model.DataModel import Event, EventConfig
 from siesta_framework.model.StorageModel import MetaData
 from siesta_framework.modules.Preprocess.parsers import process_events_batch, process_event_log
+from pyspark.sql.functions import col, from_json
 from pyspark.sql.streaming import StreamingQuery
 import logging
 logger = logging.getLogger(__name__)
