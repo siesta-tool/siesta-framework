@@ -219,3 +219,11 @@ class Trace:
             "start_timestamp": self.start_timestamp.isoformat() if self.start_timestamp else None,
             "end_timestamp": self.end_timestamp.isoformat() if self.end_timestamp else None
         }
+    
+
+Last_checked_table_schema = StructType([
+            StructField("trace_id", StringType(), True),
+            StructField("eventA", StringType(), False),
+            StructField("eventB", StringType(), False),
+            StructField("last_checked_timestamp", IntegerType(), False)
+])

@@ -74,6 +74,7 @@ class Siesta:
                       If False (API mode), no active log is set - logs are handled per-request.
         """
         print("--- Starting Framework ---")
+        logging.basicConfig(level=logging.INFO)
         
         # Initialize global config accessor
         initialize_config(self.config)

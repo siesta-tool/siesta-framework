@@ -1,5 +1,6 @@
 {
   "log_name": "example_log",
+  "log_path": "datasets/test_nopos.csv",
   "storage_namespace": "siesta",
   "overwrite_data": false,
   "enable_streaming": false,

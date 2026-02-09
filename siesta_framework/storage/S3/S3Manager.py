@@ -8,7 +8,7 @@ from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql.streaming import StreamingQuery
 from siesta_framework.core.interfaces import StorageManager
 from siesta_framework.model.StorageModel import MetaData, hash_str
-from siesta_framework.model.DataModel import Event, EventConfig
+from siesta_framework.model.DataModel import Event, EventConfig, Last_checked_table_schema
 from siesta_framework.core.config import get_system_config
 import siesta_framework.core.sparkManager as SparkManager
 
@@ -113,19 +113,18 @@ class S3Manager(StorageManager):
                 raise
         
 
+        metadata = MetaData(
+            storage_namespace=preprocess_config.get("storage_namespace", "siesta"),
+            log_name=preprocess_config.get("log_name", "default_log"),
+            storage_type=preprocess_config.get("storage_type", "s3")
+        )
+
         # Check if sequence table already exists before creating
         try:
-            sequence_path = f"s3a://{preprocess_config.get('storage_namespace', 'siesta')}/{preprocess_config.get('log_name', 'default_log')}/sequence_table/" # To be replaced using metadata
-            self.spark.read.format("delta").load(sequence_path)
-            print(f"S3Manager: Sequence table already exists at {sequence_path}")
+            self.spark.read.format("delta").load(metadata.sequence_table_path)
+            print(f"S3Manager: Sequence table already exists at {metadata.sequence_table_path}")
         except Exception:
             print(f"S3Manager: Sequence table does not exist, will create new one")
-
-            metadata = MetaData(
-                storage_namespace=preprocess_config.get("storage_namespace", "siesta"),
-                log_name=preprocess_config.get("log_name", "default_log"),
-                storage_type=preprocess_config.get("storage_type", "s3")
-            )       
 
             empty_seq_df = self.spark.createDataFrame([], schema=Event.get_schema())
             empty_seq_df.write \
@@ -133,8 +132,21 @@ class S3Manager(StorageManager):
                 .partitionBy("trace_id") \
                 .mode("overwrite") \
                 .save(metadata.sequence_table_path)
+        
+        # Check if Last Checked table already exists before creating
+        try:
+            self.spark.read.format("delta").load(metadata.last_checked_table_path)
+            print(f"S3Manager: Last Checked table already exists at {metadata.last_checked_table_path}")
+        except Exception:
+            print(f"S3Manager: Last Checked table does not exist, will create new one")
 
-        print(f"S3Manager: Database structure initialized at s3a://{preprocess_config.get('storage_namespace', 'siesta')}/{preprocess_config.get('log_name', 'default_log')}/")
+            empty_last_checked_df = self.spark.createDataFrame([], schema=Last_checked_table_schema)
+            empty_last_checked_df.write \
+                .format("delta") \
+                .mode("overwrite") \
+                .save(metadata.last_checked_table_path)
+
+        print(f"S3Manager: Database structure initialized at {metadata.sequence_table_path}")
 
     def _create_s3_client(self):
         """Create and configure boto3 S3 client.
@@ -330,40 +342,8 @@ class S3Manager(StorageManager):
         except Exception as e:
             print(f"S3Manager: Error reading SingleTable: {e}")
             return self.spark.createDataFrame([], schema=Event.get_schema()) # type: ignore
+
     
-    def read_last_checked_table(self, metadata: MetaData) -> DataFrame:
-        """
-        Load data from the LastCheckedTable in S3.
-        
-        Args:
-            metadata: MetaData object containing the metadata
-            
-        Returns:
-            DataFrame with last timestamps per event type pair per trace
-        """
-        try:
-            df = self.spark.read.parquet(metadata.last_checked_table_path) # type: ignore
-            print(f"S3Manager: Read {df.count()} records from LastCheckedTable")
-            return df
-        except Exception as e:
-            print(f"S3Manager: Error reading LastCheckedTable: {e}")
-            return self.spark.createDataFrame([], schema=Event.get_schema()) # type: ignore
-    
-    def write_last_checked_table(self, last_checked: DataFrame, metadata: MetaData) -> None:
-        """
-        Store new records for last checked timestamps to S3.
-        
-        Args:
-            last_checked: DataFrame containing timestamp of last completion for each event type pair per trace
-            metadata: MetaData object containing the metadata
-        """
-        try:
-            # Convert RDD to DataFrame
-            df = self.spark.createDataFrame(last_checked) # type: ignore
-            df.write.mode("append").parquet(metadata.last_checked_table_path)
-            print(f"S3Manager: Wrote last checked data to {metadata.last_checked_table_path}")
-        except Exception as e:
-            print(f"S3Manager: Error writing LastCheckedTable: {e}")
     
     def write_count_table(self, counts: RDD, metadata: MetaData) -> None:
         """
@@ -555,3 +535,46 @@ class S3Manager(StorageManager):
             print(f"S3Manager: Error writing on {metadata.single_table_path}: {e}")
             raise
 
+    #################################################
+    ########## Last Checked Table Methods ###########
+    #################################################
+    def write_last_checked_table(self, last_checked: DataFrame, metadata: MetaData) -> None:
+        """
+        Store new records for last checked timestamps to S3.
+        
+        Args:
+            last_checked: DataFrame containing timestamp of last completion for each event type pair per trace
+            metadata: MetaData object containing the metadata
+        """
+        try:
+            # Convert RDD to DataFrame
+            # df = self.spark.createDataFrame(last_checked) # type: ignore
+            # last_checked.write.mode("append").parquet(metadata.last_checked_table_path)
+            last_checked.write \
+                .format("delta") \
+                .partitionBy("trace_id") \
+                .mode("append") \
+                .option("mergeSchema", "true") \
+                .save(metadata.last_checked_table_path)
+            print(f"S3Manager: Wrote last checked data to {metadata.last_checked_table_path}")
+        except Exception as e:
+            print(f"S3Manager: Error writing LastCheckedTable: {e}")
+    
+        
+    def read_last_checked_table(self, metadata: MetaData) -> DataFrame:
+        """
+        Load data from the LastCheckedTable in S3.
+        
+        Args:
+            metadata: MetaData object containing the metadata
+            
+        Returns:
+            DataFrame with last timestamps per event type pair per trace
+        """
+        try:
+            df = self.spark.read.parquet(metadata.last_checked_table_path) # type: ignore
+            print(f"S3Manager: Read {df.count()} records from LastCheckedTable")
+            return df
+        except Exception as e:
+            print(f"S3Manager: Error reading LastCheckedTable: {e}")
+            return self.spark.createDataFrame([], schema=Last_checked_table_schema) # type: ignore
