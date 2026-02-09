@@ -1,4 +1,4 @@
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 import threading
 
 from pyspark.sql import DataFrame
@@ -8,7 +8,8 @@ from siesta_framework.model.DataModel import Event, EventConfig
 from siesta_framework.model.StorageModel import MetaData
 from siesta_framework.modules.Preprocess.parsers import process_events_batch, process_event_log
 from pyspark.sql.functions import col, from_json
-from pyspark.sql.streaming import StreamingQuery
+from pyspark.sql.streaming.query import StreamingQuery
+from siesta_framework.modules.Preprocess.extractPairs import extract_pairs
 import logging
 logger = logging.getLogger(__name__)
 
@@ -98,3 +99,23 @@ def build_index_table(preprocess_config: Dict):
     logger.info("Preprocess.builders: Building Index Table...")
     # Implementation for building index table goes here
     pass
+
+
+def build_last_checked_table(preprocess_config: Dict, metadata: MetaData, single_df: DataFrame) -> Tuple[DataFrame, DataFrame]:
+    """
+    Build the Last Checked Table.
+    """
+    logger.info("Preprocess.builders: Building Last Checked Table...")
+    # Implementation for building last checked table goes here
+
+    lookback = preprocess_config.get("lookback", 7)
+    last_checked = get_storage_manager().read_last_checked_table(metadata)
+    pairs_df, last_checked_df = extract_pairs(single_df, last_checked, lookback)
+
+    last_checked_df.show(5)
+    logger.info(f"Last Checked: {last_checked_df.show(5)}")
+    logger.info(f"Schema: {last_checked_df.printSchema()}")
+
+    get_storage_manager().write_last_checked_table(last_checked_df, metadata)
+
+    return pairs_df, last_checked_df
