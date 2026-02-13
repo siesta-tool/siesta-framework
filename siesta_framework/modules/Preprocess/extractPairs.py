@@ -10,6 +10,7 @@ from pyspark.sql.functions import count_distinct, col, to_timestamp, unix_timest
 from pyspark.sql.types import StructType, StructField, StringType, TimestampType, IntegerType
 from siesta_framework.model.DataModel import Last_checked_table_schema
 import logging
+from siesta_framework.core.sparkManager import get_spark_session
 logger = logging.getLogger("ExtractPairs")
 
 pair_schema = StructType([
@@ -40,7 +41,7 @@ type Event = Tuple[Event_Type, Timestamp, Position]
 type Trace = Tuple[Trace_ID, Tuple[Event]]
 
 
-def extract_pairs(single_DF: DataFrame, last_checked: DataFrame | None, lookback: int) -> Tuple[DataFrame, DataFrame]:
+def extract_pairs(updated_sequence_table_DF: DataFrame, last_checked: DataFrame | None, lookback: int) -> Tuple[DataFrame, DataFrame]:
     """
     Extracts the event type pairs from a DF that contains the complete traces. 
 
@@ -71,16 +72,20 @@ def extract_pairs(single_DF: DataFrame, last_checked: DataFrame | None, lookback
     
 
     # Converting the timestamps to datetime objects for easier manipulation
-    single_DF = single_DF.withColumn("start_timestamp", unix_timestamp(col("start_timestamp"), "yyyy-MM-dd'T'HH:mm:ss"))
+    # batch_single_DF = batch_single_DF.withColumn("start_timestamp", unix_timestamp(col("start_timestamp"), "yyyy-MM-dd'T'HH:mm:ss"))
     
-    single_rdd: RDD[Tuple[Trace_ID, Event]] = single_DF.rdd.map(lambda row: (
+    # single_rdd: RDD[Tuple[Trace_ID, Event]] = batch_single_DF.rdd.map(lambda row: (
+    #     row.trace_id,
+    #     (row.activity, row.start_timestamp, row.position)
+    # ))
+    updated_sequence_table_DF = updated_sequence_table_DF.withColumn("start_timestamp", unix_timestamp(col("start_timestamp"), "yyyy-MM-dd'T'HH:mm:ss"))
+    single_rdd: RDD[Tuple[Trace_ID, Event]] = updated_sequence_table_DF.rdd.map(lambda row: (
         row.trace_id,
         (row.activity, row.start_timestamp, row.position)
     ))
     
     last_checkedRDD = last_checked.rdd if last_checked else None
     
-    logger.info(f"Sample traces: {single_rdd.take(5)}")
     
     if not last_checkedRDD or last_checkedRDD.count() == 0:
         logger.info("No previously indexed pairs found. Extracting all pairs from scratch.")
@@ -88,7 +93,7 @@ def extract_pairs(single_DF: DataFrame, last_checked: DataFrame | None, lookback
     else:
         last_checkedRDD_grouped = last_checkedRDD.map(lambda row: (
             row.trace_id,
-            (row.eventA, row.eventB, row.timestamp)
+            (row.eventA, row.eventB, row.last_checked_timestamp)
         )).groupByKey()
         
         full = single_rdd.groupByKey().leftOuterJoin(last_checkedRDD_grouped).map(
@@ -97,8 +102,7 @@ def extract_pairs(single_DF: DataFrame, last_checked: DataFrame | None, lookback
     
     pairs = full.flatMap(lambda x: x[0])
     last_checked_pairs = full.flatMap(lambda x: x[1])
-    
-    spark = single_DF.sparkSession
+    spark = get_spark_session()
     pairs_df = spark.createDataFrame(pairs, schema=pair_schema)
     last_checked_df = spark.createDataFrame(last_checked_pairs, schema=Last_checked_table_schema)
     
@@ -163,7 +167,7 @@ def _calculate_pairs_stnm(single: Tuple[Trace_ID, Iterable[Event]], last: Option
     
     # Convert to last_checked format: (eventA, eventB, trace_id, timestamp)
     last_checked_list = [
-        (x[0], x[1], x[2], x[4])  # eventA, eventB, trace_id, timestampB
+        (x[2], x[0], x[1], x[4])  # trace_id, eventA, eventB, timestampB 
         for x in new_last_checked
     ]
     

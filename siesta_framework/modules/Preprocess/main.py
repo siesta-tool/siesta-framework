@@ -129,7 +129,8 @@ class Preprocessor(SiestaModule):
 
         seq_df = timed(build_sequence_table, "Preprocess.", preprocess_config=self.preprocess_config, metadata=self.metadata)
         single_df = timed(build_single_table, "Preprocess.", events_df=seq_df, metadata=self.metadata)
-        pairs_df, last_checked_df = timed(build_last_checked_table, "Preprocess.", self.preprocess_config, self.metadata, single_df=single_df)
+        
+        pairs_df, last_checked_df = timed(build_last_checked_table, "Preprocess.", self.preprocess_config, self.metadata, batch_single_df=single_df)
         # timed(build_last_checked_table, "Preprocess.", preprocess_config=self.preprocess_config, metadata=self.metadata)
 
         # In CLI mode, we want to keep streaming jobs alive until termination
