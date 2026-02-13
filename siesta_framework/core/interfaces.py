@@ -178,7 +178,7 @@ class StorageManager(ABC):
     
     
     @abstractmethod
-    def read_sequence_table(self, metadata: Any) -> DataFrame:
+    def read_sequence_table(self, metadata: MetaData, filter_out: Any | None = None) -> DataFrame:
         """
         Read data as an DataFrame from the SequenceTable.
         

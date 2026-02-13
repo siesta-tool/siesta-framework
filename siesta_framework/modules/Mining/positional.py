@@ -21,7 +21,7 @@ def discover_positional(evolved: DataFrame, metadata: MetaData) -> DataFrame:
     storage = get_storage_manager()
 
     # Get Init and End constraints that are related to unevolved traces.
-    old_valid = storage.read_positional_constraints(metadata, filter_out_df=evolved)
+    old_valid = storage.read_positional_constraints(metadata)
 
     # Create Init constraints for events with position 0
     init_events = evolved.where(col("position") == 0)

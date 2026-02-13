@@ -130,7 +130,8 @@ class Miner(SiestaModule):
         # Load existing metadata from storage if available
         self.storage.read_metadata_table(self.mining_config, self.metadata) 
         
-        evolved = self.storage.read_sequence_table(self.metadata)
+        evolved = self.storage.read_sequence_table(self.metadata, filter_out="mined")
+        
         positional_constraints = discover_positional(evolved, self.metadata)
         positional_constraints.show(truncate=False)  # Show sample results for demonstration
 

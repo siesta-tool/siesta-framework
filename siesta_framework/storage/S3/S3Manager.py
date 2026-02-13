@@ -511,7 +511,7 @@ class S3Manager(StorageManager):
             raise
 
 
-    def read_sequence_table(self, metadata: MetaData) -> DataFrame:
+    def read_sequence_table(self, metadata: MetaData, filter_out: Any | None = None) -> DataFrame:
         """
         Read data as a DataFrame from the SequenceTable stored in S3.
         
@@ -523,6 +523,8 @@ class S3Manager(StorageManager):
         try:
             df = self.spark.read.format("delta").load(metadata.sequence_table_path)
             logger.info(f"Read {df.count()} records from {metadata.sequence_table_path}.")
+            if filter_out == "mined" and metadata.last_mined_timestamp:
+                df = df.select("*").where(col("start_timestamp") > lit(metadata.last_mined_timestamp.strftime("%Y-%m-%dT%H:%M:%S")))
             return df
         except Exception as e:
             logger.info(f"Error reading from {metadata.sequence_table_path}: {e}")
