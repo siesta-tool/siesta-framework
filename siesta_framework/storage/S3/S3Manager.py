@@ -143,6 +143,7 @@ class S3Manager(StorageManager):
             empty_last_checked_df = self.spark.createDataFrame([], schema=Last_checked_table_schema)
             empty_last_checked_df.write \
                 .format("delta") \
+                .partitionBy("trace_id") \
                 .mode("overwrite") \
                 .save(metadata.last_checked_table_path)
 
@@ -572,7 +573,7 @@ class S3Manager(StorageManager):
             DataFrame with last timestamps per event type pair per trace
         """
         try:
-            df = self.spark.read.parquet(metadata.last_checked_table_path) # type: ignore
+            df = self.spark.read.format("delta").schema(schema=Last_checked_table_schema).parquet(metadata.last_checked_table_path) # type: ignore
             print(f"S3Manager: Read {df.count()} records from LastCheckedTable")
             return df
         except Exception as e:

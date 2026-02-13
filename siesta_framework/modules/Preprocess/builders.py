@@ -101,21 +101,55 @@ def build_index_table(preprocess_config: Dict):
     pass
 
 
-def build_last_checked_table(preprocess_config: Dict, metadata: MetaData, single_df: DataFrame) -> Tuple[DataFrame, DataFrame]:
+def build_last_checked_table(preprocess_config: Dict, metadata: MetaData, batch_single_df: DataFrame | StreamingQuery) -> Tuple[DataFrame, DataFrame] | Tuple[StreamingQuery, None]:
     """
     Build the Last Checked Table.
     """
     logger.info("Preprocess.builders: Building Last Checked Table...")
-    # Implementation for building last checked table goes here
 
+    storage = get_storage_manager()
     lookback = preprocess_config.get("lookback", 7)
-    last_checked = get_storage_manager().read_last_checked_table(metadata)
-    pairs_df, last_checked_df = extract_pairs(single_df, last_checked, lookback)
 
-    last_checked_df.show(5)
-    logger.info(f"Last Checked: {last_checked_df.show(5)}")
-    logger.info(f"Schema: {last_checked_df.printSchema()}")
+    def process_batch(batch_single_df, batch_id, streaming=True):
+        updated_trace_ids = batch_single_df.select("trace_id").distinct()
 
-    get_storage_manager().write_last_checked_table(last_checked_df, metadata)
+        # Filtering for the updated traces to update our pairs
+        last_checked = storage.read_last_checked_table(metadata).join(other=updated_trace_ids, on="trace_id", how="inner")
+        sequence_df = storage.read_sequence_table(metadata).join(other=updated_trace_ids, on="trace_id", how="inner")
 
-    return pairs_df, last_checked_df
+        pairs_df, last_checked_df = extract_pairs(updated_sequence_table_DF=sequence_df, last_checked=last_checked, lookback=lookback)
+
+        storage.write_last_checked_table(last_checked_df, metadata)
+        return (pairs_df, last_checked_df) if not streaming else None
+
+    # Implementation for building last checked table goes here
+    if isinstance(batch_single_df, StreamingQuery):
+        batch_single_df = (get_spark_session().readStream
+        .format("delta")
+        .load(metadata.sequence_table_path))
+
+
+
+        write_last_checked_job = (batch_single_df.writeStream
+            .queryName("build_last_checked_table")
+            .foreachBatch(process_batch) # type: ignore
+            .outputMode("append")
+            .option("checkpointLocation", storage.get_checkpoint_location(metadata, "last_checked"))
+            .start())
+        return write_last_checked_job, None
+
+    else:
+
+        updated_trace_ids = batch_single_df.select("trace_id").distinct()
+
+
+        # Filtering for the updated traces to update our pairs
+        last_checked = storage.read_last_checked_table(metadata).join(other=updated_trace_ids, on="trace_id", how="inner")
+        sequence_df = storage.read_sequence_table(metadata).join(other=updated_trace_ids, on="trace_id", how="inner")
+
+        pairs_df, last_checked_df = extract_pairs(updated_sequence_table_DF=sequence_df, last_checked=last_checked, lookback=lookback)
+
+
+        storage.write_last_checked_table(last_checked_df, metadata)
+
+        return process_batch(batch_single_df, 0, streaming=False) # type: ignore
