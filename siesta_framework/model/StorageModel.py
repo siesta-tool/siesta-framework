@@ -35,13 +35,16 @@ class MetaData:
         return f"s3a://{self.storage_namespace}/{self.log_name}/single_table"
     @property
     def s3_count_table(self) -> str:
-        return f"s3a://{self.storage_namespace}/{self.log_name}/count_table.parquet"
+        return f"s3a://{self.storage_namespace}/{self.log_name}/count_table"
     @property
     def s3_last_checked_table(self) -> str:
         return f"s3a://{self.storage_namespace}/{self.log_name}/last_checked_table"
     @property
     def s3_mining(self) -> str:
-        return f"s3a://{self.storage_namespace}/{self.log_name}/declare_table"
+        return f"s3a://{self.storage_namespace}/{self.log_name}/declare_constraints/"
+    @property
+    def s3_positional_constraints(self) -> str:
+        return self.s3_mining + "positional.parquet"
     
     # Table paths for Storage Managers (extend for more compatibility)
     @property
@@ -62,6 +65,12 @@ class MetaData:
     @property
     def last_checked_table_path(self) -> str:
         return self.s3_last_checked_table if self.storage_type == "s3" else ""
+    @property
+    def mining_path(self) -> str:
+        return self.s3_mining if self.storage_type == "s3" else ""
+    @property
+    def positional_constraints_path(self) -> str:
+        return self.s3_positional_constraints if self.storage_type == "s3" else ""
 
     def __init__(self, storage_namespace: str = "siesta", storage_type: str = "s3", log_name: str = "default_log"):
         self.storage_namespace = storage_namespace
@@ -121,7 +130,41 @@ class SequenceTableEntry(DataModel.Event):
     
     def to_dict(self) -> dict:
         return super().to_dict()
+
+
+class ConstraintEntry:
+    template: str
+    source: str
+    trace_id: str
+    target: str | None
+ 
+    occurrences: int | None
+ 
+
+    def __init__(self):
+        self.template = ""
+        self.source = ""
+        self.trace_id = ""
+        self.target = None
+        self.occurrences = None
+
+    def to_dict(self) -> dict:
+        return {
+            "template": self.template,
+            "source": self.source,
+            "trace_id": self.trace_id,
+            "target": self.target,
+            "occurrences": self.occurrences,
+        }
     
+    def get_schema() -> StructType:
+        return StructType([
+            StructField("template", StringType(), False),
+            StructField("source", StringType(), False),
+            StructField("trace_id", StringType(), False),
+            StructField("target", StringType(), True),
+            StructField("occurrences", IntegerType(), True),
+        ])
 
 def hash_str(string: str) -> int:
     """

@@ -7,11 +7,16 @@ from pyspark import RDD
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql.streaming import StreamingQuery
 from siesta_framework.core.interfaces import StorageManager
-from siesta_framework.model.StorageModel import MetaData, hash_str
+from siesta_framework.model.StorageModel import MetaData, hash_str, ConstraintEntry
 from siesta_framework.model.DataModel import Event, EventConfig
+from siesta_framework.model.MiningModel import Constraint
 from siesta_framework.core.config import get_system_config
 import siesta_framework.core.sparkManager as SparkManager
+from pyspark.sql.functions import collect_set, lit, size, count, sum as _sum, col, array
+from pyspark.sql.window import Window
 
+import logging
+logger = logging.getLogger("S3Manager")
 
 class S3Manager(StorageManager):
     
@@ -78,7 +83,7 @@ class S3Manager(StorageManager):
         # Ensure bucket exists
         try:
             self.s3_client.head_bucket(Bucket=preprocess_config.get("storage_namespace", "siesta"))
-            print(f"S3Manager: Using existing bucket '{preprocess_config.get('storage_namespace', 'siesta')}'")
+            logger.info(f"Using existing bucket '{preprocess_config.get('storage_namespace', 'siesta')}'")
 
             # If overwrite_data is True, delete all objects of the specified log
             if preprocess_config.get("overwrite_data", False):
@@ -95,21 +100,21 @@ class S3Manager(StorageManager):
                                     Bucket=preprocess_config.get("storage_namespace", "siesta"),
                                     Delete={'Objects': objects}
                                 )
-                    print(f"S3Manager: Cleared existing log data in '{prefix}'")
+                    logger.info(f"Cleared existing log data in '{prefix}'")
                 except ClientError as e:
-                    print(f"S3Manager: Error clearing existing data: {e}")
+                    logger.info(f"Error clearing existing data: {e}")
         except ClientError as e:
             error_code = e.response['Error']['Code']
             if error_code == '404':
                 # Bucket doesn't exist, create it
                 try:
                     self.s3_client.create_bucket(Bucket=preprocess_config.get("storage_namespace", "siesta"))
-                    print(f"S3Manager: Created bucket '{preprocess_config.get('storage_namespace', 'siesta')}'")
+                    logger.info(f"Created bucket '{preprocess_config.get('storage_namespace', 'siesta')}'")
                 except ClientError as create_error:
-                    print(f"S3Manager: Error creating bucket: {create_error}")
+                    logger.info(f"Error creating bucket: {create_error}")
                     raise
             else:
-                print(f"S3Manager: Error checking bucket: {e}")
+                logger.info(f"Error checking bucket: {e}")
                 raise
         
 
@@ -117,9 +122,9 @@ class S3Manager(StorageManager):
         try:
             sequence_path = f"s3a://{preprocess_config.get('storage_namespace', 'siesta')}/{preprocess_config.get('log_name', 'default_log')}/sequence/"
             self.spark.read.format("delta").load(sequence_path)
-            print(f"S3Manager: Sequence table already exists at {sequence_path}")
+            logger.info(f"Sequence table already exists at {sequence_path}")
         except Exception:
-            print(f"S3Manager: Sequence table does not exist, will create new one")
+            logger.info(f"Sequence table does not exist, will create new one")
 
             metadata = MetaData(
                 storage_namespace=preprocess_config.get("storage_namespace", "siesta"),
@@ -134,7 +139,7 @@ class S3Manager(StorageManager):
                 .mode("overwrite") \
                 .save(metadata.sequence_table_path)
 
-        print(f"S3Manager: Database structure initialized at s3a://{preprocess_config.get('storage_namespace', 'siesta')}/{preprocess_config.get('log_name', 'default_log')}/")
+        logger.info(f"Database structure initialized at s3a://{preprocess_config.get('storage_namespace', 'siesta')}/{preprocess_config.get('log_name', 'default_log')}/")
 
     def _create_s3_client(self):
         """Create and configure boto3 S3 client.
@@ -169,12 +174,12 @@ class S3Manager(StorageManager):
                 try:
                     bridge_ip = SparkManager.get_docker_bridge_ip()
                     kafka_servers = kafka_servers.replace("localhost", bridge_ip).replace("127.0.0.1", bridge_ip)
-                    print(f"S3Manager: Using Docker bridge IP for Kafka: {kafka_servers}")
+                    logger.info(f"Using Docker bridge IP for Kafka: {kafka_servers}")
                 except Exception as e:
-                    print(f"S3Manager: Warning - could not get bridge IP: {e}")
+                    logger.info(f"Warning - could not get bridge IP: {e}")
         else:
             # Local mode - localhost works fine
-            print(f"S3Manager: Using local Kafka address: {kafka_servers}")
+            logger.info(f"Using local Kafka address: {kafka_servers}")
         return kafka_servers
 
     def initialize_streaming_collector(self, preprocess_config: Dict[str, Any] = {}) -> StreamingQuery | None:
@@ -217,7 +222,7 @@ class S3Manager(StorageManager):
             .trigger(processingTime='10 seconds')
             .start())
 
-        print(f"S3Manager: Started streaming query from Kafka topic '{preprocess_config.get('kafka_topic', 'default_log')}' to S3.")
+        logger.info(f"Started streaming query from Kafka topic '{preprocess_config.get('kafka_topic', 'default_log')}' to S3.")
         return streaming_query
     
     def get_steaming_collector_path(self, preprocess_config: Dict[str, Any]) -> str:
@@ -266,7 +271,7 @@ class S3Manager(StorageManager):
             key = key[1:]
         key = f"{preprocess_config.get('log_name', 'default_log')}/batches/{key}"
             
-        print(f"S3Manager: Uploading '{local_path}' to bucket '{preprocess_config.get('storage_namespace', 'siesta')}' with key '{key}'...")
+        logger.info(f"Uploading '{local_path}' to bucket '{preprocess_config.get('storage_namespace', 'siesta')}' with key '{key}'...")
         try:
             self.s3_client.upload_file(local_path, preprocess_config.get('storage_namespace', 'siesta'), key)
             print("S3Manager: Upload successful.")
@@ -274,7 +279,7 @@ class S3Manager(StorageManager):
             # Construct S3A URI for Spark
             return f"s3a://{preprocess_config.get('storage_namespace', 'siesta')}/{key}"
         except Exception as e:
-            print(f"S3Manager: Upload failed: {e}")
+            logger.info(f"Upload failed: {e}")
             raise
     
     def upload_file_object(self, preprocess_config: Dict[str, Any], file_obj: UploadFile, destination_path: str) -> str:
@@ -294,7 +299,7 @@ class S3Manager(StorageManager):
             key = key[1:]
         key = f"{preprocess_config.get('log_name', 'default_log')}/batches/{key}"
 
-        print(f"S3Manager: Uploading in-memory file to bucket '{preprocess_config.get('storage_namespace', 'siesta')}' with key '{key}'...")
+        logger.info(f"Uploading in-memory file to bucket '{preprocess_config.get('storage_namespace', 'siesta')}' with key '{key}'...")
         try:
             self.s3_client.upload_fileobj(file_obj.file, preprocess_config.get('storage_namespace', 'siesta'), key)
             print("S3Manager: Upload successful.")
@@ -302,7 +307,7 @@ class S3Manager(StorageManager):
             # Construct S3A URI for Spark
             return f"s3a://{preprocess_config.get('storage_namespace', 'siesta')}/{key}"
         except Exception as e:
-            print(f"S3Manager: Upload failed: {e}")
+            logger.info(f"Upload failed: {e}")
             raise
     
     def close_spark(self) -> None:
@@ -325,10 +330,10 @@ class S3Manager(StorageManager):
         """
         try:
             df = self.spark.read.parquet(metadata.single_table_path) # type: ignore
-            print(f"S3Manager: Read {df.count()} records from SingleTable")
+            logger.info(f"Read {df.count()} records from SingleTable")
             return df
         except Exception as e:
-            print(f"S3Manager: Error reading SingleTable: {e}")
+            logger.info(f"Error reading SingleTable: {e}")
             return self.spark.createDataFrame([], schema=Event.get_schema()) # type: ignore
     
     def read_last_checked_table(self, metadata: MetaData) -> DataFrame:
@@ -343,10 +348,10 @@ class S3Manager(StorageManager):
         """
         try:
             df = self.spark.read.parquet(metadata.last_checked_table_path) # type: ignore
-            print(f"S3Manager: Read {df.count()} records from LastCheckedTable")
+            logger.info(f"Read {df.count()} records from LastCheckedTable")
             return df
         except Exception as e:
-            print(f"S3Manager: Error reading LastCheckedTable: {e}")
+            logger.info(f"Error reading LastCheckedTable: {e}")
             return self.spark.createDataFrame([], schema=Event.get_schema()) # type: ignore
     
     def write_last_checked_table(self, last_checked: DataFrame, metadata: MetaData) -> None:
@@ -361,9 +366,9 @@ class S3Manager(StorageManager):
             # Convert RDD to DataFrame
             df = self.spark.createDataFrame(last_checked) # type: ignore
             df.write.mode("append").parquet(metadata.last_checked_table_path)
-            print(f"S3Manager: Wrote last checked data to {metadata.last_checked_table_path}")
+            logger.info(f"Wrote last checked data to {metadata.last_checked_table_path}")
         except Exception as e:
-            print(f"S3Manager: Error writing LastCheckedTable: {e}")
+            logger.info(f"Error writing LastCheckedTable: {e}")
     
     def write_count_table(self, counts: RDD, metadata: MetaData) -> None:
         """
@@ -377,9 +382,9 @@ class S3Manager(StorageManager):
             # Convert RDD to DataFrame
             df = self.spark.createDataFrame(counts) # type: ignore
             df.write.mode("overwrite").parquet(metadata.count_table_path)
-            print(f"S3Manager: Wrote count data to {metadata.count_table_path}")
+            logger.info(f"Wrote count data to {metadata.count_table_path}")
         except Exception as e:
-            print(f"S3Manager: Error writing CountTable: {e}")
+            logger.info(f"Error writing CountTable: {e}")
     
     
     def write_index_table(self, new_pairs: RDD, metadata: MetaData) -> None:
@@ -397,27 +402,27 @@ class S3Manager(StorageManager):
             
             # Update metadata
             metadata.pair_count = df.count()
-            print(f"S3Manager: Wrote {metadata.pair_count} pairs to {metadata.index_table_path}")
+            logger.info(f"Wrote {metadata.pair_count} pairs to {metadata.index_table_path}")
         except Exception as e:
-            print(f"S3Manager: Error writing IndexTable: {e}")
+            logger.info(f"Error writing IndexTable: {e}")
     
     ###########################################
     ########## MetaData Table Methods #########
     ###########################################
 
-    def read_metadata_table(self, preprocess_config: Dict[str, Any], metadata: MetaData) -> MetaData:
+    def read_metadata_table(self, task_config: Dict[str, Any], metadata: MetaData) -> MetaData:
         """
         Construct metadata by loading existing metadata from S3 or creating new.
         
         Args:
-            preprocess_config: Configuration dictionary containing storage settings
+            task_config: Configuration dictionary containing storage settings
             
         Returns:
             MetaData object containing the current stored metadata
         """
 
-        log_name = preprocess_config.get("log_name", "default_log")
-        namespace = preprocess_config.get("storage_namespace", "siesta")
+        log_name = task_config.get("log_name", "default_log")
+        namespace = task_config.get("storage_namespace", "siesta")
 
         # Initialize MetaData object with defaults
         metadata.trace_count = 0
@@ -444,10 +449,10 @@ class S3Manager(StorageManager):
                 metadata.approx_unique_traces = set(r.approx_unique_traces) if r.approx_unique_traces is not None else set()
                 metadata.approx_unique_activities = set(r.approx_unique_activities) if r.approx_unique_activities is not None else set()
                 metadata.storage_type = "s3"
-                print(f"S3Manager: Loaded existing metadata for {log_name}")
+                logger.info(f"Loaded existing metadata for {log_name}")
         except Exception as e:
             # If table doesn't exist or can't be read, use defaults
-            print(f"S3Manager: Metadata does not exist or failed to load for {log_name}. Initialized defaults.")
+            logger.info(f"Metadata does not exist or failed to load for {log_name}. Initialized defaults.")
         return metadata
     
     def write_metadata_table(self, metadata: MetaData) -> None:
@@ -469,7 +474,7 @@ class S3Manager(StorageManager):
             .option("mergeSchema", "true") \
             .save(metadata.metadata_table_path)
         
-        print(f"S3Manager: Metadata written to {metadata.metadata_table_path}")
+        logger.info(f"Metadata written to {metadata.metadata_table_path}")
 
 
 
@@ -494,7 +499,7 @@ class S3Manager(StorageManager):
                 .save(metadata.sequence_table_path)
             
             events_count = events_df.count()
-            print(f"S3Manager: Wrote {events_count} new events to {metadata.sequence_table_path}.")
+            logger.info(f"Wrote {events_count} new events to {metadata.sequence_table_path}.")
 
             # Update metadata object
             metadata.trace_count = self.read_sequence_table(metadata).select("trace_id").distinct().count()
@@ -502,7 +507,7 @@ class S3Manager(StorageManager):
             metadata.first_timestamp = metadata.first_timestamp if metadata.first_timestamp is not None else datetime.strptime(events_df.agg({"start_timestamp": "min"}).collect()[0][0], "%Y-%m-%dT%H:%M:%S")
             metadata.last_timestamp = datetime.strptime(events_df.agg({"start_timestamp": "max"}).collect()[0][0], "%Y-%m-%dT%H:%M:%S")
         except Exception as e:
-            print(f"S3Manager: Error writing on {metadata.sequence_table_path}: {e}")
+            logger.info(f"Error writing on {metadata.sequence_table_path}: {e}")
             raise
 
 
@@ -517,10 +522,10 @@ class S3Manager(StorageManager):
         """
         try:
             df = self.spark.read.format("delta").load(metadata.sequence_table_path)
-            print(f"S3Manager: Read {df.count()} records from {metadata.sequence_table_path}.")
+            logger.info(f"Read {df.count()} records from {metadata.sequence_table_path}.")
             return df
         except Exception as e:
-            print(f"S3Manager: Error reading from {metadata.sequence_table_path}: {e}")
+            logger.info(f"Error reading from {metadata.sequence_table_path}: {e}")
             return self.spark.createDataFrame([], schema=Event.get_schema())
         
 
@@ -546,11 +551,53 @@ class S3Manager(StorageManager):
             
             unique_activities = events_df.select("activity").distinct().rdd.map(lambda row: hash_str(row.activity)).collect()
             globally_uninque_activities = set(unique_activities) - metadata.approx_unique_activities
-            print(f"S3Manager: Wrote {len(globally_uninque_activities)} new activities to {metadata.single_table_path}.")
+            logger.info(f"Wrote {len(globally_uninque_activities)} new activities to {metadata.single_table_path}.")
 
             # Update metadata object
             # metadata.approx_unique_activities.update(globally_uninque_activities)            
         except Exception as e:
-            print(f"S3Manager: Error writing on {metadata.single_table_path}: {e}")
+            logger.info(f"Error writing on {metadata.single_table_path}: {e}")
             raise
 
+    
+
+    ###########################################
+    ##### Declarative Mining Constraints ######
+    ###########################################
+    def read_positional_constraints(self, metadata: MetaData, filter_out_df: DataFrame | None = None) -> DataFrame:
+        try:
+            c = self.spark.read.parquet(metadata.positional_constraints_path)
+            logger.info(f"Read positional constraints from {metadata.positional_constraints_path}.")
+
+            if filter_out_df is not None:
+                # Keep only constraints that are related to unevolved traces
+                end_constraints = c.where(col("template") == "End").join(
+                    filter_out_df.select("trace_id").distinct(),
+                    on="trace_id",
+                    how="left_anti"
+                )
+                init_constraints = c.where(col("template") == "Init")
+                c = end_constraints.union(init_constraints)
+
+            # Group by (template, source) to get trace_ids and count for each combination
+            grouped = c.groupBy("template", "source").agg(
+                collect_set("trace_id").alias("trace_ids"),
+                collect_set("target").alias("targets"),
+                count("*").alias("source_count")
+            )
+            
+            # Calculate total count per template
+            window_spec = Window.partitionBy("template")
+            result = grouped.withColumn("total_count", _sum("source_count").over(window_spec)) \
+                .withColumn("category", lit('Positional').cast("string")) \
+                .withColumn("sources", array(col("source"))) \
+                .withColumn("occurrences", lit(None).cast("int")) \
+                .withColumn("support", (size("trace_ids") / metadata.trace_count).cast("float")) \
+                .withColumn("confidence", (col("source_count") / col("total_count")).cast("float")) \
+                .drop("source", "source_count", "total_count") \
+                .select("category", "template", "sources", "targets", "occurrences", "support", "confidence", "trace_ids")
+            
+            return result
+        except Exception as _:
+            logger.info(f"No existing positional constraints found at {metadata.positional_constraints_path}. Returning empty DataFrame.")
+            return self.spark.createDataFrame([], schema=Constraint.get_schema())

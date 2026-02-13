@@ -14,9 +14,9 @@
     },
     "csv": {
       "activity": "activity",
-      "trace_id": "caseID",
+      "trace_id": "trace_id",
       "position": "position",
-      "start_timestamp": "Timestamp",
+      "start_timestamp": "timestamp",
       "attributes" : ["resource", "cost"]
     },
     "json": {
@@ -26,6 +26,6 @@
         "start_timestamp": "Timestamp"
     }
   },
-  "trace_level_fields": ["caseID"],
+  "trace_level_fields": ["trace_id"],
   "timestamp_fields": ["start_timestamp"]
 }

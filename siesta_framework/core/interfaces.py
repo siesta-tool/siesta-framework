@@ -125,12 +125,12 @@ class StorageManager(ABC):
         pass
     
     @abstractmethod
-    def read_metadata_table(self, preprocess_config: Dict[str, Any]) -> MetaData:
+    def read_metadata_table(self, task_config: Dict[str, Any]) -> MetaData:
         """
         Construct metadata based on data already stored in the database and new configuration.
         
         Args:
-            preprocess_config: Configuration dictionary passed during execution
+            task_config: Configuration dictionary passed during execution
             
         Returns:
             MetaData object containing the metadata
@@ -270,4 +270,16 @@ class StorageManager(ABC):
             metadata: MetaData object containing the metadata
         """
         pass
-
+    
+    @abstractmethod
+    def read_positional_constraints(self, metadata: MetaData, filter_out_df: DataFrame | None = None) -> DataFrame:
+        """
+        Read existing positional constraints from S3.
+        
+        Args:
+            metadata: MetaData object containing the metadata of the log dataset
+            filter_df: Optional DataFrame to filter the constraints based on trace_ids
+        Returns:
+            DataFrame[Constraint] containing the positional constraints
+        """
+        pass
