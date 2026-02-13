@@ -3,8 +3,8 @@ from typing import Any, Dict
 import boto3
 from botocore.exceptions import ClientError
 from fastapi import UploadFile
-from pyspark import RDD
 from pyspark.sql import SparkSession, DataFrame
+from pyspark import RDD
 from pyspark.sql.streaming import StreamingQuery
 from siesta_framework.core.interfaces import StorageManager
 from siesta_framework.model.StorageModel import MetaData, hash_str, ConstraintEntry
@@ -26,6 +26,9 @@ def _parse_timestamp(ts: str) -> datetime:
         except ValueError:
             continue
     raise ValueError(f"Cannot parse timestamp: {ts!r}")
+
+import logging
+logger = logging.getLogger("S3Manager")
 
 
 class S3Manager(StorageManager):
@@ -57,7 +60,7 @@ class S3Manager(StorageManager):
         try:
             self.s3_client = self._create_s3_client()
         except Exception as e:
-            print(f"Error initializing S3 client: {e}")
+            logger.error(f"Error initializing S3 client: {e}")
             raise
         
         # Initialize Spark based on system configuration
@@ -80,7 +83,7 @@ class S3Manager(StorageManager):
         if self.config.get("s3_endpoint"):
             self.spark.conf.set("spark.hadoop.fs.s3a.endpoint", self.config["s3_endpoint"])
  
-        print("S3Manager: Spark session configured for S3 access.")
+        logger.info("Spark session configured for S3 access.")
     
     def initialize_db(self, preprocess_config: Dict[str, Any] = {}) -> None:
         """
@@ -152,9 +155,9 @@ class S3Manager(StorageManager):
         # Check if Last Checked table already exists before creating
         try:
             self.spark.read.format("delta").load(metadata.active_pairs_table_path)
-            print(f"S3Manager: Last Checked table already exists at {metadata.active_pairs_table_path}")
+            logger.info(f"Active pairs table already exists at {metadata.active_pairs_table_path}")
         except Exception:
-            print(f"S3Manager: Last Checked table does not exist, will create new one")
+            logger.info("Active pairs table does not exist, will create new one")
 
         logger.info(f"Database structure initialized at s3a://{preprocess_config.get('storage_namespace', 'siesta')}/{preprocess_config.get('log_name', 'default_log')}/")
 
@@ -207,7 +210,7 @@ class S3Manager(StorageManager):
             preprocess_config: Configuration dictionary containing event settings
         """
         # Begin listening to kafka
-        print("S3Manager: Setting up streaming from Kafka for log " + preprocess_config.get("log_name", "default_log") + "...")
+        logger.info(f"Setting up streaming from Kafka for log {preprocess_config.get('log_name', 'default_log')}...")
         from pyspark.sql.functions import col, from_json
         
         # Define schema for incoming JSON events using source field names
@@ -291,7 +294,7 @@ class S3Manager(StorageManager):
         logger.info(f"Uploading '{local_path}' to bucket '{preprocess_config.get('storage_namespace', 'siesta')}' with key '{key}'...")
         try:
             self.s3_client.upload_file(local_path, preprocess_config.get('storage_namespace', 'siesta'), key)
-            print("S3Manager: Upload successful.")
+            logger.info("Upload successful.")
             
             # Construct S3A URI for Spark
             return f"s3a://{preprocess_config.get('storage_namespace', 'siesta')}/{key}"
@@ -319,7 +322,7 @@ class S3Manager(StorageManager):
         logger.info(f"Uploading in-memory file to bucket '{preprocess_config.get('storage_namespace', 'siesta')}' with key '{key}'...")
         try:
             self.s3_client.upload_fileobj(file_obj.file, preprocess_config.get('storage_namespace', 'siesta'), key)
-            print("S3Manager: Upload successful.")
+            logger.info("Upload successful.")
             
             # Construct S3A URI for Spark
             return f"s3a://{preprocess_config.get('storage_namespace', 'siesta')}/{key}"
@@ -332,7 +335,7 @@ class S3Manager(StorageManager):
         SparkManager.shutdown()
         self.spark = None
         # Note: boto3 clients don't need explicit closing
-        print("S3Manager: Spark session closed.")
+        logger.info("Spark session closed.")
     
     
     def read_activity_index_table(self, metadata: MetaData) -> DataFrame:
@@ -530,7 +533,7 @@ class S3Manager(StorageManager):
             metadata.first_timestamp = metadata.first_timestamp if metadata.first_timestamp is not None else _parse_timestamp(events_df.agg({"start_timestamp": "min"}).collect()[0][0])
             metadata.last_timestamp = _parse_timestamp(events_df.agg({"start_timestamp": "max"}).collect()[0][0])
         except Exception as e:
-            logger.info(f"Error writing on {metadata.sequence_table_path}: {e}")
+            logger.error(f"Error writing on {metadata.sequence_table_path}: {e}")
             raise
 
 

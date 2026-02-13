@@ -92,6 +92,15 @@ class MetaData:
     @property
     def active_pairs_table_path(self) -> str:
         return self.s3_active_pairs_table if self.storage_type == "s3" else ""
+    @property
+    def last_checked_table_path(self) -> str:
+        return self.s3_last_checked_table if self.storage_type == "s3" else ""
+    @property
+    def mining_path(self) -> str:
+        return self.s3_mining if self.storage_type == "s3" else ""
+    @property
+    def positional_constraints_path(self) -> str:
+        return self.s3_positional_constraints if self.storage_type == "s3" else ""
 
     def __init__(self, storage_namespace: str = "siesta", storage_type: str = "s3", log_name: str = "default_log"):
         self.storage_namespace = storage_namespace
