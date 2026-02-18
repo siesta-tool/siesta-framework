@@ -578,6 +578,7 @@ class S3Manager(StorageManager):
                     on="trace_id",
                     how="left_anti"
                 )
+                # Include Init constraints for all traces, since they are not affected by evolution
                 init_constraints = c.where(col("template") == "Init")
                 c = end_constraints.union(init_constraints)
 
@@ -603,3 +604,11 @@ class S3Manager(StorageManager):
         except Exception as _:
             logger.info(f"No existing positional constraints found at {metadata.positional_constraints_path}. Returning empty DataFrame.")
             return self.spark.createDataFrame([], schema=Constraint.get_schema())
+        
+    def write_positional_constraints(self, metadata: MetaData, df: DataFrame) -> None:
+        try:
+            df.write.parquet(path=metadata.positional_constraints_path, mode="overwrite")
+            logger.info(f"Wrote positional constraints to {metadata.positional_constraints_path}.")
+        except Exception as e:
+            logger.info(f"Error writing positional constraints to {metadata.positional_constraints_path}: {e}")
+            raise

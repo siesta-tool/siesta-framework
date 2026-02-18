@@ -1,5 +1,7 @@
 # siesta-framework
 
+### notes
+trace ids are strings, activities are strings, positioning inside trace is 1-indexed (int)
 
 Example usages:
 - Run API server (default config) 

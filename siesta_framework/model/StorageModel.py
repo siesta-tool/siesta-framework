@@ -96,15 +96,25 @@ class MetaData:
         ])
 
     def to_dict(self) -> dict:
+        f_timestamp = getattr(self, 'first_timestamp', None)
+        if f_timestamp and isinstance(f_timestamp, datetime):
+            f_timestamp = f_timestamp.isoformat()
+        l_timestamp = getattr(self, 'last_timestamp', None)
+        if l_timestamp and isinstance(l_timestamp, datetime):
+            l_timestamp = l_timestamp.isoformat()
+        m_timestamp = getattr(self, 'last_mined_timestamp', None)
+        if m_timestamp and isinstance(m_timestamp, datetime):
+            m_timestamp = m_timestamp.isoformat()
+            
         return {
             "log_name": self.log_name,
             "storage_namespace": self.storage_namespace,
             "trace_count": getattr(self, 'trace_count', 0),
             "event_count": getattr(self, 'event_count', 0),
             "pair_count": getattr(self, 'pair_count', 0),
-            "first_timestamp": self.first_timestamp.isoformat() if getattr(self, 'first_timestamp', None) else None,
-            "last_timestamp": self.last_timestamp.isoformat() if getattr(self, 'last_timestamp', None) else None,
-            "last_mined_timestamp": self.last_mined_timestamp.isoformat() if getattr(self, 'last_mined_timestamp', None) else None,
+            "first_timestamp": f_timestamp,
+            "last_timestamp": l_timestamp,
+            "last_mined_timestamp": m_timestamp,
             "approx_unique_traces": list(self.approx_unique_traces) if getattr(self, 'approx_unique_traces', None) else [],
             "approx_unique_activities": list(self.approx_unique_activities) if getattr(self, 'approx_unique_activities', None) else [],
         }

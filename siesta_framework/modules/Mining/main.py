@@ -13,8 +13,10 @@ from siesta_framework.core.storageFactory import get_storage_manager
 from siesta_framework.modules.Mining.positional import discover_positional
 from siesta_framework.modules.Preprocess.parsers import upload_log_file_object
 from siesta_framework.modules.Preprocess.builders import build_sequence_table, build_single_table
-from pyspark.sql import SparkSession
+from pyspark.sql import SparkSession, DataFrame, functions as F
 from pyspark.sql.streaming import StreamingQuery
+import csv
+import io
 import json
 import logging
 logger = logging.getLogger("Mining")
@@ -52,7 +54,7 @@ class Miner(SiestaModule):
 
         logger.info(f"Mining: Running mining with args: {mining_config}")
         
-        self.begin_miners(caller="api")
+        self.mine(caller="api")
 
         logger.info(f"Mining: Completed. Results available at {self.mining_config['output_path']}.")
         
@@ -97,7 +99,7 @@ class Miner(SiestaModule):
             except Exception as e:
                 raise RuntimeError(f"Error loading config from {config_path}: {e}")
 
-        self.begin_miners(caller="cli")
+        self.mine(caller="cli")
 
         logger.info(f"Mining: Completed. Results available at {self.mining_config['output_path']}.")
         
@@ -106,33 +108,80 @@ class Miner(SiestaModule):
     def _load_mining_config(self, config: Dict[str, Any]):
         self.mining_config = DEFAULT_MINING_CONFIG.copy()
         self.mining_config.update(config)
-        # Ensure output_path is unique for each run to avoid overwriting results
-        self.mining_config["output_path"] = self.mining_config.get("output_path",self.mining_config.get("log_name","mining_results")) + str(datetime.datetime.now().timestamp())
 
-    # Returns the output location of the mining results (e.g. S3 path or local path)
-    def begin_miners(self, caller: str):
-        # Placeholder for mining logic
+        # Ensure output_path is unique for each run to avoid overwriting results
+        given_output_path = self.mining_config.get("output_path", self.mining_config.get("log_name", "mining_results"))
+        Path(given_output_path).parent.mkdir(parents=True, exist_ok=True)
+        self.mining_config["output_path"] = given_output_path + "_" + str(datetime.datetime.now().timestamp()) + ".csv"
+
+
+    def mine(self, caller: str):
+        """
+        Permorms incremental mining on the log data based on the provided mining configuration and metadata.
+        The method loads evolved traces since the last mining, discovers new constraints and keeps only valid old ones and new ones in storage (by overwrite mode), and outputs the results to a CSV file on the driver's local filesystem.
+
+        :param caller: a string indicating the caller of the mining process (e.g. "cli", "api") for logging purposes.
+        """
+
+        
         logger.info(f"Beginning mining process initiated by {caller}.")
-        # Here you would implement the actual mining logic, e.g.:
-        # - Load preprocessed data from storage
-        # - Apply mining algorithms (e.g. process discovery, conformance checking)
-        # - Store results back to storage or output them as needed
-       
-       
-       
-       
+
+        # Load metadata if available, and evolved traces since last mining from storage
         self.metadata = MetaData(
             storage_namespace=self.mining_config.get("storage_namespace", "siesta"),
             log_name=self.mining_config.get("log_name", "default_log"),
             storage_type=self.mining_config.get("storage_type", "s3")
         )
-
-        # Load existing metadata from storage if available
         self.storage.read_metadata_table(self.mining_config, self.metadata) 
-        
         evolved = self.storage.read_sequence_table(self.metadata, filter_out="mined")
         
+        # Perform mining
         positional_constraints = discover_positional(evolved, self.metadata)
-        positional_constraints.show(truncate=False)  # Show sample results for demonstration
 
-        pass
+        self.metadata.last_mined_timestamp = evolved.agg({"start_timestamp": "max"}).collect()[0][0] if not evolved.rdd.isEmpty() else self.metadata.last_mined_timestamp
+        self.storage.write_metadata_table(self.metadata)
+
+        constraints = positional_constraints
+        constraints.show(truncate=False)
+
+        self._output_constraints(constraints)
+
+
+    def _output_constraints(self, constraints: DataFrame):
+        """
+        Outputs the discovered constraints to a CSV file on the driver's local filesystem 
+        based on the specified output path in the mining configuration.
+        This method collects the results from the Spark executors and writes them incrementally to avoid driver memory issues.
+        
+        :param constraints: DataFrame containing the discovered constraints with columns like 'category', 'template', 'sources', 'targets', 'occurrences', 'support', 'confidence', and optionally 'trace_ids'.
+        """
+        # Prepare a CSV-friendly DataFrame: array columns are serialised to
+        # pipe-delimited strings on the executors so the driver only receives
+        # flat string rows.
+        select_cols = [
+            F.col("category"),
+            F.col("template"),
+            F.concat_ws("|", F.col("sources")).alias("sources"),
+            F.concat_ws("|", F.col("targets")).alias("targets"),
+            F.col("occurrences").cast("string"),
+            F.col("support").cast("string"),
+            F.col("confidence").cast("string"),
+        ]
+        
+        # Optionally include the list of trace_ids supporting each constraint, serialized as a pipe-delimited string. 
+        # This can be large, so it's controlled by a config flag.
+        if self.mining_config.get("include_trace_lists", False):
+            select_cols.append(F.concat_ws("|", F.col("trace_ids")).alias("trace_ids"))
+        
+        constraints_csv = constraints.select(*select_cols)
+
+        # Stream rows partition-by-partition from executors to the driver and write
+        # them incrementally into a single CSV file on the driver's local filesystem.
+        output_path = self.mining_config["output_path"]
+        col_names = constraints_csv.columns
+
+        with open(output_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(col_names)
+            for row in constraints_csv.toLocalIterator(prefetchPartitions=True):
+                writer.writerow([row[c] for c in col_names])
