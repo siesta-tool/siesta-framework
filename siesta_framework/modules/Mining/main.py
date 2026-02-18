@@ -138,11 +138,13 @@ class Miner(SiestaModule):
         # Perform mining
         positional_constraints = discover_positional(evolved, self.metadata)
 
-        self.metadata.last_mined_timestamp = evolved.agg({"start_timestamp": "max"}).collect()[0][0] if not evolved.rdd.isEmpty() else self.metadata.last_mined_timestamp
-        self.storage.write_metadata_table(self.metadata)
 
         constraints = positional_constraints
         constraints.show(truncate=False)
+       
+        # Update metadata with new last mining timestamp based on the max timestamp of the evolved traces
+        self.metadata.last_mined_timestamp = evolved.agg({"start_timestamp": "max"}).collect()[0][0] if not evolved.rdd.isEmpty() else self.metadata.last_mined_timestamp
+        self.storage.write_metadata_table(self.metadata)
 
         self._output_constraints(constraints)
 
