@@ -404,8 +404,14 @@ class S3Manager(StorageManager):
         except Exception as e:
             logger.info(f"Error writing CountTable: {e}")
     
-    
-    def write_index_table(self, new_pairs: RDD, metadata: MetaData) -> None:
+    ###########################################
+    ########### Pairs index Methods ###########
+    ###########################################
+
+    def read_pairs_index_table(self, metadata: Any) -> DataFrame:
+        return None
+
+    def write_pairs_index_table(self, new_pairs: DataFrame, metadata: MetaData) -> None:
         """
         Write the combined pairs to S3 IndexTable, grouped by interval and first event.
         
@@ -414,9 +420,7 @@ class S3Manager(StorageManager):
             metadata: MetaData object containing the metadata
         """
         try:
-            # Convert RDD to DataFrame
-            df = self.spark.createDataFrame(new_pairs) # type: ignore
-            df.write.mode("append").parquet(metadata.index_table_path)
+            new_pairs.write.format("delta").partitionBy("source").mode("append").parquet(metadata.index_table_path)
             
             # Update metadata
             metadata.pair_count = df.count()

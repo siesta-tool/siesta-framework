@@ -8,20 +8,20 @@ from pyspark.sql import DataFrame
 from typing import Iterable, List, Optional, Tuple
 from pyspark.sql.functions import count_distinct, col, to_timestamp, unix_timestamp
 from pyspark.sql.types import StructType, StructField, StringType, TimestampType, IntegerType
-from siesta_framework.model.DataModel import Last_checked_table_schema
+from siesta_framework.model.DataModel import Last_checked_table_schema, EventPair
 import logging
 from siesta_framework.core.sparkManager import get_spark_session
 logger = logging.getLogger("ExtractPairs")
 
-pair_schema = StructType([
-    StructField("eventA", StringType(), True),
-    StructField("eventB", StringType(), True),
-    StructField("trace_id", StringType(), True),
-    StructField("timestampA", IntegerType(), True),
-    StructField("timestampB", IntegerType(), True),
-    StructField("posA", IntegerType(), True),
-    StructField("posB", IntegerType(), True)
-])
+# pair_schema = StructType([
+#     StructField("eventA", StringType(), True),
+#     StructField("eventB", StringType(), True),
+#     StructField("trace_id", StringType(), True),
+#     StructField("timestampA", IntegerType(), True),
+#     StructField("timestampB", IntegerType(), True),
+#     StructField("posA", IntegerType(), True),
+#     StructField("posB", IntegerType(), True)
+# ])
 
 single_schema = StructType([
     StructField("activity", StringType(), True),
@@ -31,13 +31,17 @@ single_schema = StructType([
     StructField("attributes", StringType(), True)
 ])
 
+active_pair_schema = EventPair.get_schema()
+# Schema: Source, Target, trace_id, source_timestamp, target_timestamp, source_position, target_position, source_attributes, target_attributes
+
 
 type Trace_ID = str
 type Event_Type = str
 type Timestamp = str
 type Position = int
+type Attributes = str
 
-type Event = Tuple[Event_Type, Timestamp, Position]
+type Event = Tuple[Event_Type, Timestamp, Position, Attributes]
 type Trace = Tuple[Trace_ID, Tuple[Event]]
 
 
@@ -79,9 +83,9 @@ def extract_pairs(updated_sequence_table_DF: DataFrame, last_checked: DataFrame 
     #     (row.activity, row.start_timestamp, row.position)
     # ))
     updated_sequence_table_DF = updated_sequence_table_DF.withColumn("start_timestamp", unix_timestamp(col("start_timestamp"), "yyyy-MM-dd'T'HH:mm:ss"))
-    single_rdd: RDD[Tuple[Trace_ID, Event]] = updated_sequence_table_DF.rdd.map(lambda row: (
+    trace_rdd: RDD[Tuple[Trace_ID, Event]] = updated_sequence_table_DF.rdd.map(lambda row: (
         row.trace_id,
-        (row.activity, row.start_timestamp, row.position)
+        (row.activity, row.start_timestamp, row.position, row.attributes)
     ))
     
     last_checkedRDD = last_checked.rdd if last_checked else None
@@ -89,21 +93,22 @@ def extract_pairs(updated_sequence_table_DF: DataFrame, last_checked: DataFrame 
     
     if not last_checkedRDD or last_checkedRDD.count() == 0:
         logger.info("No previously indexed pairs found. Extracting all pairs from scratch.")
-        full = single_rdd.groupByKey().map(lambda x: _calculate_pairs_stnm(x, None, lookback))
+        full = trace_rdd.groupByKey().map(lambda x: _calculate_pairs_stnm(x, None, lookback))
     else:
         last_checkedRDD_grouped = last_checkedRDD.map(lambda row: (
             row.trace_id,
             (row.eventA, row.eventB, row.last_checked_timestamp)
         )).groupByKey()
         
-        full = single_rdd.groupByKey().leftOuterJoin(last_checkedRDD_grouped).map(
+        full = trace_rdd.groupByKey().leftOuterJoin(last_checkedRDD_grouped).map(
             lambda x: _calculate_pairs_stnm((x[0], x[1][0]), x[1][1], lookback)
         )
     
     pairs = full.flatMap(lambda x: x[0])
     last_checked_pairs = full.flatMap(lambda x: x[1])
     spark = get_spark_session()
-    pairs_df = spark.createDataFrame(pairs, schema=pair_schema)
+    pairs_df = spark.createDataFrame(pairs, schema=active_pair_schema)
+    # logger.info(pairs_df.show())
     last_checked_df = spark.createDataFrame(last_checked_pairs, schema=Last_checked_table_schema)
     
     logger.info(f"Extracted {pairs_df.count()} event pairs")
@@ -130,8 +135,8 @@ def _calculate_pairs_stnm(single: Tuple[Trace_ID, Iterable[Event]], last: Option
     
     # Group events by event_name
     single_map = defaultdict(list)
-    for event_name, timestamp, position in events:
-        single_map[event_name].append((timestamp, position))
+    for event_name, timestamp, position, attributes in events:
+        single_map[event_name].append((timestamp, position, attributes))
     
     # Build lastMap from last_checked
     last_map = {}
@@ -177,8 +182,8 @@ def _calculate_pairs_stnm(single: Tuple[Trace_ID, Iterable[Event]], last: Option
 def createTuples(
     key1: str, 
     key2: str, 
-    ts1: List[Tuple[int, int]], 
-    ts2: List[Tuple[int, int]],
+    e_source: List[Tuple[int, int, str]], 
+    e_target: List[Tuple[int, int, str]],
     lookback: int, 
     last_checked: Optional[int],
     trace_id: str
@@ -194,14 +199,14 @@ def createTuples(
     prev = None
     i = 0
     
-    for ea_ts, ea_pos in ts1:
+    for ea_ts, ea_pos, ea_attr in e_source:
         # Evaluate based on previous and last_checked
         if ((prev is None or ea_ts >= prev) and 
             (last_checked is None or ea_ts >= last_checked)):
             
             stop = False
-            while i < len(ts2) and not stop:
-                eb_ts, eb_pos = ts2[i]
+            while i < len(e_target) and not stop:
+                eb_ts, eb_pos, eb_attr = e_target[i]
                 
                 if ea_pos >= eb_pos:
                     # Event a is not before event b, remove it
@@ -210,7 +215,7 @@ def createTuples(
                     # Event a is before event b 2025-01-01T09:00:00
                     if eb_ts - ea_ts <= lookback_delta_millis:
                         # Lookback satisfied, create pair
-                        pairs.append((key1, key2, trace_id, ea_ts, eb_ts, ea_pos, eb_pos))
+                        pairs.append((key1, key2, trace_id, ea_ts, eb_ts, ea_pos, eb_pos, ea_attr, eb_attr))
                         prev = eb_ts
                         i += 1
                     stop = True

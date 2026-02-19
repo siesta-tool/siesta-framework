@@ -3,7 +3,7 @@
   "log_path": "datasets/test_nopos.csv",
   "storage_namespace": "siesta",
   "overwrite_data": false,
-  "enable_streaming": false,
+  "enable_streaming": true,
   "kafka_topic": "example_log",
   "field_mappings": {
     "xes": {

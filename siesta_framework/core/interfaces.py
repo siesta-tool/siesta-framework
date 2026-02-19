@@ -217,6 +217,17 @@ class StorageManager(ABC):
             DataFrame with last timestamps per event type pair per trace
         """
         pass
+
+    @abstractmethod
+    def read_pairs_index_table(self, metadata: Any) -> DataFrame:
+        """
+        Load data from the Pairs Index
+
+        Args: 
+            metadata: MetaData object containing the metadata
+        Returns:
+            DataFrame indexed by Pairs
+        """
     
     @abstractmethod
     def write_last_checked_table(self, last_checked: DataFrame, metadata: Any) -> None:
@@ -263,12 +274,12 @@ class StorageManager(ABC):
         pass
     
     @abstractmethod
-    def write_index_table(self, new_pairs: RDD, metadata: Any) -> None:
+    def write_pairs_index_table(self, new_pairs: DataFrame, metadata: Any) -> None:
         """
         Write the combined pairs back to the database, grouped by interval and first event.
         
         Args:
-            new_pairs: RDD containing newly generated pairs
+            new_pairs: DataFrame containing newly generated pairs
             metadata: MetaData object containing the metadata
         """
         pass
