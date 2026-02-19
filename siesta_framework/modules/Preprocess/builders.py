@@ -92,13 +92,28 @@ def build_single_table(metadata: MetaData, events_df: DataFrame | StreamingQuery
         return events_df
 
 
-def build_index_table(preprocess_config: Dict):
+def build_pairs_index_table(preprocess_config: Dict, metadata: MetaData, batch_pairs_index_df: DataFrame | StreamingQuery):
     """
     Build the Index Table from the Sequence Table.
     """
     logger.info("Preprocess.builders: Building Index Table...")
     # Implementation for building index table goes here
-    pass
+    storage = get_storage_manager()
+
+    if isinstance(batch_pairs_index_df, StreamingQuery):
+        #TODO: Do properly
+        def process_batch(pairs_streaming_query, id):
+            storage.write_pairs_index_table(new_pairs=pairs_streaming_query, metadata=metadata)
+        
+        pairs_streaming_df = (get_spark_session().readStream.format("delta").load(metadata.index_table_path))
+        job = (pairs_streaming_df.writeStream.queryName("build_index_df")
+               .foreachBatch(process_batch).outputMode("append")
+               .option("checkpointLocation", storage.get_checkpoint_location(metadata, "index_table"))
+               .start())
+    else:
+        storage.write_pairs_index_table(new_pairs=batch_pairs_index_df, metadata=metadata)
+
+
 
 
 def build_last_checked_table(preprocess_config: Dict, metadata: MetaData, batch_single_df: DataFrame | StreamingQuery) -> Tuple[DataFrame, DataFrame] | Tuple[StreamingQuery, None]:
@@ -110,17 +125,7 @@ def build_last_checked_table(preprocess_config: Dict, metadata: MetaData, batch_
     storage = get_storage_manager()
     lookback = preprocess_config.get("lookback", 7)
 
-    def process_batch(batch_single_df, batch_id, streaming=True):
-        updated_trace_ids = batch_single_df.select("trace_id").distinct()
-
-        # Filtering for the updated traces to update our pairs
-        last_checked = storage.read_last_checked_table(metadata).join(other=updated_trace_ids, on="trace_id", how="inner")
-        sequence_df = storage.read_sequence_table(metadata).join(other=updated_trace_ids, on="trace_id", how="inner")
-
-        pairs_df, last_checked_df = extract_pairs(updated_sequence_table_DF=sequence_df, last_checked=last_checked, lookback=lookback)
-
-        storage.write_last_checked_table(last_checked_df, metadata)
-        return (pairs_df, last_checked_df) if not streaming else None
+    
 
     # Implementation for building last checked table goes here
     if isinstance(batch_single_df, StreamingQuery):
@@ -128,7 +133,17 @@ def build_last_checked_table(preprocess_config: Dict, metadata: MetaData, batch_
         .format("delta")
         .load(metadata.sequence_table_path))
 
+        def process_batch(batch_single_df, batch_id, streaming=True):
+            updated_trace_ids = batch_single_df.select("trace_id").distinct()
 
+            # Filtering for the updated traces to update our pairs
+            last_checked = storage.read_last_checked_table(metadata).join(other=updated_trace_ids, on="trace_id", how="inner")
+            sequence_df = storage.read_sequence_table(metadata).join(other=updated_trace_ids, on="trace_id", how="inner")
+
+            pairs_df, last_checked_df = extract_pairs(updated_sequence_table_DF=sequence_df, last_checked=last_checked, lookback=lookback)
+
+            storage.write_last_checked_table(last_checked_df, metadata)
+            return (pairs_df, last_checked_df) if not streaming else None
 
         write_last_checked_job = (batch_single_df.writeStream
             .queryName("build_last_checked_table")
@@ -148,8 +163,8 @@ def build_last_checked_table(preprocess_config: Dict, metadata: MetaData, batch_
         sequence_df = storage.read_sequence_table(metadata).join(other=updated_trace_ids, on="trace_id", how="inner")
 
         pairs_df, last_checked_df = extract_pairs(updated_sequence_table_DF=sequence_df, last_checked=last_checked, lookback=lookback)
-
+        logger.info(pairs_df.show())
 
         storage.write_last_checked_table(last_checked_df, metadata)
 
-        return process_batch(batch_single_df, 0, streaming=False) # type: ignore
+        return pairs_df, last_checked_df

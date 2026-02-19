@@ -10,7 +10,7 @@ from siesta_framework.core.config import get_system_config
 from siesta_framework.core.logger import timed
 from siesta_framework.core.storageFactory import get_storage_manager
 from siesta_framework.modules.Preprocess.parsers import upload_log_file_object
-from siesta_framework.modules.Preprocess.builders import build_sequence_table, build_single_table, build_last_checked_table
+from siesta_framework.modules.Preprocess.builders import *
 from pyspark.sql import SparkSession
 import json
 import logging
@@ -123,7 +123,7 @@ class Preprocessor(SiestaModule):
             log_name=self.preprocess_config.get("log_name", "default_log"),
             storage_type=self.preprocess_config.get("storage_type", "s3")
         )
-
+        
         # Load existing metadata from storage if available
         self.storage.read_metadata_table(self.preprocess_config, self.metadata) 
 
@@ -131,7 +131,8 @@ class Preprocessor(SiestaModule):
         single_df = timed(build_single_table, "Preprocess.", events_df=seq_df, metadata=self.metadata)
         
         pairs_df, last_checked_df = timed(build_last_checked_table, "Preprocess.", self.preprocess_config, self.metadata, batch_single_df=single_df)
-        # timed(build_last_checked_table, "Preprocess.", preprocess_config=self.preprocess_config, metadata=self.metadata)
+        
+        timed(build_pairs_index_table, "Preprocess.", self.preprocess_config, self.metadata, pairs_df)
 
         # In CLI mode, we want to keep streaming jobs alive until termination
         if caller == "cli" and self.preprocess_config.get("enable_streaming", False):
