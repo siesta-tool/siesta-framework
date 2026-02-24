@@ -241,12 +241,16 @@ class StorageManager(ABC):
         pass
     
     @abstractmethod
-    def write_count_table(self, counts: RDD, metadata: Any) -> None:
+    def read_count_table(self, metadata: MetaData) -> DataFrame:
+        pass
+
+    @abstractmethod
+    def write_count_table(self, count_df: DataFrame, metadata: Any) -> None:
         """
         Write count statistics to the CountTable.
         
         Args:
-            counts: RDD containing calculated basic statistics per event type pair
+            count_df: Dataframe containing calculated basic statistics per event type pair
             metadata: MetaData object containing the metadata
         """
         pass

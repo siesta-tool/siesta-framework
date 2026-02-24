@@ -8,7 +8,7 @@ from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql.streaming import StreamingQuery
 from siesta_framework.core.interfaces import StorageManager
 from siesta_framework.model.StorageModel import MetaData, hash_str, ConstraintEntry
-from siesta_framework.model.DataModel import Event, EventConfig, Last_checked_table_schema
+from siesta_framework.model.DataModel import Event, EventConfig, Last_checked_table_schema, EventPair, count_table_schema
 from siesta_framework.core.config import get_system_config
 import siesta_framework.core.sparkManager as SparkManager
 from pyspark.sql.functions import collect_set, lit, size, count, sum as _sum, col, array
