@@ -92,7 +92,7 @@ def build_single_table(metadata: MetaData, events_df: DataFrame | StreamingQuery
         return events_df
 
 
-def build_pairs_index_table(preprocess_config: Dict, metadata: MetaData, batch_pairs_index_df: DataFrame | StreamingQuery) -> DataFrame|StreamingQuery:
+def build_pairs_index_table(preprocess_config: Dict, metadata: MetaData, batch_pairs_index_df: DataFrame | StreamingQuery):
     """
     Build the Index Table from the Last_checked pairs.
     """
@@ -101,21 +101,13 @@ def build_pairs_index_table(preprocess_config: Dict, metadata: MetaData, batch_p
     storage = get_storage_manager()
 
     if isinstance(batch_pairs_index_df, StreamingQuery):
-        #TODO: Do properly
-        def process_batch(pairs_streaming_query, id):
-            storage.write_pairs_index_table(new_pairs=pairs_streaming_query, metadata=metadata)
-        
-        pairs_streaming_df = (get_spark_session().readStream.format("delta").load(metadata.index_table_path))
-        job = (pairs_streaming_df.writeStream
-               .queryName("build_index_df")
-               .foreachBatch(process_batch)
-               .outputMode("append")
-               .option("checkpointLocation", storage.get_checkpoint_location(metadata, "index_table"))
-               .start())
-        return job
+        # Already handled inside build_last_checked_table's foreachBatch
+        logger.info("Preprocess.builders: Pairs index handled by streaming job, skipping.")
+        return None
     else:
         storage.write_pairs_index_table(new_pairs=batch_pairs_index_df, metadata=metadata)
         return batch_pairs_index_df
+
 
 def build_count_table(preprocess_config: Dict, metadata: MetaData, batch_pairs_index_df: DataFrame):
     """
@@ -126,80 +118,97 @@ def build_count_table(preprocess_config: Dict, metadata: MetaData, batch_pairs_i
     storage = get_storage_manager()
 
     if isinstance(batch_pairs_index_df, StreamingQuery):
-        #TODO: Do properly
-        def process_batch(pairs_streaming_query, id):
-            count_table = extract_counts(pairs_streaming_query)
-            storage.write_count_table(count_df=count_table, metadata=metadata)
-        
-        pairs_streaming_df = (get_spark_session().readStream.format("delta").load(metadata.count_table_path))
-        job = (pairs_streaming_df.writeStream
-               .queryName("build_count_table")
-               .foreachBatch(process_batch)
-               .outputMode("append")
-               .option("checkpointLocation", storage.get_checkpoint_location(metadata, "count_table"))
-               .start())
-        return job
+        # Already handled inside build_last_checked_table's foreachBatch
+        logger.info("Preprocess.builders: Count table handled by streaming job, skipping.")
+        return None
     else:
         count_table = extract_counts(batch_pairs_index_df)
         storage.write_count_table(count_df=count_table, metadata=metadata)
         return count_table
 
 
-def buildPairs(preprocess_config: Dict, metadata: MetaData, batch_single_df: DataFrame | StreamingQuery) -> DataFrame | StreamingQuery:
-    storage = get_storage_manager()
-    pairs_df = "Test"
-    pass
 
-
-
-def build_last_checked_table(preprocess_config: Dict, metadata: MetaData, batch_single_df: DataFrame | StreamingQuery) -> Tuple[DataFrame, DataFrame] | Tuple[StreamingQuery, None]:
+def build_last_checked_table(preprocess_config: Dict, metadata: MetaData, batch_single_df: DataFrame) -> Tuple[DataFrame, DataFrame]:
     """
-    Build the Last Checked Table.
+    Build Last Checked.
     """
     logger.info("Preprocess.builders: Building Last Checked Table...")
 
     storage = get_storage_manager()
     lookback = preprocess_config.get("lookback", 7)
 
-    
+    updated_trace_ids = batch_single_df.select("trace_id").distinct()
 
-    # Implementation for building last checked table goes here
-    if isinstance(batch_single_df, StreamingQuery):
-        batch_single_df = (get_spark_session().readStream
-        .format("delta")
-        .load(metadata.sequence_table_path))
+    last_checked = (
+        storage.read_last_checked_table(metadata)
+        .join(updated_trace_ids, on="trace_id", how="inner")
+    )
+    sequence_df = (
+        storage.read_sequence_table(metadata)
+        .join(updated_trace_ids, on="trace_id", how="inner")
+    )
 
-        def process_batch(batch_single_df, batch_id, streaming=True):
-            updated_trace_ids = batch_single_df.select("trace_id").distinct()
+    pairs_df, last_checked_df = extract_pairs_and_last_checked(
+        updated_sequence_table_DF=sequence_df,
+        last_checked=last_checked,
+        lookback=lookback
+    )
 
-            # Filtering for the updated traces to update our pairs
-            last_checked = storage.read_last_checked_table(metadata).join(other=updated_trace_ids, on="trace_id", how="inner")
-            sequence_df = storage.read_sequence_table(metadata).join(other=updated_trace_ids, on="trace_id", how="inner")
-
-            pairs_df, last_checked_df = extract_pairs_and_last_checked(updated_sequence_table_DF=sequence_df, last_checked=last_checked, lookback=lookback)
-
-            storage.write_last_checked_table(last_checked_df, metadata)
-            return (pairs_df, last_checked_df) if not streaming else None
-
-        write_last_checked_job = (batch_single_df.writeStream
-            .queryName("build_last_checked_table")
-            .foreachBatch(process_batch) # type: ignore
-            .option("checkpointLocation", storage.get_checkpoint_location(metadata, "last_checked"))
-            .start())
-        return write_last_checked_job, None
-
-    else:
-
-        updated_trace_ids = batch_single_df.select("trace_id").distinct()
+    storage.write_last_checked_table(last_checked_df, metadata)
+    return pairs_df, last_checked_df
 
 
-        # Filtering for the updated traces to update our pairs
-        last_checked = storage.read_last_checked_table(metadata).join(other=updated_trace_ids, on="trace_id", how="inner")
-        sequence_df = storage.read_sequence_table(metadata).join(other=updated_trace_ids, on="trace_id", how="inner")
+def build_last_checked_index_and_count_streamed(preprocess_config: Dict, metadata: MetaData, batch_single_df: StreamingQuery) -> StreamingQuery:
+    """
+    Building the Last Checked, Pairs Index, and Count Tables concurrently.
+    In streaming mode, all three are handled here since pairs_df 
+    only exists transiently inside foreachBatch.
+    """
+    logger.info("Preprocess.builders: Building Last Checked Table...")
 
-        pairs_df, last_checked_df = extract_pairs_and_last_checked(updated_sequence_table_DF=sequence_df, last_checked=last_checked, lookback=lookback)
-        # logger.info(pairs_df.show())
+    storage = get_storage_manager()
+    lookback = preprocess_config.get("lookback", 7)
 
+    sequence_stream_df = (
+            get_spark_session().readStream
+            .format("delta")
+            .load(metadata.sequence_table_path)
+        )
+
+    def process_batch(micro_batch_df: DataFrame, batch_id: int):
+        if micro_batch_df.isEmpty():
+            return
+
+        updated_trace_ids = micro_batch_df.select("trace_id").distinct()
+
+        last_checked = (
+            storage.read_last_checked_table(metadata)
+            .join(updated_trace_ids, on="trace_id", how="inner")
+        )
+        sequence_df = (
+            storage.read_sequence_table(metadata)
+            .join(updated_trace_ids, on="trace_id", how="inner")
+        )
+
+        pairs_df, last_checked_df = extract_pairs_and_last_checked(
+            updated_sequence_table_DF=sequence_df,
+            last_checked=last_checked,
+            lookback=lookback
+        )
+
+        # Write all three tables that depend on pairs here,
+        # since pairs_df only lives inside this foreachBatch scope.
         storage.write_last_checked_table(last_checked_df, metadata)
+        storage.write_pairs_index_table(new_pairs=pairs_df, metadata=metadata)
 
-        return pairs_df, last_checked_df
+        count_df = extract_counts(pairs_df)
+        storage.write_count_table(count_df=count_df, metadata=metadata)
+
+    job = (
+        sequence_stream_df.writeStream
+        .queryName("build_pairs_tables")   # renamed: reflects wider responsibility
+        .foreachBatch(process_batch)
+        .option("checkpointLocation", storage.get_checkpoint_location(metadata, "last_checked"))
+        .start()
+    )
+    return job
