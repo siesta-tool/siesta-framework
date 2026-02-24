@@ -35,7 +35,7 @@ class MetaData:
         return f"s3a://{self.storage_namespace}/{self.log_name}/single_table"
     @property
     def s3_count_table(self) -> str:
-        return f"s3a://{self.storage_namespace}/{self.log_name}/count_table.parquet"
+        return f"s3a://{self.storage_namespace}/{self.log_name}/count_table"
     @property
     def s3_last_checked_table(self) -> str:
         return f"s3a://{self.storage_namespace}/{self.log_name}/last_checked_table"

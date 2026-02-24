@@ -8,7 +8,7 @@ from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql.streaming import StreamingQuery
 from siesta_framework.core.interfaces import StorageManager
 from siesta_framework.model.StorageModel import MetaData, hash_str
-from siesta_framework.model.DataModel import Event, EventConfig, Last_checked_table_schema
+from siesta_framework.model.DataModel import Event, EventConfig, Last_checked_table_schema, EventPair, count_table_schema
 from siesta_framework.core.config import get_system_config
 import siesta_framework.core.sparkManager as SparkManager
 
@@ -146,8 +146,38 @@ class S3Manager(StorageManager):
                 .partitionBy("trace_id") \
                 .mode("overwrite") \
                 .save(metadata.last_checked_table_path)
+        
 
-        print(f"S3Manager: Database structure initialized at {metadata.sequence_table_path}")
+        # Check if Pairs index table already exists before creating
+        try:
+            self.spark.read.format("delta").load(metadata.index_table_path)
+            print(f"S3Manager: Pairs Index table already exists at {metadata.index_table_path}")
+        except Exception:
+            print(f"S3Manager: Pairs Index table does not exist, will create new one")
+
+            empty_last_checked_df = self.spark.createDataFrame([], schema=EventPair.get_schema())
+            empty_last_checked_df.write \
+                .format("delta") \
+                .partitionBy("source") \
+                .mode("overwrite") \
+                .save(metadata.index_table_path)
+        
+
+        # Check if Count table already exists before creating
+        try:
+            self.spark.read.format("delta").load(metadata.count_table_path)
+            print(f"S3Manager: Count table already exists at {metadata.count_table_path}")
+        except Exception:
+            print(f"S3Manager: Count table does not exist, will create new one")
+
+            empty_last_checked_df = self.spark.createDataFrame([], schema=count_table_schema)
+            empty_last_checked_df.write \
+                .format("delta") \
+                .partitionBy("source") \
+                .mode("overwrite") \
+                .save(metadata.count_table_path)
+
+        print(f"S3Manager: Database structure initialized at {metadata.count_table_path}")
 
     def _create_s3_client(self):
         """Create and configure boto3 S3 client.
@@ -344,23 +374,6 @@ class S3Manager(StorageManager):
             print(f"S3Manager: Error reading SingleTable: {e}")
             return self.spark.createDataFrame([], schema=Event.get_schema()) # type: ignore
 
-    
-    
-    def write_count_table(self, counts: RDD, metadata: MetaData) -> None:
-        """
-        Write count statistics to the CountTable in S3.
-        
-        Args:
-            counts: RDD containing calculated basic statistics per event type pair
-            metadata: MetaData object containing the metadata
-        """
-        try:
-            # Convert RDD to DataFrame
-            df = self.spark.createDataFrame(counts) # type: ignore
-            df.write.mode("overwrite").parquet(metadata.count_table_path)
-            print(f"S3Manager: Wrote count data to {metadata.count_table_path}")
-        except Exception as e:
-            print(f"S3Manager: Error writing CountTable: {e}")
     
     ###########################################
     ########### Pairs index Methods ###########
@@ -583,3 +596,24 @@ class S3Manager(StorageManager):
         except Exception as e:
             print(f"S3Manager: Error reading LastCheckedTable: {e}")
             return self.spark.createDataFrame([], schema=Last_checked_table_schema) # type: ignore
+        
+    #################################################
+    ############## Count Table Methods ##############
+    #################################################
+
+    def read_count_table(self, metadata: MetaData) -> DataFrame:
+        #TODO
+        return super().read_count_table(metadata)
+    
+    def write_count_table(self, count_df:DataFrame, metadata:MetaData) -> None:
+
+        try:
+            count_df.write\
+                .format("delta")\
+                .partitionBy("source")\
+                .mode("append")\
+                .option("mergeSchema", "true")\
+                .save(metadata.count_table_path)
+        
+        except Exception as e:
+            print(f"S3Manager: Error writing Count Table: {e}")

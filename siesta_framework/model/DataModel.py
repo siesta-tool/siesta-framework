@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Optional
-from pyspark.sql.types import StructType, StructField, StringType, IntegerType, MapType
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType, MapType, DoubleType, FloatType
 
 
 class EventConfig:
@@ -241,4 +241,14 @@ Last_checked_table_schema = StructType([
             StructField("eventA", StringType(), False),
             StructField("eventB", StringType(), False),
             StructField("last_checked_timestamp", IntegerType(), False)
+])
+
+count_table_schema = StructType([
+    StructField("source", StringType(), False),
+    StructField("target", StringType(), False),
+    StructField("total_duration", FloatType(), False),
+    StructField("total_completions", IntegerType(), False),
+    StructField("min_duration", FloatType(), False),
+    StructField("max_duration", FloatType(), False),
+    StructField("sum_squared_duration", DoubleType(), False),
 ])

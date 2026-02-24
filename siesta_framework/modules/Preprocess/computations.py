@@ -6,7 +6,7 @@ from datetime import timedelta, datetime
 from pyspark import RDD
 from pyspark.sql import DataFrame
 from typing import Iterable, List, Optional, Tuple
-from pyspark.sql.functions import count_distinct, col, to_timestamp, unix_timestamp
+from pyspark.sql.functions import count_distinct, col, to_timestamp, unix_timestamp, sum as spark_sum, count, min as spark_min, max as spark_max, pow as spark_pow
 from pyspark.sql.types import StructType, StructField, StringType, TimestampType, IntegerType
 from siesta_framework.model.DataModel import Last_checked_table_schema, EventPair
 import logging
@@ -31,7 +31,7 @@ single_schema = StructType([
     StructField("attributes", StringType(), True)
 ])
 
-active_pair_schema = EventPair.get_schema()
+pair_index_schema = EventPair.get_schema()
 # Schema: Source, Target, trace_id, source_timestamp, target_timestamp, source_position, target_position, source_attributes, target_attributes
 
 
@@ -45,7 +45,7 @@ type Event = Tuple[Event_Type, Timestamp, Position, Attributes]
 type Trace = Tuple[Trace_ID, Tuple[Event]]
 
 
-def extract_pairs(updated_sequence_table_DF: DataFrame, last_checked: DataFrame | None, lookback: int) -> Tuple[DataFrame, DataFrame]:
+def extract_pairs_and_last_checked(updated_sequence_table_DF: DataFrame, last_checked: DataFrame | None, lookback: int) -> Tuple[DataFrame, DataFrame]:
     """
     Extracts the event type pairs from a DF that contains the complete traces. 
 
@@ -107,7 +107,7 @@ def extract_pairs(updated_sequence_table_DF: DataFrame, last_checked: DataFrame 
     pairs = full.flatMap(lambda x: x[0])
     last_checked_pairs = full.flatMap(lambda x: x[1])
     spark = get_spark_session()
-    pairs_df = spark.createDataFrame(pairs, schema=active_pair_schema)
+    pairs_df = spark.createDataFrame(pairs, schema=pair_index_schema)
     # logger.info(pairs_df.show())
     last_checked_df = spark.createDataFrame(last_checked_pairs, schema=Last_checked_table_schema)
     
@@ -233,3 +233,41 @@ def _findCombinations(event_types: List[str]) -> List[Tuple[str, str]]:
         list: A list of all the possible event type pairs that can occur in this trace
     """
     return [(t1, t2) for t1 in event_types for t2 in event_types]
+
+
+def extract_counts(pairs_index: DataFrame) -> DataFrame:
+    """
+    Extracts statistics for each event type pair.
+
+    For every (eventA, eventB) pair, computes:
+      - total_duration: sum of durations (in seconds) across all occurrences
+      - total_completions: number of times this pair occurred
+      - min_duration: minimum duration (seconds) across all occurrences
+      - max_duration: maximum duration (seconds) across all occurrences
+      - sum_squared_duration: sum of squared durations (for variance calculation)
+
+    Args:
+        pairs_index: DataFrame with schema matching EventPair (source, target,
+            trace_id, source_timestamp, target_timestamp, ...)
+
+    Returns:
+        A DataFrame with columns:
+            eventA, eventB, total_duration, total_completions,
+            min_duration, max_duration, sum_squared_duration
+    """
+
+    # Timestamps are unix (milliseconds from the lookback arithmetic); convert to seconds
+    duration_col = ((col("target_timestamp") - col("source_timestamp")) / 1000).alias("duration")
+
+    count_table = (pairs_index
+        .withColumn("duration", (col("target_timestamp").cast("long") - col("source_timestamp").cast("long")) / 1000)
+        .groupBy("source", "target")
+        .agg(
+            spark_sum("duration").alias("total_duration"),
+            count("duration").alias("total_completions"),
+            spark_min("duration").alias("min_duration"),
+            spark_max("duration").alias("max_duration"),
+            spark_sum(spark_pow(col("duration"), 2)).alias("sum_squared_duration"),
+        ))
+
+    return count_table
