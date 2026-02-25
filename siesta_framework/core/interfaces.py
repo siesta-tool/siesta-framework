@@ -63,10 +63,10 @@ class StorageManager(ABC):
     - spark related methods: initialization, building appropriate tables, and termination
     
     The tables that are utilized are:
-    - IndexTable: contains the inverted index based on event type pairs
+    - PairsIndexTable: contains the inverted index based on event type pairs
     - SequenceTable: contains the traces that are indexed
-    - SingleTable: contains the single inverted index (similar to Set-Containment)
-    - LastCheckedTable: contains the timestamp of the last completion of each event type per trace
+    - ActivityIndexTable: contains the activity inverted index (similar to Set-Containment)
+    - ActivePairTable: contains the timestamp of the last completion of each event type per trace
     - CountTable: contains basic statistics (max duration, number of completions) for each event type pair
     - MetadataTable: contains information for each log database (compression algorithm, number of traces, etc.)
     """
@@ -191,9 +191,9 @@ class StorageManager(ABC):
         pass
     
     @abstractmethod
-    def read_single_table(self, metadata: Any) -> DataFrame:
+    def read_activity_index_table(self, metadata: Any) -> DataFrame:
         """
-        Load the single inverted index from the database (stored in SingleTable).
+        Load the activity index from the database (stored in activity_index_table).
         
         Args:
             metadata: MetaData object containing the metadata
@@ -204,9 +204,9 @@ class StorageManager(ABC):
         pass
     
     @abstractmethod
-    def read_last_checked_table(self, metadata: Any) -> DataFrame:
+    def read_active_pairs_table(self, metadata: Any) -> DataFrame:
         """
-        Load data from the LastCheckedTable, containing the last timestamp per event type pair per trace.
+        Load data from the ActivePairsTable, containing the last timestamp per event type pair per trace.
         
         Args:
             metadata: MetaData object containing the metadata
@@ -228,12 +228,12 @@ class StorageManager(ABC):
         """
     
     @abstractmethod
-    def write_last_checked_table(self, last_checked: DataFrame, metadata: Any) -> None:
+    def write_active_pairs_table(self, active_pairs: DataFrame, metadata: Any) -> None:
         """
         Store new records for last checked timestamps back in the database.
         
         Args:
-            last_checked: DataFrame containing timestamp of last completion for each event type pair per trace
+            active_pairs: DataFrame containing timestamp of last completion for each event type pair per trace
             metadata: MetaData object containing the metadata
         """
         pass
@@ -265,12 +265,12 @@ class StorageManager(ABC):
         pass
     
     @abstractmethod
-    def write_single_table(self, events_df: DataFrame, metadata: MetaData) -> None:
+    def write_activity_index_table(self, events_df: DataFrame, metadata: MetaData) -> None:
         """
-        Write events to the SingleTable. Updates the metadata object.
+        Write events to the activity index table. Updates the metadata object.
         
         Args:
-            events_df: DataFrame containing newly indexed events in single inverted index form
+            events_df: DataFrame containing newly indexed events in activity index index form
             metadata: MetaData object containing the metadata
         """
         pass
