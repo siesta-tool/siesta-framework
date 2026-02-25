@@ -1,5 +1,6 @@
 {
   "log_name": "example_log",
+  "log_path": "datasets/test_nopos.csv",
   "storage_namespace": "siesta",
   "overwrite_data": false,
   "enable_streaming": true,
@@ -14,18 +15,18 @@
     },
     "csv": {
       "activity": "activity",
-      "trace_id": "caseID",
+      "trace_id": "trace_id",
       "position": "position",
-      "start_timestamp": "Timestamp",
+      "start_timestamp": "timestamp",
       "attributes" : ["resource", "cost"]
     },
     "json": {
         "activity": "activity",
-        "trace_id": "caseID",
+        "trace_id": "trace_id",
         "position": "position",
-        "start_timestamp": "Timestamp"
+        "start_timestamp": "timestamp"
     }
   },
-  "trace_level_fields": ["caseID"],
+  "trace_level_fields": ["trace_id"],
   "timestamp_fields": ["start_timestamp"]
 }

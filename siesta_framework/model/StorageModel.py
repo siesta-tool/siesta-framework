@@ -22,8 +22,8 @@ class MetaData:
 
     # S3 Table paths
     @property
-    def s3_index_table(self) -> str:
-        return f"s3a://{self.storage_namespace}/{self.log_name}/index_table"
+    def s3_pairs_index_table(self) -> str:
+        return f"s3a://{self.storage_namespace}/{self.log_name}/pairs_index_table"
     @property
     def s3_sequence_table(self) -> str:
         return f"s3a://{self.storage_namespace}/{self.log_name}/sequence_table"
@@ -31,22 +31,22 @@ class MetaData:
     def s3_metadata_table(self) -> str:
         return f"s3a://{self.storage_namespace}/{self.log_name}/metadata_table"
     @property
-    def s3_single_table(self) -> str:
-        return f"s3a://{self.storage_namespace}/{self.log_name}/single_table"
+    def s3_activity_index_table(self) -> str:
+        return f"s3a://{self.storage_namespace}/{self.log_name}/activity_index_table"
     @property
     def s3_count_table(self) -> str:
-        return f"s3a://{self.storage_namespace}/{self.log_name}/count_table.parquet"
+        return f"s3a://{self.storage_namespace}/{self.log_name}/count_table"
     @property
-    def s3_last_checked_table(self) -> str:
-        return f"s3a://{self.storage_namespace}/{self.log_name}/last_checked_table"
+    def s3_active_pairs_table(self) -> str:
+        return f"s3a://{self.storage_namespace}/{self.log_name}/active_pairs_table"
     @property
     def s3_mining(self) -> str:
         return f"s3a://{self.storage_namespace}/{self.log_name}/declare_table"
     
     # Table paths for Storage Managers (extend for more compatibility)
     @property
-    def index_table_path(self) -> str:
-        return self.s3_index_table if self.storage_type == "s3" else ""
+    def pairs_index_table_path(self) -> str:
+        return self.s3_pairs_index_table if self.storage_type == "s3" else ""
     @property
     def sequence_table_path(self) -> str:
         return self.s3_sequence_table if self.storage_type == "s3" else ""
@@ -54,14 +54,14 @@ class MetaData:
     def metadata_table_path(self) -> str:
         return self.s3_metadata_table if self.storage_type == "s3" else ""
     @property
-    def single_table_path(self) -> str:
-        return self.s3_single_table if self.storage_type == "s3" else ""
+    def activity_index_table_path(self) -> str:
+        return self.s3_activity_index_table if self.storage_type == "s3" else ""
     @property
     def count_table_path(self) -> str:
         return self.s3_count_table if self.storage_type == "s3" else ""
     @property
-    def last_checked_table_path(self) -> str:
-        return self.s3_last_checked_table if self.storage_type == "s3" else ""
+    def active_pairs_table_path(self) -> str:
+        return self.s3_active_pairs_table if self.storage_type == "s3" else ""
 
     def __init__(self, storage_namespace: str = "siesta", storage_type: str = "s3", log_name: str = "default_log"):
         self.storage_namespace = storage_namespace

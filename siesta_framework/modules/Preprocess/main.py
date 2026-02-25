@@ -10,9 +10,8 @@ from siesta_framework.core.config import get_system_config
 from siesta_framework.core.logger import timed
 from siesta_framework.core.storageFactory import get_storage_manager
 from siesta_framework.modules.Preprocess.parsers import upload_log_file_object
-from siesta_framework.modules.Preprocess.builders import build_sequence_table, build_single_table
+from siesta_framework.modules.Preprocess.builders import *
 from pyspark.sql import SparkSession
-from pyspark.sql.streaming import StreamingQuery
 import json
 import logging
 logger = logging.getLogger("Preprocess")
@@ -124,14 +123,24 @@ class Preprocessor(SiestaModule):
             log_name=self.preprocess_config.get("log_name", "default_log"),
             storage_type=self.preprocess_config.get("storage_type", "s3")
         )
-
+        
         # Load existing metadata from storage if available
         self.storage.read_metadata_table(self.preprocess_config, self.metadata) 
 
         seq_df = timed(build_sequence_table, "Preprocess.", preprocess_config=self.preprocess_config, metadata=self.metadata)
-        single_df = timed(build_single_table, "Preprocess.", events_df=seq_df, metadata=self.metadata)
+        activity_index_df = timed(build_activity_index_table, "Preprocess.", events_df=seq_df, metadata=self.metadata)
+        
+        if isinstance(activity_index_df, StreamingQuery):
+            build_active_pairs_index_and_count_streamed(self.preprocess_config, self.metadata, batch_activity_index_df=activity_index_df)
+        else:
+            pairs_df, _ = timed(build_active_pairs_table, "Preprocess.", self.preprocess_config, self.metadata, batch_activity_index_df=activity_index_df)
+            
+            timed(build_pairs_index_table, "Preprocess.", self.preprocess_config, self.metadata, pairs_df)
 
-        # In CLI mode, we want to keep streaming jobs alive until termination
-        if caller == "cli" and self.preprocess_config.get("enable_streaming", False):
-            get_spark_session().streams.awaitAnyTermination()
+            timed(build_count_table, "Preprocess.", self.preprocess_config, self.metadata, pairs_df)
 
+            # In CLI mode, we want to keep streaming jobs alive until termination
+            if caller == "cli" and self.preprocess_config.get("enable_streaming", False):
+                get_spark_session().streams.awaitAnyTermination()
+
+ 

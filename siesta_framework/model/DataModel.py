@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Optional
-from pyspark.sql.types import StructType, StructField, StringType, IntegerType, MapType
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType, MapType, DoubleType, FloatType
 
 
 class EventConfig:
@@ -184,6 +184,21 @@ class EventPair:
             "position_diff": self.position_diff,
             "start_timestamp_diff": self.start_timestamp_diff
         }
+    
+    @staticmethod
+    def get_schema() -> StructType:
+        return StructType([
+            StructField("source", StringType(), False),
+            StructField("target", StringType(), False),
+            StructField("trace_id", StringType(), False),
+            StructField("source_timestamp", StringType(), False),
+            StructField("target_timestamp", StringType(), False),
+            StructField("source_position", StringType(), False),
+            StructField("target_position", StringType(), False),
+            StructField("source_attributes", StringType(), True),
+            StructField("target_attributes", StringType(), True)
+        ])
+
 
 
 class Trace:
@@ -219,3 +234,21 @@ class Trace:
             "start_timestamp": self.start_timestamp.isoformat() if self.start_timestamp else None,
             "end_timestamp": self.end_timestamp.isoformat() if self.end_timestamp else None
         }
+    
+
+Active_Pairs_table_schema = StructType([
+            StructField("trace_id", StringType(), True),
+            StructField("eventA", StringType(), False),
+            StructField("eventB", StringType(), False),
+            StructField("last_checked_timestamp", IntegerType(), False)
+])
+
+count_table_schema = StructType([
+    StructField("source", StringType(), False),
+    StructField("target", StringType(), False),
+    StructField("total_duration", FloatType(), False),
+    StructField("total_completions", IntegerType(), False),
+    StructField("min_duration", FloatType(), False),
+    StructField("max_duration", FloatType(), False),
+    StructField("sum_squared_duration", DoubleType(), False),
+])
