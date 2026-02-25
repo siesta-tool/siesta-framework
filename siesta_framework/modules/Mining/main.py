@@ -10,7 +10,9 @@ from siesta_framework.core.interfaces import SiestaModule, StorageManager
 from siesta_framework.core.config import get_system_config
 from siesta_framework.core.logger import timed
 from siesta_framework.core.storageFactory import get_storage_manager
+from siesta_framework.modules.Mining.existential import discover_existential
 from siesta_framework.modules.Mining.positional import discover_positional
+from siesta_framework.modules.Mining.ordered import discover_ordered
 from siesta_framework.modules.Preprocess.parsers import upload_log_file_object
 from siesta_framework.modules.Preprocess.builders import build_sequence_table, build_single_table
 from pyspark.sql import SparkSession, DataFrame, functions as F
@@ -58,11 +60,11 @@ class Miner(SiestaModule):
 
         logger.info(f"Mining: Completed. Results available at {self.mining_config['output_path']}.")
         
-        with open(self.mining_config["output_path"], 'r') as f:
-            try:
-                return json.load(f)
-            except json.JSONDecodeError:
-                return f"Mining: Cannot parse mining results. Check logs and {self.mining_config['output_path']} for details."
+        # with open(self.mining_config["output_path"], 'r') as f:
+        #     try:
+        #         return json.load(f)
+        #     except json.JSONDecodeError:
+        #         return f"Mining: Cannot parse mining results. Check logs and {self.mining_config['output_path']} for details."
 
 
     def cli_run(self, args: Any, **kwargs: Any) -> Any:
@@ -133,20 +135,26 @@ class Miner(SiestaModule):
             storage_type=self.mining_config.get("storage_type", "s3")
         )
         self.storage.read_metadata_table(self.mining_config, self.metadata) 
-        evolved = self.storage.read_sequence_table(self.metadata, filter_out="mined")
-        
+        evolved_df = self.storage.read_sequence_table(self.metadata, filter_out="mined" if not self.mining_config.get("force_recompute", False) else None)
+        evolved_df.cache()  # Cache evolved traces as they will be used multiple times during mining
+
         # Perform mining
-        positional_constraints = discover_positional(evolved, self.metadata)
+        positional_constraints = discover_positional(evolved_df, self.metadata)
+        existential_constraints = discover_existential(evolved_df, self.metadata)
+        # ordered_constraints = discover_ordered(evolved_df, self.metadata, strategy="pandas")
+        ordered_constraints = timed(discover_ordered, "Ordered constraint discovery", evolved_df, self.metadata, strategy=self.mining_config.get("ordered_strategy", "pandas"))
+        timed(discover_ordered, "Ordered constraint discovery (joins)", evolved_df, self.metadata, strategy="joins")
 
+        constraints = positional_constraints \
+            .unionByName(existential_constraints, allowMissingColumns=True) \
+            .unionByName(ordered_constraints, allowMissingColumns=True)
+        constraints.show(70,truncate=False)
 
-        constraints = positional_constraints
-        constraints.show(truncate=False)
-       
         # Update metadata with new last mining timestamp based on the max timestamp of the evolved traces
-        self.metadata.last_mined_timestamp = evolved.agg({"start_timestamp": "max"}).collect()[0][0] if not evolved.rdd.isEmpty() else self.metadata.last_mined_timestamp
+        self.metadata.last_mined_timestamp = evolved_df.agg({"start_timestamp": "max"}).collect()[0][0] if not evolved_df.rdd.isEmpty() else self.metadata.last_mined_timestamp
         self.storage.write_metadata_table(self.metadata)
 
-        self._output_constraints(constraints)
+        # self._output_constraints(constraints)
 
 
     def _output_constraints(self, constraints: DataFrame):

@@ -9,7 +9,6 @@ from pyspark.sql.streaming import StreamingQuery
 from siesta_framework.core.interfaces import StorageManager
 from siesta_framework.model.StorageModel import MetaData, hash_str, ConstraintEntry
 from siesta_framework.model.DataModel import Event, EventConfig
-from siesta_framework.model.MiningModel import Constraint
 from siesta_framework.core.config import get_system_config
 import siesta_framework.core.sparkManager as SparkManager
 from pyspark.sql.functions import collect_set, lit, size, count, sum as _sum, col, array
@@ -572,43 +571,62 @@ class S3Manager(StorageManager):
             logger.info(f"Read positional constraints from {metadata.positional_constraints_path}.")
 
             if filter_out_df is not None:
-                # Keep only constraints that are related to unevolved traces
-                end_constraints = c.where(col("template") == "End").join(
+                # Keep only End constraints for unevolved traces
+                end_constraints = c.where(col("template") == "end").join(
                     filter_out_df.select("trace_id").distinct(),
                     on="trace_id",
                     how="left_anti"
                 )
-                # Include Init constraints for all traces, since they are not affected by evolution
-                init_constraints = c.where(col("template") == "Init")
-                c = end_constraints.union(init_constraints)
+                # Init constraints are not affected by trace evolution, keep all
+                init_constraints = c.where(col("template") == "init")
+                c = end_constraints.unionByName(init_constraints)
 
-            # Group by (template, source) to get trace_ids and count for each combination
-            grouped = c.groupBy("template", "source").agg(
-                collect_set("trace_id").alias("trace_ids"),
-                collect_set("target").alias("targets"),
-                count("*").alias("source_count")
-            )
-            
-            # Calculate total count per template
-            window_spec = Window.partitionBy("template")
-            result = grouped.withColumn("total_count", _sum("source_count").over(window_spec)) \
-                .withColumn("category", lit('Positional').cast("string")) \
-                .withColumn("sources", array(col("source"))) \
-                .withColumn("occurrences", lit(None).cast("int")) \
-                .withColumn("support", (size("trace_ids") / metadata.trace_count).cast("float")) \
-                .withColumn("confidence", (col("source_count") / col("total_count")).cast("float")) \
-                .drop("source", "source_count", "total_count") \
-                .select("category", "template", "sources", "targets", "occurrences", "support", "confidence", "trace_ids")
-            
-            return result
+            return c.select("template", "source", "trace_id")
         except Exception as _:
             logger.info(f"No existing positional constraints found at {metadata.positional_constraints_path}. Returning empty DataFrame.")
-            return self.spark.createDataFrame([], schema=Constraint.get_schema())
+            return self.spark.createDataFrame([], schema=ConstraintEntry.get_schema()).select("template", "source", "trace_id")
         
     def write_positional_constraints(self, metadata: MetaData, df: DataFrame) -> None:
         try:
+            df = self._complete_schema(df, ConstraintEntry.get_schema())
             df.write.parquet(path=metadata.positional_constraints_path, mode="overwrite")
             logger.info(f"Wrote positional constraints to {metadata.positional_constraints_path}.")
         except Exception as e:
-            logger.info(f"Error writing positional constraints to {metadata.positional_constraints_path}: {e}")
+            logger.error(f"Error writing positional constraints to {metadata.positional_constraints_path}: {e}")
+            raise
+
+    def read_existential_constraints(self, metadata: MetaData) -> DataFrame:
+        try:
+            df = self.spark.read.parquet(metadata.existential_constraints_path)
+            logger.info(f"Read existential constraints from {metadata.existential_constraints_path}.")
+            return df.select("template", "source", "occurrences", "trace_id")
+        except Exception as _:
+            logger.info(f"No existing existential constraints found at {metadata.existential_constraints_path}. Returning empty DataFrame.")
+            return self.spark.createDataFrame([], schema=ConstraintEntry.get_schema()).select("template", "source", "occurrences", "trace_id")
+    
+    def write_existential_constraints(self, metadata: MetaData, df: DataFrame) -> None:
+        try:
+            df = self._complete_schema(df, ConstraintEntry.get_schema())
+            df.write.parquet(path=metadata.existential_constraints_path, mode="overwrite")
+            logger.info(f"Wrote existential constraints to {metadata.existential_constraints_path}.")
+        except Exception as e:
+            logger.error(f"Error writing existential constraints to {metadata.existential_constraints_path}: {e}")
+            raise
+    
+    def read_ordered_constraints(self, metadata: MetaData) -> DataFrame:
+        try:
+            df = self.spark.read.parquet(metadata.ordered_constraints_path)
+            logger.info(f"Read ordered constraints from {metadata.ordered_constraints_path}.")
+            return df.select("template", "source", "target", "trace_id")
+        except Exception as _:
+            logger.info(f"No existing ordered constraints found at {metadata.ordered_constraints_path}. Returning empty DataFrame.")
+            return self.spark.createDataFrame([], schema=ConstraintEntry.get_schema()).select("template", "source", "target", "trace_id")
+    
+    def write_ordered_constraints(self, metadata: MetaData, df: DataFrame) -> None:
+        try:
+            df = self._complete_schema(df, ConstraintEntry.get_schema())
+            df.write.parquet(path=metadata.ordered_constraints_path, mode="overwrite")
+            logger.info(f"Wrote ordered constraints to {metadata.ordered_constraints_path}.")
+        except Exception as e:
+            logger.error(f"Error writing ordered constraints to {metadata.ordered_constraints_path}: {e}")
             raise

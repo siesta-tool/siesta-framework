@@ -45,7 +45,10 @@ RUN /opt/bitnami/python/bin/pip install --no-cache-dir \
     pyspark>=3.5.0 \
     python-multipart==0.0.22 \
     fastapi[standard]==0.128 \
-    xxhash==3.6.0
+    xxhash==3.6.0 \
+    pyarrow>=11.0.0 \ 
+    numpy \ 
+    pandas
 
 ENV SPARK_CONF_DIR=/opt/bitnami/spark/conf
 RUN echo "spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension" >> $SPARK_CONF_DIR/spark-defaults.conf && \

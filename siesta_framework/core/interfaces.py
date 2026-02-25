@@ -3,6 +3,8 @@ from abc import ABC, abstractmethod
 from fastapi import UploadFile
 from fastapi.params import Form
 from pyspark.sql import DataFrame
+from pyspark.sql.functions import lit
+from pyspark.sql.types import StructType
 from pyspark import RDD
 
 from siesta_framework.model.StorageModel import MetaData
@@ -271,15 +273,59 @@ class StorageManager(ABC):
         """
         pass
     
+    @staticmethod
+    def _complete_schema(df: DataFrame, target_schema: StructType) -> DataFrame:
+        """
+        Ensure a DataFrame conforms to the given target schema by adding any missing
+        columns as nulls (cast to the correct type) and reordering to match schema order.
+
+        Args:
+            df: Input DataFrame that may be missing some columns.
+            target_schema: The expected StructType schema.
+
+        Returns:
+            DataFrame with all schema fields present in order.
+        """
+        existing_cols = set(df.columns)
+        for field in target_schema.fields:
+            if field.name not in existing_cols:
+                df = df.withColumn(field.name, lit(None).cast(field.dataType))
+        return df.select([field.name for field in target_schema.fields])
+
     @abstractmethod
     def read_positional_constraints(self, metadata: MetaData, filter_out_df: DataFrame | None = None) -> DataFrame:
         """
-        Read existing positional constraints from S3.
+        Read existing positional constraints from storage as flat ConstraintEntry rows.
+
+        Args:
+            metadata: MetaData object containing the metadata of the log dataset
+            filter_out_df: Optional DataFrame of evolved traces; End constraints for those
+                           traces are excluded, while Init constraints are always included.
+        Returns:
+            DataFrame[ConstraintEntry] containing the flat positional constraint rows.
+        """
+        pass
+
+    @abstractmethod
+    def read_existential_constraints(self, metadata: MetaData) -> DataFrame:
+        """
+        Read existing existential constraints from S3.
         
         Args:
             metadata: MetaData object containing the metadata of the log dataset
-            filter_df: Optional DataFrame to filter the constraints based on trace_ids
         Returns:
-            DataFrame[Constraint] containing the positional constraints
+            DataFrame[Constraint] containing the existential constraints
+        """
+        pass
+
+    @abstractmethod
+    def read_ordered_constraints(self, metadata: MetaData) -> DataFrame:
+        """
+        Read existing ordered constraints from storage as flat ConstraintEntry rows.
+
+        Args:
+            metadata: MetaData object containing the metadata of the log dataset
+        Returns:
+            DataFrame with columns (template, source, target, trace_id)
         """
         pass
