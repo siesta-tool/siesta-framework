@@ -8,7 +8,7 @@ from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql.streaming import StreamingQuery
 from siesta_framework.core.interfaces import StorageManager
 from siesta_framework.model.StorageModel import MetaData, hash_str, ConstraintEntry
-from siesta_framework.model.DataModel import Event, EventConfig, Last_checked_table_schema, EventPair, count_table_schema
+from siesta_framework.model.DataModel import Event, EventConfig, Active_Pairs_table_schema, EventPair, count_table_schema
 from siesta_framework.core.config import get_system_config
 import siesta_framework.core.sparkManager as SparkManager
 from pyspark.sql.functions import collect_set, lit, size, count, sum as _sum, col, array
@@ -34,7 +34,7 @@ class S3Manager(StorageManager):
     S3-based implementation of the StorageManager interface.
     
     This class handles all I/O operations with S3 storage using Spark for distributed processing.
-    It manages the various tables (Index, Sequence, Single, LastChecked, Count, Metadata) stored
+    It manages the various tables (Pairs Index, Sequence, activity_index, Active pairs, Count, Metadata) stored
     as Parquet files in S3.
     """
     
@@ -151,8 +151,8 @@ class S3Manager(StorageManager):
         
         # Check if Last Checked table already exists before creating
         try:
-            self.spark.read.format("delta").load(metadata.last_checked_table_path)
-            print(f"S3Manager: Last Checked table already exists at {metadata.last_checked_table_path}")
+            self.spark.read.format("delta").load(metadata.active_pairs_table_path)
+            print(f"S3Manager: Last Checked table already exists at {metadata.active_pairs_table_path}")
         except Exception:
             print(f"S3Manager: Last Checked table does not exist, will create new one")
 
@@ -335,9 +335,9 @@ class S3Manager(StorageManager):
         print("S3Manager: Spark session closed.")
     
     
-    def read_single_table(self, metadata: MetaData) -> DataFrame:
+    def read_activity_index_table(self, metadata: MetaData) -> DataFrame:
         """
-        Load the single inverted index from S3 (stored in SingleTable).
+        Load the Activity index from S3 (stored in Activity index table).
         
         Args:
             metadata: MetaData object containing the metadata
@@ -420,7 +420,7 @@ class S3Manager(StorageManager):
             metadata: MetaData object containing the metadata
         """
         try:
-            new_pairs.write.format("delta").partitionBy("source").mode("append").parquet(metadata.index_table_path)
+            new_pairs.write.format("delta").partitionBy("source").mode("append").parquet(metadata.pairs_index_table_path)
             
             # Update metadata
             metadata.pair_count = df.count()
@@ -556,11 +556,11 @@ class S3Manager(StorageManager):
 
 
     ###########################################
-    ########## Single Table Methods ###########
+    ######### Activity index Methods ##########
     ###########################################
-    def write_single_table(self, events_df: DataFrame, metadata: MetaData) -> None:
+    def write_activity_index_table(self, events_df: DataFrame, metadata: MetaData) -> None:
         """
-        Write processed events to S3 SingleTable in Delta format.
+        Write processed events to S3 Activity index in Delta format.
         
         Args:
             events_df: DataFrame containing processed events
@@ -572,7 +572,7 @@ class S3Manager(StorageManager):
                 .partitionBy("activity") \
                 .mode("append") \
                 .option("mergeSchema", "true") \
-                .save(metadata.single_table_path)
+                .save(metadata.activity_index_table_path)
             
             unique_activities = events_df.select("activity").distinct().rdd.map(lambda row: hash_str(row.activity)).collect()
             globally_uninque_activities = set(unique_activities) - metadata.approx_unique_activities

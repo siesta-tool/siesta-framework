@@ -236,7 +236,7 @@ class Trace:
         }
     
 
-Last_checked_table_schema = StructType([
+Active_Pairs_table_schema = StructType([
             StructField("trace_id", StringType(), True),
             StructField("eventA", StringType(), False),
             StructField("eventB", StringType(), False),

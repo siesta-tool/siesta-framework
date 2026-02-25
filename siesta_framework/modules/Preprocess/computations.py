@@ -9,7 +9,7 @@ from pyspark.sql import DataFrame
 from typing import Iterable, List, Literal, Optional, Tuple
 from pyspark.sql.functions import count_distinct, col, to_timestamp, unix_timestamp, sum as spark_sum, count, min as spark_min, max as spark_max, pow as spark_pow
 from pyspark.sql.types import StructType, StructField, StringType, TimestampType, IntegerType
-from siesta_framework.model.DataModel import Last_checked_table_schema, EventPair
+from siesta_framework.model.DataModel import Active_Pairs_table_schema, EventPair
 import logging
 from siesta_framework.core.sparkManager import get_spark_session
 logger = logging.getLogger("ExtractPairs")
@@ -24,7 +24,7 @@ logger = logging.getLogger("ExtractPairs")
 #     StructField("posB", IntegerType(), True)
 # ])
 
-single_schema = StructType([
+activity_index_schema = StructType([
     StructField("activity", StringType(), True),
     StructField("trace_id", StringType(), True),
     StructField("position", IntegerType(), True),
@@ -48,7 +48,7 @@ type Event = Tuple[Event_Type, Timestamp, Position, Attributes]
 type Trace = Tuple[Trace_ID, Tuple[Event]]
 
 
-def extract_pairs_and_last_checked(updated_sequence_table_DF: DataFrame, last_checked: DataFrame | None, lookback: str) -> Tuple[DataFrame, DataFrame]:
+def extract_active_and_all_pairs(updated_sequence_table_DF: DataFrame, previous_active_pairs: DataFrame | None, lookback: str) -> Tuple[DataFrame, DataFrame]:
     """
     Extracts the event type pairs from a DF that contains the complete traces. 
 
@@ -67,8 +67,8 @@ def extract_pairs_and_last_checked(updated_sequence_table_DF: DataFrame, last_ch
         previous event type pair.
 
     Args:
-        single_DF: The DataFrame that contains the complete single inverted index. activity (str)|trace_id (str)|position (int)|    start_timestamp (ts)|          attributes (json)
-        last_checked: The loaded values as a DataFrame from the LastChecked table (it should be None 
+        activity_index_DF: The DataFrame that contains the complete activity index. activity (str)|trace_id (str)|position (int)|    start_timestamp (ts)|          attributes (json)
+        previous_active_pairs: The loaded values as a DataFrame from the active pairs table (it should be None 
             if it is the first time that events are indexed in this log database).
         lookback: The parameter that describes the maximum time difference that two 
             events can have in order to create an event type pair.
@@ -86,40 +86,40 @@ def extract_pairs_and_last_checked(updated_sequence_table_DF: DataFrame, last_ch
         (row.activity, row.start_timestamp, row.position, row.attributes)
     ))
     
-    last_checkedRDD = last_checked.rdd if last_checked else None
+    active_pairsRDD = previous_active_pairs.rdd if previous_active_pairs else None
     
     
-    if not last_checkedRDD or last_checkedRDD.count() == 0:
+    if not active_pairsRDD or active_pairsRDD.count() == 0:
         logger.info("No previously indexed pairs found. Extracting all pairs from scratch.")
         full = trace_rdd.groupByKey().map(lambda x: _calculate_pairs_stnm(x, None, real_lookback))
     else:
-        last_checkedRDD_grouped = last_checkedRDD.map(lambda row: (
+        active_pairsRDD_grouped = active_pairsRDD.map(lambda row: (
             row.trace_id,
             (row.eventA, row.eventB, row.last_checked_timestamp)
         )).groupByKey()
         
-        full = trace_rdd.groupByKey().leftOuterJoin(last_checkedRDD_grouped).map(
+        full = trace_rdd.groupByKey().leftOuterJoin(active_pairsRDD_grouped).map(
             lambda x: _calculate_pairs_stnm((x[0], x[1][0]), x[1][1], real_lookback)
         )
     
     pairs = full.flatMap(lambda x: x[0])
-    last_checked_pairs = full.flatMap(lambda x: x[1])
+    active_pairs = full.flatMap(lambda x: x[1])
     spark = get_spark_session()
     pairs_df = spark.createDataFrame(pairs, schema=pair_index_schema)
     # logger.info(pairs_df.show())
-    last_checked_df = spark.createDataFrame(last_checked_pairs, schema=Last_checked_table_schema)
+    active_pairs_df = spark.createDataFrame(active_pairs, schema=Active_Pairs_table_schema)
     
     logger.info(f"Extracted {pairs_df.count()} event pairs")
-    logger.info(f"Extracted {last_checked_df.count()} last checked entries")
+    logger.info(f"Extracted {active_pairs_df.count()} last checked entries")
 
-    return pairs_df, last_checked_df
+    return pairs_df, active_pairs_df
 
-def _calculate_pairs_stnm(single: Tuple[Trace_ID, Iterable[Event]], last: Optional[Iterable[Tuple[str, str, int]]] | None, lookback: Tuple[int, LookbackType]) -> Tuple[List[Tuple], List[Tuple]]:
+def _calculate_pairs_stnm(activity_index: Tuple[Trace_ID, Iterable[Event]], last: Optional[Iterable[Tuple[str, str, int]]] | None, lookback: Tuple[int, LookbackType]) -> Tuple[List[Tuple], List[Tuple]]:
     """
-    Extract the event type pairs from the single inverted index.
+    Extract the event type pairs from the activity index.
 
     Args:
-        single: The complete single inverted index.
+        activity_index: The complete activity index.
         last: The list with all the last timestamps that correspond to this event.
         lookback: The parameter that describes the maximum time difference between 
             two events in a pair.
@@ -128,32 +128,32 @@ def _calculate_pairs_stnm(single: Tuple[Trace_ID, Iterable[Event]], last: Option
         tuple: A tuple where the first element is the extracted event type pairs 
             and the second element is the last timestamps for each event type.
     """
-    trace_id: Trace_ID = single[0]
-    events: Iterable[Event] = single[1]
+    trace_id: Trace_ID = activity_index[0]
+    events: Iterable[Event] = activity_index[1]
     
     # Group events by event_name
-    single_map = defaultdict(list)
+    activity_index_map = defaultdict(list)
     for event_name, timestamp, position, attributes in events:
-        single_map[event_name].append((timestamp, position, attributes))
+        activity_index_map[event_name].append((timestamp, position, attributes))
     
-    # Build lastMap from last_checked
+    # Build lastMap from active_pairs
     last_map = {}
     if last:
         for eventA, eventB, timestamp in last:
             last_map[(eventA, eventB)] = timestamp
     
     # Get all unique event types
-    all_events = list(single_map.keys())
+    all_events = list(activity_index_map.keys())
     
     # Get all combinations
     combinations = _findCombinations(all_events)
     
     results = []
-    new_last_checked = []
+    new_active_pairs = []
     
     for key1, key2 in combinations:
-        ts1 = single_map.get(key1, [])
-        ts2 = single_map.get(key2, [])
+        ts1 = activity_index_map.get(key1, [])
+        ts2 = activity_index_map.get(key2, [])
         
         if not ts1 or not ts2:
             continue
@@ -165,16 +165,16 @@ def _calculate_pairs_stnm(single: Tuple[Trace_ID, Iterable[Event]], last: Option
         
         # If there are any, append them and keep the last timestamp
         if nres:
-            new_last_checked.append(nres[-1])
+            new_active_pairs.append(nres[-1])
             results.extend(nres)
     
     # Convert to last_checked format: (eventA, eventB, trace_id, timestamp)
-    last_checked_list = [
+    active_pairs_list = [
         (x[2], x[0], x[1], x[4])  # trace_id, eventA, eventB, timestampB 
-        for x in new_last_checked
+        for x in new_active_pairs
     ]
     
-    return results, last_checked_list
+    return results, active_pairs_list
 
     
 def createTuples(

@@ -128,12 +128,12 @@ class Preprocessor(SiestaModule):
         self.storage.read_metadata_table(self.preprocess_config, self.metadata) 
 
         seq_df = timed(build_sequence_table, "Preprocess.", preprocess_config=self.preprocess_config, metadata=self.metadata)
-        single_df = timed(build_single_table, "Preprocess.", events_df=seq_df, metadata=self.metadata)
+        activity_index_df = timed(build_activity_index_table, "Preprocess.", events_df=seq_df, metadata=self.metadata)
         
-        if isinstance(single_df, StreamingQuery):
-            build_last_checked_index_and_count_streamed(self.preprocess_config, self.metadata, batch_single_df=single_df)
+        if isinstance(activity_index_df, StreamingQuery):
+            build_active_pairs_index_and_count_streamed(self.preprocess_config, self.metadata, batch_activity_index_df=activity_index_df)
         else:
-            pairs_df, last_checked_df = timed(build_last_checked_table, "Preprocess.", self.preprocess_config, self.metadata, batch_single_df=single_df)
+            pairs_df, _ = timed(build_active_pairs_table, "Preprocess.", self.preprocess_config, self.metadata, batch_activity_index_df=activity_index_df)
             
             timed(build_pairs_index_table, "Preprocess.", self.preprocess_config, self.metadata, pairs_df)
 
