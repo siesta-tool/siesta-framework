@@ -1,7 +1,6 @@
 from typing import Dict, List, Set
 import pandas as pd
 from pyspark.sql import DataFrame, functions as F
-from pyspark.sql.types import ArrayType, StringType
 from siesta_framework.model.StorageModel import ConstraintEntry, MetaData
 from siesta_framework.core.storageFactory import get_storage_manager
 
@@ -97,7 +96,7 @@ def discover_unordered(evolved_df: DataFrame, metadata: MetaData) -> DataFrame:
     )
 
     # Build complete activity set per evolved trace
-    single_table = storage.read_single_table(metadata)
+    single_table = storage.read_activity_index_table(metadata)
     
     # Complete activity set for evolved traces
     complete_activities = single_table.join(

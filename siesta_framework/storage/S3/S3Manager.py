@@ -8,11 +8,10 @@ from pyspark import RDD
 from pyspark.sql.streaming import StreamingQuery
 from siesta_framework.core.interfaces import StorageManager
 from siesta_framework.model.StorageModel import MetaData, hash_str, ConstraintEntry
-from siesta_framework.model.DataModel import Event, EventConfig, Active_Pairs_table_schema, EventPair, count_table_schema
+from siesta_framework.model.DataModel import Event, EventConfig, Active_Pairs_table_schema
 from siesta_framework.core.config import get_system_config
 import siesta_framework.core.sparkManager as SparkManager
-from pyspark.sql.functions import collect_set, lit, size, count, sum as _sum, col, array
-from pyspark.sql.window import Window
+
 
 import logging
 logger = logging.getLogger("S3Manager")
@@ -349,11 +348,11 @@ class S3Manager(StorageManager):
             DataFrame containing Event objects
         """
         try:
-            df = self.spark.read.parquet(metadata.single_table_path) # type: ignore
-            logger.info(f"Read {df.count()} records from SingleTable")
+            df = self.spark.read.parquet(metadata.activity_index_table_path) # type: ignore
+            logger.info(f"Read {df.count()} records from ActivityIndexTable")
             return df
         except Exception as e:
-            logger.info(f"Error reading SingleTable: {e}")
+            logger.info(f"Error reading ActivityIndexTable: {e}")
             return self.spark.createDataFrame([], schema=Event.get_schema()) # type: ignore
 
     
@@ -427,7 +426,7 @@ class S3Manager(StorageManager):
             
             # Update metadata
             metadata.pair_count = df.count()
-            logger.info(f"Wrote {metadata.pair_count} pairs to {metadata.index_table_path}")
+            logger.info(f"Wrote {metadata.pair_count} pairs to {metadata.pairs_index_table_path}")
         except Exception as e:
             logger.info(f"Error writing IndexTable: {e}")
     
@@ -555,7 +554,6 @@ class S3Manager(StorageManager):
         except Exception as e:
             logger.info(f"Error reading from {metadata.sequence_table_path}: {e}")
             return self.spark.createDataFrame([], schema=Event.get_schema())
-        
 
 
     ###########################################
@@ -579,14 +577,76 @@ class S3Manager(StorageManager):
             
             unique_activities = events_df.select("activity").distinct().rdd.map(lambda row: hash_str(row.activity)).collect()
             globally_uninque_activities = set(unique_activities) - metadata.approx_unique_activities
-            logger.info(f"Wrote {len(globally_uninque_activities)} new activities to {metadata.single_table_path}.")
+            logger.info(f"Wrote {len(globally_uninque_activities)} new activities to {metadata.activity_index_table_path}.")
 
             # Update metadata object
             # metadata.approx_unique_activities.update(globally_uninque_activities)            
         except Exception as e:
-            logger.info(f"Error writing on {metadata.single_table_path}: {e}")
+            logger.error(f"Error writing on {metadata.activity_index_table_path}: {e}")
             raise
 
+    #################################################
+    ########## Last Checked Table Methods ###########
+    #################################################
+    def write_active_pairs_table(self, active_pairs: DataFrame, metadata: MetaData) -> None:
+        """
+        Store new records for last checked timestamps to S3.
+        
+        Args:
+            active_pairs: DataFrame containing timestamp of last completion for each event type pair per trace
+            metadata: MetaData object containing the metadata
+        """
+        try:
+            
+            active_pairs.write \
+                .format("delta") \
+                .partitionBy("trace_id") \
+                .mode("append") \
+                .option("mergeSchema", "true") \
+                .save(metadata.active_pairs_table_path)
+            logger.info(f"Wrote active pairs data to {metadata.active_pairs_table_path}")
+        except Exception as e:
+            logger.error(f"Error writing active pairs table: {e}")
+    
+        
+    def read_active_pairs_table(self, metadata: MetaData) -> DataFrame:
+        """
+        Load data from the LastCheckedTable in S3.
+        
+        Args:
+            metadata: MetaData object containing the metadata
+            
+        Returns:
+            DataFrame with last timestamps per event type pair per trace
+        """
+        try:
+            df = self.spark.read.format("delta").schema(schema=Active_Pairs_table_schema).parquet(metadata.active_pairs_table_path) # type: ignore
+            logger.info(f"Read {df.count()} records from active pairs table")
+            return df
+        except Exception as e:
+            logger.error(f"Error reading active pairs table: {e}")
+            return self.spark.createDataFrame([], schema=Active_Pairs_table_schema) # type: ignore
+        
+    #################################################
+    ############## Count Table Methods ##############
+    #################################################
+
+    def read_count_table(self, metadata: MetaData) -> DataFrame:
+        #TODO
+        return super().read_count_table(metadata)
+    
+    def write_count_table(self, count_df:DataFrame, metadata:MetaData) -> None:
+
+        try:
+            count_df.write\
+                .format("delta")\
+                .partitionBy("source")\
+                .mode("overwrite")\
+                .option("mergeSchema", "true")\
+                .save(metadata.count_table_path)
+        
+        except Exception as e:
+            logger.error(f"Error writing Count Table: {e}")
     
 
     ###########################################

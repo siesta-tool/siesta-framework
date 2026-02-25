@@ -2,8 +2,7 @@ import argparse
 import datetime
 from pathlib import Path
 from typing import Annotated, Any, Dict
-from fastapi import Form, UploadFile
-from siesta_framework.core.sparkManager import get_spark_session
+from fastapi import Form
 from siesta_framework.model.StorageModel import MetaData
 from siesta_framework.model.SystemModel import DEFAULT_MINING_CONFIG
 from siesta_framework.core.interfaces import SiestaModule, StorageManager
@@ -14,10 +13,8 @@ from siesta_framework.modules.Mining.existential import discover_existential
 from siesta_framework.modules.Mining.positional import discover_positional
 from siesta_framework.modules.Mining.ordered import discover_ordered
 from siesta_framework.modules.Mining.unordered import discover_unordered
-from siesta_framework.modules.Preprocess.parsers import upload_log_file_object
-from siesta_framework.modules.Preprocess.builders import build_sequence_table, build_single_table
 from pyspark.sql import SparkSession, DataFrame, functions as F
-from pyspark.sql.streaming import StreamingQuery
+
 import csv
 import io
 import json
