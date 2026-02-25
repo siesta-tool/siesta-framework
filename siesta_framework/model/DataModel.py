@@ -184,6 +184,21 @@ class EventPair:
             "position_diff": self.position_diff,
             "start_timestamp_diff": self.start_timestamp_diff
         }
+    
+    @staticmethod
+    def get_schema() -> StructType:
+        return StructType([
+            StructField("source", StringType(), False),
+            StructField("target", StringType(), False),
+            StructField("trace_id", StringType(), False),
+            StructField("source_timestamp", StringType(), False),
+            StructField("target_timestamp", StringType(), False),
+            StructField("source_position", StringType(), False),
+            StructField("target_position", StringType(), False),
+            StructField("source_attributes", StringType(), True),
+            StructField("target_attributes", StringType(), True)
+        ])
+
 
 
 class Trace:

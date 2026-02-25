@@ -641,3 +641,21 @@ class S3Manager(StorageManager):
         except Exception as e:
             logger.error(f"Error writing ordered constraints to {metadata.ordered_constraints_path}: {e}")
             raise
+
+    def read_unordered_constraints(self, metadata: MetaData) -> DataFrame:
+        try:
+            df = self.spark.read.parquet(metadata.unordered_constraints_path)
+            logger.info(f"Read unordered constraints from {metadata.unordered_constraints_path}.")
+            return df.select("template", "source", "target", "trace_id")
+        except Exception as _:
+                logger.info(f"No existing unordered constraints found at {metadata.unordered_constraints_path}. Returning empty DataFrame.")
+                return self.spark.createDataFrame([], schema=ConstraintEntry.get_schema()).select("template", "source", "target", "trace_id")
+        
+    def write_unordered_constraints(self, metadata: MetaData, df: DataFrame) -> None:
+        try:
+            df = self._complete_schema(df, ConstraintEntry.get_schema())
+            df.write.parquet(path=metadata.unordered_constraints_path, mode="overwrite")
+            logger.info(f"Wrote unordered constraints to {metadata.unordered_constraints_path}.")
+        except Exception as e:
+            logger.error(f"Error writing unordered constraints to {metadata.unordered_constraints_path}: {e}")
+            raise        

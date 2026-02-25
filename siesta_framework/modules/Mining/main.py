@@ -13,6 +13,7 @@ from siesta_framework.core.storageFactory import get_storage_manager
 from siesta_framework.modules.Mining.existential import discover_existential
 from siesta_framework.modules.Mining.positional import discover_positional
 from siesta_framework.modules.Mining.ordered import discover_ordered
+from siesta_framework.modules.Mining.unordered import discover_unordered
 from siesta_framework.modules.Preprocess.parsers import upload_log_file_object
 from siesta_framework.modules.Preprocess.builders import build_sequence_table, build_single_table
 from pyspark.sql import SparkSession, DataFrame, functions as F
@@ -142,10 +143,12 @@ class Miner(SiestaModule):
         positional_constraints = discover_positional(evolved_df, self.metadata)
         existential_constraints = discover_existential(evolved_df, self.metadata)
         ordered_constraints = discover_ordered(evolved_df, self.metadata)
+        unordered_constraints = discover_unordered(evolved_df, self.metadata)
 
         constraints = positional_constraints \
             .unionByName(existential_constraints, allowMissingColumns=True) \
-            .unionByName(ordered_constraints, allowMissingColumns=True)
+            .unionByName(ordered_constraints, allowMissingColumns=True) \
+            .unionByName(unordered_constraints, allowMissingColumns=True)
         constraints.show(70,truncate=False)
 
         # Update metadata with new last mining timestamp based on the max timestamp of the evolved traces

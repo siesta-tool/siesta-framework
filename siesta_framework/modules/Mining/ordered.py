@@ -144,22 +144,21 @@ def discover_ordered(evolved_df: DataFrame, metadata: MetaData) -> DataFrame:
     storage = get_storage_manager()
     old_constraints_df = storage.read_ordered_constraints(metadata)
 
-    # -- 1. Invalidate old constraints for traces that have evolved -------
+    # Invalidate old constraints for traces that have evolved 
     evolved_trace_ids = evolved_df.select("trace_id").distinct()
     unchanged_constraints = old_constraints_df.join(
         evolved_trace_ids, on="trace_id", how="left_anti"
     )
 
-    # -- 2. Mine constraints for evolved traces ---------------------------
+    # Mine constraints for evolved traces
     new_constraints = evolved_df.select("trace_id", "activity", "position")\
         .groupBy("trace_id")\
         .applyInPandas(_mine_trace_pandas, ConstraintEntry.get_schema())
 
 
-    # -- 3. Combine with unchanged old constraints ------------------------
     ordered_constraints = unchanged_constraints.unionByName(new_constraints, allowMissingColumns=True)
 
-    # Force materialization before overwriting the same S3 path
+    # Force materialization
     ordered_constraints = ordered_constraints.cache()
     ordered_constraints.count()
 

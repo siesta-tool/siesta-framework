@@ -51,6 +51,9 @@ class MetaData:
     @property
     def s3_ordered_constraints(self) -> str:
         return self.s3_mining + "ordered.parquet"
+    @property
+    def s3_unordered_constraints(self) -> str:
+        return self.s3_mining + "unordered.parquet"
     
     # Table paths for Storage Managers (extend for more compatibility)
     @property
@@ -83,6 +86,9 @@ class MetaData:
     @property
     def ordered_constraints_path(self) -> str:
         return self.s3_ordered_constraints if self.storage_type == "s3" else ""
+    @property
+    def unordered_constraints_path(self) -> str:
+        return self.s3_mining + "unordered.parquet" if self.storage_type == "s3" else ""
 
     def __init__(self, storage_namespace: str = "siesta", storage_type: str = "s3", log_name: str = "default_log"):
         self.storage_namespace = storage_namespace
