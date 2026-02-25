@@ -109,6 +109,10 @@ class Miner(SiestaModule):
         self.mining_config = DEFAULT_MINING_CONFIG.copy()
         self.mining_config.update(config)
 
+        if not self.storage.log_exists(self.mining_config):
+            log_name = self.mining_config.get("log_name", "default_log")
+            raise ValueError(f"Log '{log_name}' does not exist in storage. Run preprocessing first.")
+
         # Ensure output_path is unique for each run to avoid overwriting results
         given_output_path = self.mining_config.get("output_path", self.mining_config.get("log_name", "mining_results"))
         Path(given_output_path).parent.mkdir(parents=True, exist_ok=True)
@@ -123,7 +127,6 @@ class Miner(SiestaModule):
         :param caller: a string indicating the caller of the mining process (e.g. "cli", "api") for logging purposes.
         """
 
-        
         logger.info(f"Beginning mining process initiated by {caller}.")
 
         # Load metadata if available, and evolved traces since last mining from storage
@@ -132,6 +135,7 @@ class Miner(SiestaModule):
             log_name=self.mining_config.get("log_name", "default_log"),
             storage_type=self.mining_config.get("storage_type", "s3")
         )
+
         self.storage.read_metadata_table(self.mining_config, self.metadata) 
         evolved_df = self.storage.read_sequence_table(self.metadata, filter_out="mined" if not self.mining_config.get("force_recompute", False) else None)
         evolved_df.cache()  # Cache evolved traces as they will be used multiple times during mining

@@ -127,6 +127,20 @@ class StorageManager(ABC):
         pass
     
     @abstractmethod
+    def log_exists(self, task_config: Dict[str, Any]) -> bool:
+        """
+        Check whether a log dataset already exists in the storage backend.
+
+        Args:
+            task_config: Configuration dictionary containing at least 'log_name'
+                         and 'storage_namespace'.
+
+        Returns:
+            True if the log exists, False otherwise.
+        """
+        pass
+
+    @abstractmethod
     def read_metadata_table(self, task_config: Dict[str, Any]) -> MetaData:
         """
         Construct metadata based on data already stored in the database and new configuration.

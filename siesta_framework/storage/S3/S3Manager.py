@@ -430,6 +430,36 @@ class S3Manager(StorageManager):
         except Exception as e:
             logger.info(f"Error writing IndexTable: {e}")
     
+  
+    def log_exists(self, task_config: Dict[str, Any]) -> bool:
+        """
+        Check whether the log prefix exists in S3 by listing objects under it.
+
+        Args:
+            task_config: Configuration dictionary containing 'log_name' and
+                         'storage_namespace'.
+
+        Returns:
+            True if at least one object is found under the log prefix, False otherwise.
+        """
+        namespace = task_config.get("storage_namespace", "siesta")
+        log_name = task_config.get("log_name", "default_log")
+        prefix = f"{log_name}/"
+        try:
+            response = self.s3_client.list_objects_v2(
+                Bucket=namespace,
+                Prefix=prefix,
+                MaxKeys=1
+            )
+            exists = response.get("KeyCount", 0) > 0
+            if not exists:
+                logger.info(f"Log '{log_name}' not found in bucket '{namespace}'.")
+            return exists
+        except ClientError as e:
+            logger.warning(f"Could not verify existence of log '{log_name}' in bucket '{namespace}': {e}")
+            return False
+
+    
     ###########################################
     ########## MetaData Table Methods #########
     ###########################################
