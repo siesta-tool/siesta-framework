@@ -3,9 +3,10 @@ Functions relating to the generation and filtering of valid event pairs
 """
 from collections import defaultdict
 from datetime import timedelta, datetime
+import re
 from pyspark import RDD
 from pyspark.sql import DataFrame
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Literal, Optional, Tuple
 from pyspark.sql.functions import count_distinct, col, to_timestamp, unix_timestamp, sum as spark_sum, count, min as spark_min, max as spark_max, pow as spark_pow
 from pyspark.sql.types import StructType, StructField, StringType, TimestampType, IntegerType
 from siesta_framework.model.DataModel import Last_checked_table_schema, EventPair
@@ -31,6 +32,8 @@ single_schema = StructType([
     StructField("attributes", StringType(), True)
 ])
 
+_TIME_PATTERN = re.compile(r"(\d+(?:\.\d+)?)(d|h|m|s)")
+LookbackType = Literal["time", "index"]
 pair_index_schema = EventPair.get_schema()
 # Schema: Source, Target, trace_id, source_timestamp, target_timestamp, source_position, target_position, source_attributes, target_attributes
 
@@ -45,7 +48,7 @@ type Event = Tuple[Event_Type, Timestamp, Position, Attributes]
 type Trace = Tuple[Trace_ID, Tuple[Event]]
 
 
-def extract_pairs_and_last_checked(updated_sequence_table_DF: DataFrame, last_checked: DataFrame | None, lookback: int) -> Tuple[DataFrame, DataFrame]:
+def extract_pairs_and_last_checked(updated_sequence_table_DF: DataFrame, last_checked: DataFrame | None, lookback: str) -> Tuple[DataFrame, DataFrame]:
     """
     Extracts the event type pairs from a DF that contains the complete traces. 
 
@@ -75,13 +78,8 @@ def extract_pairs_and_last_checked(updated_sequence_table_DF: DataFrame, last_ch
     """
     
 
-    # Converting the timestamps to datetime objects for easier manipulation
-    # batch_single_DF = batch_single_DF.withColumn("start_timestamp", unix_timestamp(col("start_timestamp"), "yyyy-MM-dd'T'HH:mm:ss"))
+    real_lookback = _parse_lookback(lookback)
     
-    # single_rdd: RDD[Tuple[Trace_ID, Event]] = batch_single_DF.rdd.map(lambda row: (
-    #     row.trace_id,
-    #     (row.activity, row.start_timestamp, row.position)
-    # ))
     updated_sequence_table_DF = updated_sequence_table_DF.withColumn("start_timestamp", unix_timestamp(col("start_timestamp"), "yyyy-MM-dd'T'HH:mm:ss"))
     trace_rdd: RDD[Tuple[Trace_ID, Event]] = updated_sequence_table_DF.rdd.map(lambda row: (
         row.trace_id,
@@ -93,7 +91,7 @@ def extract_pairs_and_last_checked(updated_sequence_table_DF: DataFrame, last_ch
     
     if not last_checkedRDD or last_checkedRDD.count() == 0:
         logger.info("No previously indexed pairs found. Extracting all pairs from scratch.")
-        full = trace_rdd.groupByKey().map(lambda x: _calculate_pairs_stnm(x, None, lookback))
+        full = trace_rdd.groupByKey().map(lambda x: _calculate_pairs_stnm(x, None, real_lookback))
     else:
         last_checkedRDD_grouped = last_checkedRDD.map(lambda row: (
             row.trace_id,
@@ -101,7 +99,7 @@ def extract_pairs_and_last_checked(updated_sequence_table_DF: DataFrame, last_ch
         )).groupByKey()
         
         full = trace_rdd.groupByKey().leftOuterJoin(last_checkedRDD_grouped).map(
-            lambda x: _calculate_pairs_stnm((x[0], x[1][0]), x[1][1], lookback)
+            lambda x: _calculate_pairs_stnm((x[0], x[1][0]), x[1][1], real_lookback)
         )
     
     pairs = full.flatMap(lambda x: x[0])
@@ -116,7 +114,7 @@ def extract_pairs_and_last_checked(updated_sequence_table_DF: DataFrame, last_ch
 
     return pairs_df, last_checked_df
 
-def _calculate_pairs_stnm(single: Tuple[Trace_ID, Iterable[Event]], last: Optional[Iterable[Tuple[str, str, int]]] | None, lookback: int) -> Tuple[List[Tuple], List[Tuple]]:
+def _calculate_pairs_stnm(single: Tuple[Trace_ID, Iterable[Event]], last: Optional[Iterable[Tuple[str, str, int]]] | None, lookback: Tuple[int, LookbackType]) -> Tuple[List[Tuple], List[Tuple]]:
     """
     Extract the event type pairs from the single inverted index.
 
@@ -184,7 +182,7 @@ def createTuples(
     key2: str, 
     e_source: List[Tuple[int, int, str]], 
     e_target: List[Tuple[int, int, str]],
-    lookback: int, 
+    lookback: Tuple[int, LookbackType], 
     last_checked: Optional[int],
     trace_id: str
 ) -> List[Tuple[str, str, str, str, str, int, int]]:
@@ -195,7 +193,7 @@ def createTuples(
         List of tuples: (eventA, eventB, trace_id, timestampA, timestampB, posA, posB)
     """
     pairs = []
-    lookback_delta_millis = lookback * 24 * 60 * 60 * 1000  # Convert lookback from days to milliseconds
+    lookback_number = lookback[0]
     prev = None
     i = 0
     
@@ -212,12 +210,19 @@ def createTuples(
                     # Event a is not before event b, remove it
                     i += 1
                 else:
-                    # Event a is before event b 2025-01-01T09:00:00
-                    if eb_ts - ea_ts <= lookback_delta_millis:
-                        # Lookback satisfied, create pair
-                        pairs.append((key1, key2, trace_id, ea_ts, eb_ts, ea_pos, eb_pos, ea_attr, eb_attr))
-                        prev = eb_ts
-                        i += 1
+                    # Event a is before event b
+                    if lookback[1] == "index":
+                        if eb_pos - ea_pos <= lookback_number:
+                            # Lookback satisfied, create pair
+                            pairs.append((key1, key2, trace_id, ea_ts, eb_ts, ea_pos, eb_pos, ea_attr, eb_attr))
+                            prev = eb_ts
+                            i += 1
+                    else:
+                        if eb_ts - ea_ts <= lookback_number:
+                            # Lookback satisfied, create pair
+                            pairs.append((key1, key2, trace_id, ea_ts, eb_ts, ea_pos, eb_pos, ea_attr, eb_attr))
+                            prev = eb_ts
+                            i += 1
                     stop = True
     
     return pairs
@@ -263,11 +268,42 @@ def extract_counts(pairs_index: DataFrame) -> DataFrame:
         .withColumn("duration", (col("target_timestamp").cast("long") - col("source_timestamp").cast("long")) / 1000)
         .groupBy("source", "target")
         .agg(
-            spark_sum("duration").alias("total_duration"),
-            count("duration").alias("total_completions"),
-            spark_min("duration").alias("min_duration"),
-            spark_max("duration").alias("max_duration"),
+            spark_sum("duration").alias("total_duration").cast("float"),
+            count("duration").alias("total_completions").cast("integer"),
+            spark_min("duration").alias("min_duration").cast("float"),
+            spark_max("duration").alias("max_duration").cast("float"),
             spark_sum(spark_pow(col("duration"), 2)).alias("sum_squared_duration"),
         ))
 
     return count_table
+
+def _parse_lookback(lookback: str) -> Tuple[int, LookbackType]:
+    """
+    Returns a tuple(lookback_number, LookbackType)
+    lookback_number is in ms for time and positions for index
+    format: for time $d$m$s for index $i eg. 25d16m0.5s or 255i 
+    """
+    if "i" in lookback:
+        return (int(lookback.split("i")[0]), 'index')
+    else:
+        time_matches = list(_TIME_PATTERN.finditer(lookback))
+        if not time_matches:
+            raise ValueError(f"Invalid lookback format: {lookback}")
+        total_ms = 0.0
+        for match in time_matches:
+            value = float(match.group(1))
+            unit = match.group(2)
+
+            if unit == "d":
+                total_ms += value * 24 * 60 * 60 * 1000
+            elif unit == "h":
+                total_ms += value * 60 * 60 * 1000
+            elif unit == "m":
+                total_ms += value * 60 * 1000
+            elif unit == "s":
+                total_ms += value * 1000
+            else:
+                raise ValueError(f"Unsupported unit: {unit}")
+
+        return int(total_ms), "time"
+    

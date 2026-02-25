@@ -611,7 +611,7 @@ class S3Manager(StorageManager):
             count_df.write\
                 .format("delta")\
                 .partitionBy("source")\
-                .mode("append")\
+                .mode("overwrite")\
                 .option("mergeSchema", "true")\
                 .save(metadata.count_table_path)
         

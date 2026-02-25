@@ -123,6 +123,7 @@ def build_count_table(preprocess_config: Dict, metadata: MetaData, batch_pairs_i
         return None
     else:
         count_table = extract_counts(batch_pairs_index_df)
+        
         storage.write_count_table(count_df=count_table, metadata=metadata)
         return count_table
 
@@ -135,7 +136,7 @@ def build_last_checked_table(preprocess_config: Dict, metadata: MetaData, batch_
     logger.info("Preprocess.builders: Building Last Checked Table...")
 
     storage = get_storage_manager()
-    lookback = preprocess_config.get("lookback", 7)
+    lookback = preprocess_config.get("lookback", "7d")
 
     updated_trace_ids = batch_single_df.select("trace_id").distinct()
 
@@ -167,7 +168,7 @@ def build_last_checked_index_and_count_streamed(preprocess_config: Dict, metadat
     logger.info("Preprocess.builders: Building Last Checked Table...")
 
     storage = get_storage_manager()
-    lookback = preprocess_config.get("lookback", 7)
+    lookback = preprocess_config.get("lookback", "7d")
 
     sequence_stream_df = (
             get_spark_session().readStream
