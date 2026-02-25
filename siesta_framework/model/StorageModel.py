@@ -179,6 +179,7 @@ class ConstraintEntry:
             "occurrences": self.occurrences,
         }
     
+    @staticmethod
     def get_schema() -> StructType:
         return StructType([
             StructField("template", StringType(), False),

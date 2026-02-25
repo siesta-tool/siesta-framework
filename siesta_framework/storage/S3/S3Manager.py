@@ -17,6 +17,17 @@ from pyspark.sql.window import Window
 import logging
 logger = logging.getLogger("S3Manager")
 
+
+def _parse_timestamp(ts: str) -> datetime:
+    """Parse a timestamp string, accepting both with and without milliseconds."""
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(ts, fmt)
+        except ValueError:
+            continue
+    raise ValueError(f"Cannot parse timestamp: {ts!r}")
+
+
 class S3Manager(StorageManager):
     
     """
@@ -442,9 +453,9 @@ class S3Manager(StorageManager):
                 metadata.trace_count = r.trace_count or 0
                 metadata.event_count = r.event_count or 0
                 metadata.pair_count = r.pair_count or 0
-                metadata.first_timestamp = datetime.strptime(r.first_timestamp, "%Y-%m-%dT%H:%M:%S") if r.first_timestamp is not None else None
-                metadata.last_timestamp = datetime.strptime(r.last_timestamp, "%Y-%m-%dT%H:%M:%S") if r.last_timestamp is not None else None
-                metadata.last_mined_timestamp = datetime.strptime(r.last_mined_timestamp, "%Y-%m-%dT%H:%M:%S") if r.last_mined_timestamp is not None else None
+                metadata.first_timestamp = _parse_timestamp(r.first_timestamp) if r.first_timestamp is not None else None
+                metadata.last_timestamp = _parse_timestamp(r.last_timestamp) if r.last_timestamp is not None else None
+                metadata.last_mined_timestamp = _parse_timestamp(r.last_mined_timestamp) if r.last_mined_timestamp is not None else None
                 metadata.approx_unique_traces = set(r.approx_unique_traces) if r.approx_unique_traces is not None else set()
                 metadata.approx_unique_activities = set(r.approx_unique_activities) if r.approx_unique_activities is not None else set()
                 metadata.storage_type = "s3"
@@ -503,8 +514,8 @@ class S3Manager(StorageManager):
             # Update metadata object
             metadata.trace_count = self.read_sequence_table(metadata).select("trace_id").distinct().count()
             metadata.event_count += events_count
-            metadata.first_timestamp = metadata.first_timestamp if metadata.first_timestamp is not None else datetime.strptime(events_df.agg({"start_timestamp": "min"}).collect()[0][0], "%Y-%m-%dT%H:%M:%S")
-            metadata.last_timestamp = datetime.strptime(events_df.agg({"start_timestamp": "max"}).collect()[0][0], "%Y-%m-%dT%H:%M:%S")
+            metadata.first_timestamp = metadata.first_timestamp if metadata.first_timestamp is not None else _parse_timestamp(events_df.agg({"start_timestamp": "min"}).collect()[0][0])
+            metadata.last_timestamp = _parse_timestamp(events_df.agg({"start_timestamp": "max"}).collect()[0][0])
         except Exception as e:
             logger.info(f"Error writing on {metadata.sequence_table_path}: {e}")
             raise

@@ -141,9 +141,7 @@ class Miner(SiestaModule):
         # Perform mining
         positional_constraints = discover_positional(evolved_df, self.metadata)
         existential_constraints = discover_existential(evolved_df, self.metadata)
-        # ordered_constraints = discover_ordered(evolved_df, self.metadata, strategy="pandas")
-        ordered_constraints = timed(discover_ordered, "Ordered constraint discovery", evolved_df, self.metadata, strategy=self.mining_config.get("ordered_strategy", "pandas"))
-        timed(discover_ordered, "Ordered constraint discovery (joins)", evolved_df, self.metadata, strategy="joins")
+        ordered_constraints = discover_ordered(evolved_df, self.metadata)
 
         constraints = positional_constraints \
             .unionByName(existential_constraints, allowMissingColumns=True) \

@@ -56,6 +56,9 @@ services:
         - SPARK_USER=spark
         - SPARK_SUBMIT_OPTS=-Dlog4j.configurationFile=/opt/spark/conf/log4j2.properties
         - PYSPARK_PYTHON=/opt/bitnami/python/bin/python3
+        - SPARK_WORKER_WEBUI_PORT=8082
+    ports:
+      - '8082:8082'
     networks:
       - siesta-net
     # Uncomment for docker swarm
