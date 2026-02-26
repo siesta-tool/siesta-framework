@@ -106,13 +106,13 @@ class Miner(SiestaModule):
         return self.mining_config["output_path"]
 
     def _load_mining_config(self, config: Dict[str, Any]):
+        # Validate that the specified log exists in storage before proceeding with mining. 
+        if not self.storage.log_exists(config):
+            log_name = config.get("log_name", "default_log")
+            raise ValueError(f"Log '{log_name}' does not exist in storage. Run preprocessing first.")
+
         self.mining_config = DEFAULT_MINING_CONFIG.copy()
         self.mining_config.update(config)
-
-        # Validate that the specified log exists in storage before proceeding with mining. 
-        if not self.storage.log_exists(self.mining_config):
-            log_name = self.mining_config.get("log_name", "default_log")
-            raise ValueError(f"Log '{log_name}' does not exist in storage. Run preprocessing first.")
 
         # Ensure that the specified categories are valid before proceeding with mining.
         valid_categories = {"positional", "existential", "ordered", "unordered", "*"}
