@@ -72,7 +72,7 @@ DEFAULT_MINING_CONFIG: Dict[str, Any] = {
   "storage_type": "s3",
   "force_recompute": False,
   "categories": ["*"], # or specific list of template categories(e.g. ["ordered", "positional", "existence"])
-  "templates": ["*"], # or specific list of templates (e.g. ["response", "precedence"])
+  # "templates": ["*"], # or specific list of templates (e.g. ["response", "precedence"]) ----NOT IMPLEMENTED YET
   "grouping": "trace",  # or "window"
   "identifiers": ["trace_id"],  # fields to identify groups (e.g. 'trace_id' for trace-based, irrelevant for window-based)
   "window_size": 30,  # position-based window size, if grouping by window
