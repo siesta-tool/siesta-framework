@@ -120,7 +120,7 @@ class Miner(SiestaModule):
             raise ValueError(f"Invalid categories specified in mining_config: {self.mining_config['categories']}. Valid options are: {valid_categories}.")
 
         # Ensure output_path is unique for each run to avoid overwriting results
-        given_output_path = config.get("output_path", config.get("log_name", "mining_results"))
+        given_output_path = config.get("output_path", "output/" + config.get("log_name", "mining_results"))
         Path(given_output_path).parent.mkdir(parents=True, exist_ok=True)
         self.mining_config["output_path"] = given_output_path + "_" + str(datetime.datetime.now().timestamp()) + ".csv"
 
