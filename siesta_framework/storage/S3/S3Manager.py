@@ -4,6 +4,7 @@ import boto3
 from botocore.exceptions import ClientError
 from fastapi import UploadFile
 from pyspark.sql import SparkSession, DataFrame
+from pyspark.sql.functions import col, lit
 from pyspark import RDD
 from pyspark.sql.streaming import StreamingQuery
 from siesta_framework.core.interfaces import StorageManager

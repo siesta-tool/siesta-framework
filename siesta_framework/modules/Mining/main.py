@@ -58,11 +58,12 @@ class Miner(SiestaModule):
 
         logger.info(f"Mining: Completed. Results available at {self.mining_config['output_path']}.")
         
-        # with open(self.mining_config["output_path"], 'r') as f:
-        #     try:
-        #         return json.load(f)
-        #     except json.JSONDecodeError:
-        #         return f"Mining: Cannot parse mining results. Check logs and {self.mining_config['output_path']} for details."
+        with open(self.mining_config["output_path"], 'r', newline="") as f:
+            try:
+                return list(csv.DictReader(f))
+            except Exception:
+                logger.error(f"Mining: Failed to parse mining results from {self.mining_config['output_path']}. Check if the file is a valid CSV and inspect logs for details.")
+                return f"Mining: Cannot parse mining results. Check logs and {self.mining_config['output_path']} for details."
 
 
     def cli_run(self, args: Any, **kwargs: Any) -> Any:
@@ -76,9 +77,8 @@ class Miner(SiestaModule):
 
         parser = argparse.ArgumentParser(description="Siesta Mining module")
         parser.add_argument('--mining_config', type=str, help='Path to configuration JSON file', required=False)
-        # Add optional arguments ...
 
-        parsed_args, unknown_args = parser.parse_known_args(args)
+        parsed_args, _ = parser.parse_known_args(args)
         
         # Check if a config path is provided
         if parsed_args.mining_config:
@@ -136,56 +136,77 @@ class Miner(SiestaModule):
             storage_type=self.mining_config.get("storage_type", "s3")
         )
 
-        self.storage.read_metadata_table(self.mining_config, self.metadata) 
+        self.metadata = self.storage.read_metadata_table(self.mining_config, self.metadata) 
         evolved_df = self.storage.read_sequence_table(self.metadata, filter_out="mined" if not self.mining_config.get("force_recompute", False) else None)
         evolved_df.cache()  # Cache evolved traces as they will be used multiple times during mining
 
-        # Perform mining
-        positional_constraints = discover_positional(evolved_df, self.metadata)
-        existential_constraints = discover_existential(evolved_df, self.metadata)
-        ordered_constraints = discover_ordered(evolved_df, self.metadata)
-        unordered_constraints = discover_unordered(evolved_df, self.metadata)
+        # Perform mining based on the specified categories in the mining configuration. 
+        # Each miner function returns a DataFrame with a common schema, and we union them together 
+        # while adding a "category" column to identify the source of each constraint.
+        miners = []
+        for category in self.mining_config["categories"]:
+            if category in ["positional", "*"]:
+                miners.append(("positional", discover_positional))
+            if category in ["existential", "*"]:
+                miners.append(("existential", discover_existential))
+            if category in ["ordered", "*"]:
+                miners.append(("ordered", discover_ordered))
+            if category in ["unordered", "*"]:
+                miners.append(("unordered", discover_unordered))
+        
+        constraints_df_list = []
+        for category, miner_func in miners:
+            constraints_df_list.append(miner_func(evolved_df, self.metadata).withColumn("category", F.lit(category)))
 
-        constraints = positional_constraints \
-            .unionByName(existential_constraints, allowMissingColumns=True) \
-            .unionByName(ordered_constraints, allowMissingColumns=True) \
-            .unionByName(unordered_constraints, allowMissingColumns=True)
-        constraints.show(70,truncate=False)
+        constraints_df = constraints_df_list[0]
+        for constaint_df in constraints_df_list[1:]:
+            constraints_df = constraints_df.unionByName(constaint_df, allowMissingColumns=True)
 
         # Update metadata with new last mining timestamp based on the max timestamp of the evolved traces
         self.metadata.last_mined_timestamp = evolved_df.agg({"start_timestamp": "max"}).collect()[0][0] if not evolved_df.rdd.isEmpty() else self.metadata.last_mined_timestamp
         self.storage.write_metadata_table(self.metadata)
 
-        # self._output_constraints(constraints)
+        # Output the discovered constraints to a CSV file on the driver's local filesystem 
+        # based on the specified output path in the mining configuration.
+        self._output_constraints(constraints_df, self.metadata.trace_count)
 
 
-    def _output_constraints(self, constraints: DataFrame):
+    def _output_constraints(self, constraints_df: DataFrame, trace_count: int):
         """
         Outputs the discovered constraints to a CSV file on the driver's local filesystem 
         based on the specified output path in the mining configuration.
         This method collects the results from the Spark executors and writes them incrementally to avoid driver memory issues.
         
-        :param constraints: DataFrame containing the discovered constraints with columns like 'category', 'template', 'sources', 'targets', 'occurrences', 'support', 'confidence', and optionally 'trace_ids'.
+        :param constraints: DataFrame based on ConstraintEntry schema (template, source, target, occurrences, trace_id)
         """
-        # Prepare a CSV-friendly DataFrame: array columns are serialised to
-        # pipe-delimited strings on the executors so the driver only receives
-        # flat string rows.
+        # Aggregate trace_ids for the same (template, source, target, occurrences) tuples
+        grouped_constraints = constraints_df.groupBy(
+            "category", "template", "source", "target", "occurrences"
+        ).agg(
+            F.collect_list("trace_id").alias("trace_ids")
+        )
+
+        # Calculate support: len(trace_ids) / trace_count
+        grouped_constraints = grouped_constraints.withColumn(
+            "support",
+            (F.size(F.col("trace_ids")) / F.lit(trace_count))
+        )
+
+        # Prepare a CSV-friendly DataFrame
         select_cols = [
             F.col("category"),
             F.col("template"),
-            F.concat_ws("|", F.col("sources")).alias("sources"),
-            F.concat_ws("|", F.col("targets")).alias("targets"),
+            F.col("source"),
+            F.col("target"),
             F.col("occurrences").cast("string"),
             F.col("support").cast("string"),
-            F.col("confidence").cast("string"),
         ]
         
         # Optionally include the list of trace_ids supporting each constraint, serialized as a pipe-delimited string. 
-        # This can be large, so it's controlled by a config flag.
         if self.mining_config.get("include_trace_lists", False):
             select_cols.append(F.concat_ws("|", F.col("trace_ids")).alias("trace_ids"))
         
-        constraints_csv = constraints.select(*select_cols)
+        constraints_csv = grouped_constraints.select(*select_cols)
 
         # Stream rows partition-by-partition from executors to the driver and write
         # them incrementally into a single CSV file on the driver's local filesystem.

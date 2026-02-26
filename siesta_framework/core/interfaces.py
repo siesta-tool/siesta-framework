@@ -141,13 +141,13 @@ class StorageManager(ABC):
         pass
 
     @abstractmethod
-    def read_metadata_table(self, task_config: Dict[str, Any]) -> MetaData:
+    def read_metadata_table(self, task_config: Dict[str, Any], metadata: MetaData) -> MetaData:
         """
         Construct metadata based on data already stored in the database and new configuration.
         
         Args:
             task_config: Configuration dictionary passed during execution
-            
+            metadata: MetaData object to be updated with information from the database
         Returns:
             MetaData object containing the metadata
         """
