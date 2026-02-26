@@ -654,8 +654,8 @@ class S3Manager(StorageManager):
             df = self.spark.read.format("delta").schema(schema=Active_Pairs_table_schema).parquet(metadata.active_pairs_table_path) # type: ignore
             logger.info(f"Read {df.count()} records from active pairs table")
             return df
-        except Exception as e:
-            logger.error(f"Error reading active pairs table: {e}")
+        except Exception as _:
+            logger.info("No existing active pairs table found. Returning empty DataFrame.")
             return self.spark.createDataFrame([], schema=Active_Pairs_table_schema) # type: ignore
         
     #################################################

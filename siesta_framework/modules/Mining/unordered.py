@@ -43,10 +43,10 @@ def _mine_trace_unordered_pandas(pdf: pd.DataFrame) -> pd.DataFrame:
             if a_in and b_in:
                 rows.append(("coexistence", a, trace_id, b, None))
             
-            # Not Co-existence: a and b do NOT both occur together
-            # Satisfied if: only a, only b, or neither
-            if not (a_in and b_in):
-                rows.append(("not_coexistence", a, trace_id, b, None))
+            # # Not Co-existence: a and b do NOT both occur together #TODO: MOVE TO NEGATIONS
+            # # Satisfied if: only a, only b, or neither
+            # if not (a_in and b_in):
+            #     rows.append(("not_coexistence", a, trace_id, b, None))
             
             # Choice: at least one of a or b is present
             if a_in or b_in:
@@ -66,10 +66,8 @@ def discover_unordered(evolved_df: DataFrame, metadata: MetaData) -> DataFrame:
 
     Templates discovered (per activity-pair, per trace):
       1. Co-existence(a,b)          both 'a' and 'b' occur in the same trace.
-      2. Not Co-existence(a,b)      if 'a' occurs, 'b' must not occur in the same trace (and vice versa).
-                                    Equivalently: exactly one of 'a' or 'b' occurs.
-      3. Choice(a,b)                at least one of 'a' or 'b' occurs in the trace.
-      4. Exclusive Choice(a,b)      exactly one of 'a' or 'b' occurs in the trace.
+      2. Choice(a,b)                at least one of 'a' or 'b' occurs in the trace.
+      3. Exclusive Choice(a,b)      exactly one of 'a' or 'b' occurs in the trace.
       
     Incremental strategy:
     - Old constraints for traces that appear in ``evolved_df`` are invalidated.
