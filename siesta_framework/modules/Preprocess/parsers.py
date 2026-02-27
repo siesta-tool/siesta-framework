@@ -181,17 +181,19 @@ def parse_xml(storage_path: str, spark: SparkSession, preprocess_config: dict) -
         filtered = F.filter(arr_col, lambda x: x["_key"] == F.lit(key))
         raw = F.when(F.size(filtered) > 0, F.element_at(filtered, 1)["_value"])
         if isinstance(value_type, TimestampType):
-            return F.date_format(raw, "yyyy-MM-dd'T'HH:mm:ss.SSSXXX")
+            return F.date_format(raw, "yyyy-MM-dd'T'HH:mm:ss")
         return raw.cast("string")
 
     def _normalize_to_kv(arr_col, value_type):
-        """Transform an attribute array to array<struct<key:string, value:string>>."""
+        """Transform an attribute array to array<struct<key:string, value:string>>.
+        Filters out null entries first (spark-xml can produce nulls in arrays)."""
+        non_null = F.filter(arr_col, lambda x: x.isNotNull())
         if isinstance(value_type, TimestampType):
-            return F.transform(arr_col, lambda x: F.struct(
+            return F.transform(non_null, lambda x: F.struct(
                 x["_key"].alias("key"),
-                F.date_format(x["_value"], "yyyy-MM-dd'T'HH:mm:ss.SSSXXX").alias("value")
+                F.date_format(x["_value"], "yyyy-MM-dd'T'HH:mm:ss").alias("value")
             ))
-        return F.transform(arr_col, lambda x: F.struct(
+        return F.transform(non_null, lambda x: F.struct(
             x["_key"].alias("key"),
             x["_value"].cast("string").alias("value")
         ))
@@ -261,18 +263,28 @@ def parse_xml(storage_path: str, spark: SparkSession, preprocess_config: dict) -
 
     # --- Build the attributes map column ---
     mapped_source_keys = [v for v in eventConfig.field_mappings.values() if v is not None]
-    empty_kv_array = F.from_json(F.lit("[]"), "array<struct<key:string,value:string>>")
+    _EMPTY_MAP = F.create_map().cast(MapType(StringType(), StringType()))
 
     if eventConfig.attributes_mapping:
-        # Normalise every attribute-type array to a uniform [{key, value}] schema
+        # Normalise every attribute-type array to a uniform [{key, value}] schema.
+        # Use F.coalesce with a typed-literal empty array to guarantee non-null inputs
+        # for F.concat (which returns null if ANY operand is null).
+        _typed_empty = F.filter(
+            F.array(F.struct(F.lit("__x").alias("key"), F.lit("__x").alias("value"))),
+            lambda x: F.lit(False)
+        )
+
         norm_parts = []
         for at in event_attr_types:
             vtype = _value_data_type(event_struct, at)
-            norm = F.coalesce(_normalize_to_kv(F.col(f"__evt_{at}"), vtype), empty_kv_array)
+            norm = F.coalesce(_normalize_to_kv(F.col(f"__evt_{at}"), vtype), _typed_empty)
             norm_parts.append(norm)
 
         if norm_parts:
             all_attrs = F.concat(*norm_parts) if len(norm_parts) > 1 else norm_parts[0]
+
+            # Filter out entries with null keys (from null array elements)
+            all_attrs = F.filter(all_attrs, lambda x: x["key"].isNotNull() & x["value"].isNotNull())
 
             if "*" in eventConfig.attributes_mapping:
                 # Keep all attributes whose key is NOT already mapped to a named field
@@ -283,21 +295,13 @@ def parse_xml(storage_path: str, spark: SparkSession, preprocess_config: dict) -
 
             attributes_col = F.when(
                 F.size(filtered_attrs) > 0, F.map_from_entries(filtered_attrs)
-            ).otherwise(F.map_from_entries(empty_kv_array))
+            ).otherwise(_EMPTY_MAP)
         else:
-            attributes_col = F.map_from_entries(empty_kv_array)
+            attributes_col = _EMPTY_MAP
     else:
-        attributes_col = F.map_from_entries(empty_kv_array)
+        attributes_col = _EMPTY_MAP
 
     events_df = events_df.withColumn("attributes", attributes_col)
-
-    # --- Timestamp normalisation: replace trailing Z with +00:00 for ISO 8601 ---
-    for field_name in eventConfig.timestamp_fields:
-        if field_name in events_df.columns:
-            events_df = events_df.withColumn(
-                field_name,
-                F.regexp_replace(F.col(field_name), "Z$", "+00:00")
-            )
 
     # --- Final projection matching Event schema ---
     schema = Event.get_schema()
