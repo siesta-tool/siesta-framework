@@ -4,14 +4,14 @@ networks:
 services:
   spark-master:
     container_name: spark-master
-    image: siesta/spark:4.0.0
+    image: siesta/spark:4.0.2
     build:
       context: dockerbase/Spark
       dockerfile: Spark.dockerfile
     environment:
       - SPARK_MODE=master
       - SPARK_MASTER_MEMORY=8G
-      - SPARK_MASTER_CORES=4
+      - SPARK_MASTER_CORES=12
       - SPARK_RPC_AUTHENTICATION_ENABLED=no
       - SPARK_RPC_ENCRYPTION_ENABLED=no
       - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
@@ -38,7 +38,7 @@ services:
 
   spark-worker:
     container_name: spark-worker
-    image: siesta/spark:4.0.0
+    image: siesta/spark:4.0.2
     build: 
       context: dockerbase/Spark
       dockerfile: Spark.dockerfile
@@ -48,7 +48,7 @@ services:
         - SPARK_MODE=worker
         - SPARK_MASTER_URL=spark://spark-master:7077
         - SPARK_WORKER_MEMORY=8G
-        - SPARK_WORKER_CORES=4
+        - SPARK_WORKER_CORES=12
         - SPARK_RPC_AUTHENTICATION_ENABLED=no
         - SPARK_RPC_ENCRYPTION_ENABLED=no
         - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no

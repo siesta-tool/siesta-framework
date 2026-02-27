@@ -109,8 +109,8 @@ def extract_active_and_all_pairs(updated_sequence_table_DF: DataFrame, previous_
     # logger.info(pairs_df.show())
     active_pairs_df = spark.createDataFrame(active_pairs, schema=Active_Pairs_table_schema)
     
-    logger.info(f"Extracted {pairs_df.count()} event pairs")
-    logger.info(f"Extracted {active_pairs_df.count()} last checked entries")
+    # logger.info(f"Extracted {pairs_df.count()} event pairs")
+    # logger.info(f"Extracted {active_pairs_df.count()} last checked entries")
 
     return pairs_df, active_pairs_df
 

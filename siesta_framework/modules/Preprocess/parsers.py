@@ -1,6 +1,7 @@
 import struct
 from typing import Any, Dict
 from pyspark import RDD
+from siesta_framework.core.logger import timed
 from siesta_framework.core.sparkManager import get_spark_session
 from siesta_framework.core.storageFactory import get_storage_manager
 from siesta_framework.model.DataModel import Event, EventConfig
@@ -74,7 +75,7 @@ def _cast_value_by_schema(field_name: str, value, config: EventConfig):
         # For timestamp fields, convert to ISO format string if needed
         if config.is_timestamp_field(field_name):
             if isinstance(value, datetime):
-                return value.isoformat()
+                return value.isoformat(timespec="seconds")
             elif isinstance(value, str):
                 try:
                     dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
@@ -124,11 +125,14 @@ def process_event_log(preprocess_config: dict, metadata: MetaData) -> DataFrame:
         events_df = parse_csv(log_path, spark, preprocess_config)
     else:
         raise ValueError(f"Unsupported log format: {log_format}")
-    
+    # timed(events_df.collect, "ParseXML & upload: ")
     # Updating positions in case of pre-existing data in sequence table
     pre_existing_seq_table = storage.read_sequence_table(metadata)
-    max_position = pre_existing_seq_table.agg({"position": "max"}).collect()[0][0] if pre_existing_seq_table.count() > 0 else 0
-    events_df = events_df.withColumn("position", col("position") + max_position)
+    print("[ABCD] A")
+    # max_position = pre_existing_seq_table.agg({"position": "max"}).collect()[0][0] if pre_existing_seq_table.count() > 0 else 0
+    # events_df = events_df.withColumn("position", col("position") + max_position)
+    print("[ABCD] B")
+    # timed(events_df.collect, "Read & update positions: ")
     storage.write_sequence_table(events_df, metadata)
     return events_df
 
