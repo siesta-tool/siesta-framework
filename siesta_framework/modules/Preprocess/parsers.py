@@ -5,8 +5,8 @@ from siesta_framework.core.logger import timed
 from siesta_framework.core.sparkManager import get_spark_session
 from siesta_framework.core.storageFactory import get_storage_manager
 from siesta_framework.model.DataModel import Event, EventConfig
-from pyspark.sql import SparkSession, DataFrame
-from pyspark.sql.types import StringType, IntegerType, MapType
+from pyspark.sql import SparkSession, DataFrame, functions as F
+from pyspark.sql.types import StringType, IntegerType, MapType, ArrayType, TimestampType
 from pyspark.sql.functions import monotonically_increasing_id, lit
 from datetime import datetime
 import os
@@ -139,131 +139,173 @@ def process_event_log(preprocess_config: dict, metadata: MetaData) -> DataFrame:
 
 def parse_xml(storage_path: str, spark: SparkSession, preprocess_config: dict) -> DataFrame:
     """
-    Parse_xml: Parses XES log file using Spark-XML and creates an DataFrame of Event objects.
-    This approach is scalable and handles large files without loading everything into driver memory.
-    
+    Parse XES log file using pure Spark DataFrame operations for optimal performance.
+    Avoids RDD operations and Python UDFs by leveraging Spark's native higher-order
+    functions (filter, transform, posexplode, map_from_entries) which execute entirely
+    in the JVM without Python serialization overhead.
+
     Args:
         storage_path: Path to the log file in storage
         spark: Active Spark Session
         preprocess_config: Preprocess configuration dictionary
-    
+
     Returns:
         DataFrame containing Event objects
     """
     eventConfig = EventConfig.from_preprocess_config(preprocess_config, "xes")
-    
+
+    # --- Read XES file ---
     traces_df = spark.read.format("xml") \
         .option("rowTag", "trace") \
         .load(storage_path)
-    
-    # Transform traces row to event RDD row
-    def process_trace(row):
-        """Process a single trace row and yield Event dicts"""
 
-        events = []
-        
-        # Extract trace-level fields
-        trace_field_values = {}
-        trace_fields_config = eventConfig.get_trace_fields()
-        
-        """
-        Check if there's string columns -> Turn them into an iterable list, which we call attributes.
-        -> For each attribute, check if its key matches any trace-level field mapping. (eg. 'trace_id': 'concept:name')
-         
-        """
-        if hasattr(row, 'string'):
-            for attr in (row.string if isinstance(row.string, list) else [row.string]):
-                if attr and hasattr(attr, '_key'):
-                    attr_key = getattr(attr, '_key', None)
-                    attr_value = getattr(attr, '_value', None)
-                    
-                    # Check if this attribute maps to any trace-level field
-                    for field_name, source_key in trace_fields_config.items():
-                        if source_key and attr_key == source_key:
-                            trace_field_values[field_name] = attr_value
-        
-        # Set default for trace fields not found
-        for field_name in trace_fields_config.keys():
-            if field_name not in trace_field_values:
-                trace_field_values[field_name] = f'{field_name}_{id(row)}'
-        
-        # Extract events from trace
-        if not hasattr(row, 'event') or row.event is None:
-            return get_spark_session().sparkContext.emptyRDD()
-            
-        event_list = row.event if isinstance(row.event, list) else [row.event]
-        
-        for position, event in enumerate(event_list):
-            # Initialize event field values with trace-level fields
-            event_field_values = trace_field_values.copy()
-            
-            # Get event-level field mappings (excludes trace-level fields)
-            event_fields_config = eventConfig.get_event_fields()
-            
-            # Storage for unmapped attributes
-            extra_attributes = {}
-            
-            # Parse event attributes using configured mappings
-            for attr_type in ['string', 'date', 'int', 'float', 'boolean']:
-                if hasattr(event, attr_type):
-                    attrs = getattr(event, attr_type)
-                    attr_list = attrs if isinstance(attrs, list) else [attrs] if attrs else []
-                    
-                    for attr in attr_list:
-                        if not attr:
-                            continue
-                        
-                        attr_key = getattr(attr, '_key', None) or getattr(attr, 'key', None)
-                        attr_value = getattr(attr, '_value', None) or getattr(attr, 'value', None)
-                        
-                        if not attr_key or attr_value is None:
-                            continue
-                        
-                        # Check if this attribute maps to any configured Event field
-                        mapped = False
-                        matching_field = next(
-                            ((event_field_name, source_key) for event_field_name, source_key in event_fields_config.items() 
-                             if source_key and attr_key == source_key),
-                            None
-                        )
-                        
-                        if matching_field:
-                            mapped = True
-                            event_field_name, source_key = matching_field
-                            # Cast value according to Event schema eg. timestamps, floats etc.
-                            attr_value = _cast_value_by_schema(event_field_name, attr_value, eventConfig)
-                            event_field_values[event_field_name] = attr_value
-                        
-                        # If not mapped to a field, store in extra attributes
-                        if not mapped:
-                            if eventConfig.attributes_mapping and ("*" in eventConfig.attributes_mapping or attr_key in eventConfig.attributes_mapping):
-                                extra_attributes[attr_key] = str(attr_value)
-            
-            # Handle computed fields (those with None as source_key)
-            for event_field_name, source_key in event_fields_config.items():
-                if eventConfig.is_computed_field(event_field_name):
-                    # Handle position specially
-                    if event_field_name == 'position':
-                        event_field_values[event_field_name] = position
-                    # Other computed fields get None by default
-                    elif event_field_name not in event_field_values:
-                        event_field_values[event_field_name] = None
-            
-            # Add extra attributes to the event
-            event_field_values['attributes'] = extra_attributes
-            
-            # Create Event object dynamically using from_dict
-            event_obj = Event.from_dict(event_field_values)
-                
-            events.append(event_obj)
-        
-        return events
+    # --- Schema introspection helpers ---
+    XES_ATTR_TYPES = ('string', 'date', 'int', 'float', 'boolean')
 
-    # Process traces in parallel and flatten to events
-    events_dict_rdd = traces_df.rdd.flatMap(process_trace).map(lambda event: event.to_dict())
-    events_df = get_spark_session().createDataFrame(events_dict_rdd, schema=Event.get_schema())
+    def _available_attr_types(schema):
+        """Return XES attribute-type column names present in the given schema."""
+        return [f.name for f in schema.fields if f.name in XES_ATTR_TYPES]
 
-    return events_df
+    def _value_data_type(schema, attr_type_name):
+        """Resolve the Spark data type of `_value` inside an attribute-type column."""
+        field = schema[attr_type_name]
+        elem = field.dataType.elementType if isinstance(field.dataType, ArrayType) else field.dataType
+        for f in elem.fields:
+            if f.name == '_value':
+                return f.dataType
+        return StringType()
+
+    def _extract_as_string(arr_col, key, value_type):
+        """Extract `_value` from array<{_key, _value}> where `_key == key`.
+        Executes entirely in the JVM via Spark's higher-order `filter` function."""
+        filtered = F.filter(arr_col, lambda x: x["_key"] == F.lit(key))
+        raw = F.when(F.size(filtered) > 0, F.element_at(filtered, 1)["_value"])
+        if isinstance(value_type, TimestampType):
+            return F.date_format(raw, "yyyy-MM-dd'T'HH:mm:ss.SSSXXX")
+        return raw.cast("string")
+
+    def _normalize_to_kv(arr_col, value_type):
+        """Transform an attribute array to array<struct<key:string, value:string>>."""
+        if isinstance(value_type, TimestampType):
+            return F.transform(arr_col, lambda x: F.struct(
+                x["_key"].alias("key"),
+                F.date_format(x["_value"], "yyyy-MM-dd'T'HH:mm:ss.SSSXXX").alias("value")
+            ))
+        return F.transform(arr_col, lambda x: F.struct(
+            x["_key"].alias("key"),
+            x["_value"].cast("string").alias("value")
+        ))
+
+    # --- Ensure columns are ArrayType (spark-xml may infer structs for single items) ---
+    trace_schema = traces_df.schema
+    trace_attr_types = _available_attr_types(trace_schema)
+
+    for at in trace_attr_types:
+        if not isinstance(trace_schema[at].dataType, ArrayType):
+            traces_df = traces_df.withColumn(at, F.array(F.col(at)))
+
+    if "event" in [f.name for f in trace_schema.fields]:
+        if not isinstance(trace_schema["event"].dataType, ArrayType):
+            traces_df = traces_df.withColumn("event", F.array(F.col("event")))
+
+    # --- Extract trace-level fields as top-level columns ---
+    trace_fields = eventConfig.get_trace_fields()  # e.g. {'trace_id': 'concept:name'}
+    for field_name, source_key in trace_fields.items():
+        if source_key:
+            extractions = [
+                _extract_as_string(F.col(at), source_key, _value_data_type(trace_schema, at))
+                for at in trace_attr_types
+            ]
+            traces_df = traces_df.withColumn(
+                f"__trace_{field_name}",
+                F.coalesce(*extractions) if extractions else F.lit(None).cast("string")
+            )
+
+    # --- Explode events with position index (posexplode is 0-based, matching original enumerate) ---
+    trace_cols = [F.col(f"__trace_{f}") for f in trace_fields if trace_fields[f]]
+    events_df = traces_df.select(*trace_cols, F.posexplode("event").alias("position", "evt"))
+
+    # --- Introspect the event-level nested schema ---
+    event_col_type = traces_df.schema["event"].dataType
+    event_struct = event_col_type.elementType if isinstance(event_col_type, ArrayType) else event_col_type
+    event_attr_types = _available_attr_types(event_struct)
+
+    # Flatten event attribute sub-arrays into top-level columns (ensures ArrayType)
+    for at in event_attr_types:
+        evt_field = event_struct[at]
+        if not isinstance(evt_field.dataType, ArrayType):
+            events_df = events_df.withColumn(f"__evt_{at}", F.array(F.col(f"evt.{at}")))
+        else:
+            events_df = events_df.withColumn(f"__evt_{at}", F.col(f"evt.{at}"))
+
+    # --- Extract event-level fields ---
+    event_fields = eventConfig.get_event_fields()  # e.g. {'activity': 'concept:name', 'position': None, ...}
+    for field_name, source_key in event_fields.items():
+        if source_key:
+            extractions = [
+                _extract_as_string(F.col(f"__evt_{at}"), source_key, _value_data_type(event_struct, at))
+                for at in event_attr_types
+            ]
+            events_df = events_df.withColumn(
+                field_name,
+                F.coalesce(*extractions) if extractions else F.lit(None).cast("string")
+            )
+        elif eventConfig.is_computed_field(field_name):
+            if field_name != 'position':  # position already comes from posexplode
+                events_df = events_df.withColumn(field_name, F.lit(None))
+
+    # Promote trace-level columns to their final names
+    for field_name, source_key in trace_fields.items():
+        if source_key:
+            events_df = events_df.withColumnRenamed(f"__trace_{field_name}", field_name)
+
+    # --- Build the attributes map column ---
+    mapped_source_keys = [v for v in eventConfig.field_mappings.values() if v is not None]
+    empty_kv_array = F.from_json(F.lit("[]"), "array<struct<key:string,value:string>>")
+
+    if eventConfig.attributes_mapping:
+        # Normalise every attribute-type array to a uniform [{key, value}] schema
+        norm_parts = []
+        for at in event_attr_types:
+            vtype = _value_data_type(event_struct, at)
+            norm = F.coalesce(_normalize_to_kv(F.col(f"__evt_{at}"), vtype), empty_kv_array)
+            norm_parts.append(norm)
+
+        if norm_parts:
+            all_attrs = F.concat(*norm_parts) if len(norm_parts) > 1 else norm_parts[0]
+
+            if "*" in eventConfig.attributes_mapping:
+                # Keep all attributes whose key is NOT already mapped to a named field
+                filtered_attrs = F.filter(all_attrs, lambda x: ~x["key"].isin(mapped_source_keys))
+            else:
+                keep_keys = list(set(eventConfig.attributes_mapping) - set(mapped_source_keys))
+                filtered_attrs = F.filter(all_attrs, lambda x: x["key"].isin(keep_keys))
+
+            attributes_col = F.when(
+                F.size(filtered_attrs) > 0, F.map_from_entries(filtered_attrs)
+            ).otherwise(F.map_from_entries(empty_kv_array))
+        else:
+            attributes_col = F.map_from_entries(empty_kv_array)
+    else:
+        attributes_col = F.map_from_entries(empty_kv_array)
+
+    events_df = events_df.withColumn("attributes", attributes_col)
+
+    # --- Timestamp normalisation: replace trailing Z with +00:00 for ISO 8601 ---
+    for field_name in eventConfig.timestamp_fields:
+        if field_name in events_df.columns:
+            events_df = events_df.withColumn(
+                field_name,
+                F.regexp_replace(F.col(field_name), "Z$", "+00:00")
+            )
+
+    # --- Final projection matching Event schema ---
+    schema = Event.get_schema()
+    return events_df.select(*[
+        F.col(f.name).cast(f.dataType).alias(f.name) if f.name in events_df.columns
+        else F.lit(None).cast(f.dataType).alias(f.name)
+        for f in schema.fields
+    ])
 
 
 def parse_csv(storage_path: str, spark: SparkSession, system_config: dict) -> DataFrame:
