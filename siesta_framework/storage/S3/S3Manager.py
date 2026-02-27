@@ -11,8 +11,7 @@ from siesta_framework.model.StorageModel import MetaData, hash_str
 from siesta_framework.model.DataModel import Event, EventConfig, Active_Pairs_table_schema, EventPair, count_table_schema
 from siesta_framework.core.config import get_system_config
 import siesta_framework.core.sparkManager as SparkManager
-
-WRITE_FORMAT = "delta"
+from delta.tables import DeltaTable
 
 def _parse_timestamp(ts: str) -> datetime:
     """Parse a timestamp string, accepting both with and without milliseconds."""
@@ -134,27 +133,27 @@ class S3Manager(StorageManager):
 
         # Check if sequence table already exists before creating
         try:
-            self.spark.read.format(WRITE_FORMAT).schema(Event.get_schema()).load(metadata.sequence_table_path)
+            self.spark.read.format("delta").schema(Event.get_schema()).load(metadata.sequence_table_path)
             print(f"S3Manager: Sequence table already exists at {metadata.sequence_table_path}")
         except Exception:
             print(f"S3Manager: Sequence table does not exist, will create new one")
 
             empty_seq_df = self.spark.createDataFrame([], schema=Event.get_schema())
             empty_seq_df.write \
-                .format(WRITE_FORMAT) \
+                .format("delta") \
                 .mode("overwrite") \
                 .save(metadata.sequence_table_path)
         
         # Check if Last Checked table already exists before creating
         try:
-            self.spark.read.format(WRITE_FORMAT).load(metadata.active_pairs_table_path)
+            self.spark.read.format("delta").load(metadata.active_pairs_table_path)
             print(f"S3Manager: Last Checked table already exists at {metadata.active_pairs_table_path}")
         except Exception:
             print(f"S3Manager: Last Checked table does not exist, will create new one")
 
             empty_active_pairs_df = self.spark.createDataFrame([], schema=Active_Pairs_table_schema)
             empty_active_pairs_df.write \
-                .format(WRITE_FORMAT) \
+                .format("delta") \
                 .partitionBy("trace_id") \
                 .mode("overwrite") \
                 .save(metadata.active_pairs_table_path)
@@ -162,29 +161,29 @@ class S3Manager(StorageManager):
 
         # Check if Pairs index table already exists before creating
         try:
-            self.spark.read.format(WRITE_FORMAT).load(metadata.pairs_index_table_path)
+            self.spark.read.format("delta").load(metadata.pairs_index_table_path)
             print(f"S3Manager: Pairs Index table already exists at {metadata.pairs_index_table_path}")
         except Exception:
             print(f"S3Manager: Pairs Index table does not exist, will create new one")
 
             empty_active_pairs_df = self.spark.createDataFrame([], schema=EventPair.get_schema())
             empty_active_pairs_df.write \
-                .format(WRITE_FORMAT) \
-                .partitionBy("source") \
+                .format("delta") \
+                .partitionBy("source", "target") \
                 .mode("overwrite") \
                 .save(metadata.pairs_index_table_path)
         
 
         # Check if Count table already exists before creating
         try:
-            self.spark.read.format(WRITE_FORMAT).load(metadata.count_table_path)
+            self.spark.read.format("delta").load(metadata.count_table_path)
             print(f"S3Manager: Count table already exists at {metadata.count_table_path}")
         except Exception:
             print(f"S3Manager: Count table does not exist, will create new one")
 
             empty_active_pairs_df = self.spark.createDataFrame([], schema=count_table_schema)
             empty_active_pairs_df.write \
-                .format(WRITE_FORMAT) \
+                .format("delta") \
                 .partitionBy("source") \
                 .mode("overwrite") \
                 .save(metadata.count_table_path)
@@ -289,11 +288,7 @@ class S3Manager(StorageManager):
     
     def get_checkpoint_location(self, metadata: MetaData, checkpoint_table: str = "example_table") -> str:
         """
-        Get the S3 path for streaming checkpoint location.events_df.write \
-                .format(WRITE_FORMAT) \
-                .mode("append") \
-                .option("mergeSchema", "true") \
-                .save(metadata.sequence_table_path)
+        Get the S3 path for streaming checkpoint location.
         
         Args:
             log_name: Name of the log
@@ -407,7 +402,7 @@ class S3Manager(StorageManager):
             metadata: MetaData object containing the metadata
         """
         try:
-            new_pairs.repartition(F.col("source")).write.partitionBy("target").format(WRITE_FORMAT).mode("append").parquet(metadata.pairs_index_table_path)
+            new_pairs.write.partitionBy("source", "target").format("delta").mode("append").save(metadata.pairs_index_table_path)
             
             # Update metadata
             # metadata.pair_count = new_pairs.count()
@@ -444,7 +439,7 @@ class S3Manager(StorageManager):
         metadata.approx_unique_activities = set()
         try:
             # Try to read the Delta table directly - if it doesn't exist, an exception will be raised
-            metadata_df = self.spark.read.format(WRITE_FORMAT).load(metadata.metadata_table_path)
+            metadata_df = self.spark.read.format("delta").load(metadata.metadata_table_path)
             
             row = metadata_df.head(1)
             if row:
@@ -478,7 +473,7 @@ class S3Manager(StorageManager):
         metadata_df = self.spark.createDataFrame([metadata_dict], schema=MetaData.get_schema())
 
         metadata_df.write \
-            .format(WRITE_FORMAT) \
+            .format("delta") \
             .mode("overwrite") \
             .option("mergeSchema", "true") \
             .save(metadata.metadata_table_path)
@@ -500,25 +495,23 @@ class S3Manager(StorageManager):
             metadata: MetaData object containing the metadata
         """        
         try:
+            delta_table = DeltaTable.forPath(self.spark, metadata.sequence_table_path)
+            delta_table.alias("existing").merge(
+                events_df.alias("new"),
+                "existing.trace_id = new.trace_id "
+                "AND existing.activity = new.activity "
+                "AND existing.position = new.position"
+            ).whenMatchedUpdateAll() \
+             .whenNotMatchedInsertAll() \
+             .execute()
 
-            events_df.write \
-                .format(WRITE_FORMAT) \
-                .mode("append") \
-                .save(metadata.sequence_table_path)
-            
-            # events_df.write.partitionBy("trace_id").mode("append").parquet(metadata.sequence_table_path)
-
-            # events_count = events_df.count()
-            # print(f"S3Manager: Wrote {events_count} new events to {metadata.sequence_table_path}.")
             print(f"S3 Manager wrote to sequence table")
 
             # Update metadata object
-            # metadata.trace_count = self.read_sequence_table(metadata).select("trace_id").distinct().count()
-            # metadata.event_count += events_count
             metadata.first_timestamp = datetime(2026, 11, 10, 5)
             metadata.last_timestamp = datetime(2026, 11, 10, 5)
-            # metadata.first_timestamp = metadata.first_timestamp if metadata.first_timestamp is not None else _parse_timestamp(events_df.agg({"start_timestamp": "min"}).collect()[0][0])
-            # metadata.last_timestamp = _parse_timestamp(events_df.agg({"start_timestamp": "max"}).collect()[0][0])
+            metadata.event_count += events_df.count()
+            metadata.trace_count += events_df.select(F.col("position") == 0).count()
         except Exception as e:
             print(f"S3Manager: Error writing on {metadata.sequence_table_path}: {e}")
             raise
@@ -534,8 +527,7 @@ class S3Manager(StorageManager):
             DataFrame containing Event objects
         """
         try:
-            # df = self.spark.read.format(WRITE_FORMAT).schema(Event.get_schema()).load(metadata.sequence_table_path)
-            df = self.spark.read.format(WRITE_FORMAT).load(metadata.sequence_table_path)
+            df = self.spark.read.format("delta").load(metadata.sequence_table_path)
             return df
         except Exception as e:
             print(f"S3Manager: Error reading from {metadata.sequence_table_path}: {e}")
@@ -556,7 +548,7 @@ class S3Manager(StorageManager):
         """        
         try:
             events_df.write \
-                .format(WRITE_FORMAT) \
+                .format("delta") \
                 .partitionBy("activity") \
                 .mode("append") \
                 .option("mergeSchema", "true") \
@@ -586,7 +578,7 @@ class S3Manager(StorageManager):
         try:
             
             active_pairs.write \
-                .format(WRITE_FORMAT) \
+                .format("delta") \
                 .mode("append") \
                 .option("mergeSchema", "true") \
                 .save(metadata.active_pairs_table_path)
@@ -606,7 +598,7 @@ class S3Manager(StorageManager):
             DataFrame with last timestamps per event type pair per trace
         """
         try:
-            df = self.spark.read.format(WRITE_FORMAT).schema(schema=Active_Pairs_table_schema).parquet(metadata.active_pairs_table_path) # type: ignore
+            df = self.spark.read.format("delta").load(metadata.active_pairs_table_path)
             return df
         except Exception as e:
             print(f"S3Manager: Error reading LastCheckedTable: {e}")
@@ -624,7 +616,7 @@ class S3Manager(StorageManager):
 
         try:
             count_df.write\
-                .format(WRITE_FORMAT)\
+                .format("delta")\
                 .partitionBy("source")\
                 .mode("overwrite")\
                 .option("mergeSchema", "true")\
