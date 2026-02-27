@@ -155,6 +155,10 @@ def build_active_pairs_table(preprocess_config: Dict, metadata: MetaData, batch_
         lookback=lookback
     )
 
+    # Cache pairs_df so the expensive cogroup isn't recomputed for
+    # pairs_index and count_table writes that follow.
+    pairs_df.cache()
+
     storage.write_active_pairs_table(active_pairs_df, metadata)
     return pairs_df, active_pairs_df
 
@@ -197,6 +201,9 @@ def build_active_pairs_index_and_count_streamed(preprocess_config: Dict, metadat
             lookback=lookback
         )
 
+        # Cache pairs_df to avoid recomputing the cogroup for each write.
+        pairs_df.cache()
+
         # Write all three tables that depend on pairs here,
         # since pairs_df only lives inside this foreachBatch scope.
         storage.write_active_pairs_table(active_pairs_df, metadata)
@@ -204,6 +211,8 @@ def build_active_pairs_index_and_count_streamed(preprocess_config: Dict, metadat
 
         count_df = extract_counts(pairs_df)
         storage.write_count_table(count_df=count_df, metadata=metadata)
+
+        pairs_df.unpersist()
 
     job = (
         sequence_stream_df.writeStream

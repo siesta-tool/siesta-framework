@@ -4,7 +4,7 @@ import boto3
 from botocore.exceptions import ClientError
 from fastapi import UploadFile
 from pyspark import RDD
-from pyspark.sql import SparkSession, DataFrame
+from pyspark.sql import SparkSession, DataFrame, functions as F
 from pyspark.sql.streaming import StreamingQuery
 from siesta_framework.core.interfaces import StorageManager
 from siesta_framework.model.StorageModel import MetaData, hash_str
@@ -407,11 +407,11 @@ class S3Manager(StorageManager):
             metadata: MetaData object containing the metadata
         """
         try:
-            new_pairs.write.format(WRITE_FORMAT).partitionBy("source").mode("append").parquet(metadata.pairs_index_table_path)
+            new_pairs.repartition(F.col("source")).write.partitionBy("target").format(WRITE_FORMAT).mode("append").parquet(metadata.pairs_index_table_path)
             
             # Update metadata
-            metadata.pair_count = new_pairs.count()
-            print(f"S3Manager: Wrote {metadata.pair_count} pairs to {metadata.pairs_index_table_path}")
+            # metadata.pair_count = new_pairs.count()
+            print(f"S3Manager: Wrote new pairs to {metadata.pairs_index_table_path}")
         except Exception as e:
             print(f"S3Manager: Error writing IndexTable: {e}")
     
@@ -536,8 +536,6 @@ class S3Manager(StorageManager):
         try:
             # df = self.spark.read.format(WRITE_FORMAT).schema(Event.get_schema()).load(metadata.sequence_table_path)
             df = self.spark.read.format(WRITE_FORMAT).load(metadata.sequence_table_path)
-            # df = self.spark.read.schema(Event.get_schema()).parquet(metadata.sequence_table_path)
-            print(f"S3Manager: Read {df.count()} records from {metadata.sequence_table_path}.")
             return df
         except Exception as e:
             print(f"S3Manager: Error reading from {metadata.sequence_table_path}: {e}")
@@ -589,7 +587,6 @@ class S3Manager(StorageManager):
             
             active_pairs.write \
                 .format(WRITE_FORMAT) \
-                .partitionBy("trace_id") \
                 .mode("append") \
                 .option("mergeSchema", "true") \
                 .save(metadata.active_pairs_table_path)
@@ -610,7 +607,6 @@ class S3Manager(StorageManager):
         """
         try:
             df = self.spark.read.format(WRITE_FORMAT).schema(schema=Active_Pairs_table_schema).parquet(metadata.active_pairs_table_path) # type: ignore
-            print(f"S3Manager: Read {df.count()} records from LastCheckedTable")
             return df
         except Exception as e:
             print(f"S3Manager: Error reading LastCheckedTable: {e}")

@@ -4,11 +4,12 @@ Functions relating to the generation and filtering of valid event pairs
 from collections import defaultdict
 from datetime import timedelta, datetime
 import re
-from pyspark import RDD
+import pandas as pd
 from pyspark.sql import DataFrame
-from typing import Iterable, List, Literal, Optional, Tuple
-from pyspark.sql.functions import count_distinct, col, to_timestamp, unix_timestamp, sum as spark_sum, count, min as spark_min, max as spark_max, pow as spark_pow
-from pyspark.sql.types import StructType, StructField, StringType, TimestampType, IntegerType
+from pyspark.sql.window import Window
+from typing import List, Literal, Optional, Tuple
+from pyspark.sql.functions import count_distinct, col, to_timestamp, unix_timestamp, sum as spark_sum, count, min as spark_min, max as spark_max, pow as spark_pow, row_number, to_json
+from pyspark.sql.types import StructType, StructField, StringType, TimestampType, IntegerType, MapType as SparkMapType
 from siesta_framework.model.DataModel import Active_Pairs_table_schema, EventPair
 import logging
 from siesta_framework.core.sparkManager import get_spark_session
@@ -50,7 +51,9 @@ type Trace = Tuple[Trace_ID, Tuple[Event]]
 
 def extract_active_and_all_pairs(updated_sequence_table_DF: DataFrame, previous_active_pairs: DataFrame | None, lookback: str) -> Tuple[DataFrame, DataFrame]:
     """
-    Extracts the event type pairs from a DF that contains the complete traces. 
+    Extracts the event type pairs from a DF that contains the complete traces.
+    Uses Spark's cogroup + applyInPandas for efficient distributed processing
+    with Apache Arrow serialization, avoiding slow RDD operations.
 
     If there are previously indexed pairs, this process will only calculate the new event type 
     pairs by utilizing the information stored in the LastChecked table. Additionally, 
@@ -67,116 +70,109 @@ def extract_active_and_all_pairs(updated_sequence_table_DF: DataFrame, previous_
         previous event type pair.
 
     Args:
-        activity_index_DF: The DataFrame that contains the complete activity index. activity (str)|trace_id (str)|position (int)|    start_timestamp (ts)|          attributes (json)
-        previous_active_pairs: The loaded values as a DataFrame from the active pairs table (it should be None 
-            if it is the first time that events are indexed in this log database).
+        updated_sequence_table_DF: The DataFrame that contains the complete activity index.
+            activity (str)|trace_id (str)|position (int)|start_timestamp (ts)|attributes (json)
+        previous_active_pairs: The loaded values as a DataFrame from the active pairs table
+            (it should be None if it is the first time that events are indexed in this log database).
         lookback: The parameter that describes the maximum time difference that two 
             events can have in order to create an event type pair.
 
     Returns:
-        A DataFrame with the extracted event type pairs and their corresponding last timestamps per trace.
+        A tuple of (pairs_df, active_pairs_df) where pairs_df contains the extracted
+        event type pairs and active_pairs_df contains the last timestamps per
+        (trace_id, eventA, eventB) for incremental processing.
     """
-    
-
     real_lookback = _parse_lookback(lookback)
-    
-    updated_sequence_table_DF = updated_sequence_table_DF.withColumn("start_timestamp", unix_timestamp(col("start_timestamp"), "yyyy-MM-dd'T'HH:mm:ss"))
-    trace_rdd: RDD[Tuple[Trace_ID, Event]] = updated_sequence_table_DF.rdd.map(lambda row: (
-        row.trace_id,
-        (row.activity, row.start_timestamp, row.position, row.attributes)
-    ))
-    
-    active_pairsRDD = previous_active_pairs.rdd if previous_active_pairs else None
-    
-    
-    if not active_pairsRDD or active_pairsRDD.count() == 0:
-        logger.info("No previously indexed pairs found. Extracting all pairs from scratch.")
-        full = trace_rdd.groupByKey().map(lambda x: _calculate_pairs_stnm(x, None, real_lookback))
-    else:
-        active_pairsRDD_grouped = active_pairsRDD.map(lambda row: (
-            row.trace_id,
-            (row.eventA, row.eventB, row.last_checked_timestamp)
-        )).groupByKey()
-        
-        full = trace_rdd.groupByKey().leftOuterJoin(active_pairsRDD_grouped).map(
-            lambda x: _calculate_pairs_stnm((x[0], x[1][0]), x[1][1], real_lookback)
-        )
-    
-    pairs = full.flatMap(lambda x: x[0])
-    active_pairs = full.flatMap(lambda x: x[1])
+
+    # Convert timestamps to unix epoch seconds
+    updated_sequence_table_DF = updated_sequence_table_DF.withColumn(
+        "start_timestamp", unix_timestamp(col("start_timestamp"), "yyyy-MM-dd'T'HH:mm:ss")
+    )
+
+    # Ensure attributes column is a JSON string for consistent Arrow serialization
+    if "attributes" in updated_sequence_table_DF.columns:
+        attr_type = updated_sequence_table_DF.schema["attributes"].dataType
+        if isinstance(attr_type, SparkMapType):
+            updated_sequence_table_DF = updated_sequence_table_DF.withColumn(
+                "attributes", to_json("attributes")
+            )
+
     spark = get_spark_session()
-    pairs_df = spark.createDataFrame(pairs, schema=pair_index_schema)
-    # logger.info(pairs_df.show())
-    active_pairs_df = spark.createDataFrame(active_pairs, schema=Active_Pairs_table_schema)
-    
-    # logger.info(f"Extracted {pairs_df.count()} event pairs")
-    # logger.info(f"Extracted {active_pairs_df.count()} last checked entries")
+
+    # Use empty DataFrame when no previous active pairs exist
+    if previous_active_pairs is None:
+        previous_active_pairs = spark.createDataFrame([], schema=Active_Pairs_table_schema)
+
+    # Closure captures the lookback value for the pandas UDF
+    lookback_value = real_lookback
+    output_columns = [f.name for f in pair_index_schema.fields]
+
+    def _compute_trace_pairs(events_pdf: pd.DataFrame, active_pdf: pd.DataFrame) -> pd.DataFrame:
+        """Compute event pairs for a single trace using skip-till-next-match policy."""
+        if events_pdf.empty:
+            return pd.DataFrame(columns=output_columns)
+
+        trace_id = events_pdf["trace_id"].iloc[0]
+
+        # Build last-checked lookup from previous active pairs
+        last_map = {}
+        if not active_pdf.empty:
+            for _, r in active_pdf.iterrows():
+                last_map[(r["eventA"], r["eventB"])] = r["last_checked_timestamp"]
+
+        # Group events by activity type, sorted by position for correct matching
+        activity_groups = {}
+        for activity, grp in events_pdf.groupby("activity", sort=False):
+            sorted_grp = grp.sort_values("position")
+            activity_groups[activity] = list(zip(
+                sorted_grp["start_timestamp"], sorted_grp["position"], sorted_grp["attributes"]
+            ))
+
+        # Generate all event type combinations and compute pairs
+        all_types = list(activity_groups.keys())
+        combinations = _findCombinations(all_types)
+
+        results = []
+        for key1, key2 in combinations:
+            src = activity_groups.get(key1)
+            tgt = activity_groups.get(key2)
+            if not src or not tgt:
+                continue
+            last_ts = last_map.get((key1, key2))
+            pairs = createTuples(key1, key2, src, tgt, lookback_value, last_ts, trace_id)
+            results.extend(pairs)
+
+        if not results:
+            return pd.DataFrame(columns=output_columns).astype(str)
+        return pd.DataFrame(results, columns=output_columns).astype(str)
+
+    # Distributed pair computation using cogroup + applyInPandas (Arrow serialization)
+    pairs_df = (
+        updated_sequence_table_DF.groupBy("trace_id")
+        .cogroup(previous_active_pairs.groupBy("trace_id"))
+        .applyInPandas(_compute_trace_pairs, schema=pair_index_schema)
+    )
+
+    # Derive active pairs from computed pairs using native Spark window functions
+    # Active pair = last matched pair per (trace_id, source, target) group
+    w = Window.partitionBy("trace_id", "source", "target").orderBy(
+        col("source_position").cast("int").desc()
+    )
+    active_pairs_df = (
+        pairs_df
+        .withColumn("_rn", row_number().over(w))
+        .filter(col("_rn") == 1)
+        .select(
+            col("trace_id"),
+            col("source").alias("eventA"),
+            col("target").alias("eventB"),
+            col("target_timestamp").cast("integer").alias("last_checked_timestamp")
+        )
+    )
 
     return pairs_df, active_pairs_df
 
-def _calculate_pairs_stnm(activity_index: Tuple[Trace_ID, Iterable[Event]], last: Optional[Iterable[Tuple[str, str, int]]] | None, lookback: Tuple[int, LookbackType]) -> Tuple[List[Tuple], List[Tuple]]:
-    """
-    Extract the event type pairs from the activity index.
 
-    Args:
-        activity_index: The complete activity index.
-        last: The list with all the last timestamps that correspond to this event.
-        lookback: The parameter that describes the maximum time difference between 
-            two events in a pair.
-
-    Returns:
-        tuple: A tuple where the first element is the extracted event type pairs 
-            and the second element is the last timestamps for each event type.
-    """
-    trace_id: Trace_ID = activity_index[0]
-    events: Iterable[Event] = activity_index[1]
-    
-    # Group events by event_name
-    activity_index_map = defaultdict(list)
-    for event_name, timestamp, position, attributes in events:
-        activity_index_map[event_name].append((timestamp, position, attributes))
-    
-    # Build lastMap from active_pairs
-    last_map = {}
-    if last:
-        for eventA, eventB, timestamp in last:
-            last_map[(eventA, eventB)] = timestamp
-    
-    # Get all unique event types
-    all_events = list(activity_index_map.keys())
-    
-    # Get all combinations
-    combinations = _findCombinations(all_events)
-    
-    results = []
-    new_active_pairs = []
-    
-    for key1, key2 in combinations:
-        ts1 = activity_index_map.get(key1, [])
-        ts2 = activity_index_map.get(key2, [])
-        
-        if not ts1 or not ts2:
-            continue
-        
-        last_checked_ts = last_map.get((key1, key2), None)
-        
-        # Detect all occurrences of this event type pair
-        nres = createTuples(key1, key2, ts1, ts2, lookback, last_checked_ts, trace_id)
-        
-        # If there are any, append them and keep the last timestamp
-        if nres:
-            new_active_pairs.append(nres[-1])
-            results.extend(nres)
-    
-    # Convert to last_checked format: (eventA, eventB, trace_id, timestamp)
-    active_pairs_list = [
-        (x[2], x[0], x[1], x[4])  # trace_id, eventA, eventB, timestampB 
-        for x in new_active_pairs
-    ]
-    
-    return results, active_pairs_list
-
-    
 def createTuples(
     key1: str, 
     key2: str, 
