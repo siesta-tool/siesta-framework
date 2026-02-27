@@ -564,9 +564,9 @@ class S3Manager(StorageManager):
                 .option("mergeSchema", "true") \
                 .save(metadata.activity_index_table_path)
             
-            unique_activities = events_df.select("activity").distinct().rdd.map(lambda row: hash_str(row.activity)).collect()
-            globally_uninque_activities = set(unique_activities) - metadata.approx_unique_activities
-            print(f"S3Manager: Wrote {len(globally_uninque_activities)} new activities to {metadata.activity_index_table_path}.")
+            # unique_activities = events_df.select("activity").distinct().rdd.map(lambda row: hash_str(row.activity)).collect()
+            # globally_uninque_activities = set(unique_activities) - metadata.approx_unique_activities
+            # print(f"S3Manager: Wrote {len(globally_uninque_activities)} new activities to {metadata.activity_index_table_path}.")
 
             # Update metadata object
             # metadata.approx_unique_activities.update(globally_uninque_activities)            
