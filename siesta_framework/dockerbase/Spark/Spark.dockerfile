@@ -1,4 +1,4 @@
-FROM public.ecr.aws/bitnami/spark:4.0.0 AS spark-aws
+FROM public.ecr.aws/bitnami/spark:4.0.1 AS spark-aws
 
 USER root
 
@@ -42,10 +42,12 @@ RUN ln -sf /opt/bitnami/python/bin/python3 /usr/bin/python3
 RUN /opt/bitnami/python/bin/pip install --no-cache-dir \
     boto3>=1.26.0 \
     kafka-python>=2.0.0 \
-    pyspark>=3.5.0 \
+    pyspark>=4.0.1 \
     python-multipart==0.0.22 \
     fastapi[standard]==0.128 \
-    xxhash==3.6.0
+    xxhash==3.6.0 \
+    pandas \
+    pyarrow
 
 ENV SPARK_CONF_DIR=/opt/bitnami/spark/conf
 RUN echo "spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension" >> $SPARK_CONF_DIR/spark-defaults.conf && \

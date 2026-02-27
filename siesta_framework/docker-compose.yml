@@ -4,7 +4,7 @@ networks:
 services:
   spark-master:
     container_name: spark-master
-    image: siesta/spark:4.0.0
+    image: siesta/spark:4.0.1
     build:
       context: dockerbase/Spark
       dockerfile: Spark.dockerfile
@@ -38,7 +38,7 @@ services:
 
   spark-worker:
     container_name: spark-worker
-    image: siesta/spark:4.0.0
+    image: siesta/spark:4.0.1
     build: 
       context: dockerbase/Spark
       dockerfile: Spark.dockerfile
