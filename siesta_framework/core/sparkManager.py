@@ -39,10 +39,10 @@ def startup(config: Dict[str, Any] = {}) -> None:
                 Falls back to environment variables or default if config is not provided.
     """
 
-    spark_master_url = config.get("spark_master", os.getenv("SPARK_MASTER", "local[*]"))
+    spark_master_url = config.get("spark_master", os.getenv("SPARK_MASTER", "spark://spark-master:7077"))
     app_name = config.get("spark_app_name", "SiestaFramework")
-    driver_memory = config.get("spark_driver_memory", os.getenv("SPARK_DRIVER_MEMORY", "4g"))
-    executor_memory = config.get("spark_executor_memory", os.getenv("SPARK_EXECUTOR_MEMORY", "4g"))
+    driver_memory = config.get("spark_driver_memory", os.getenv("SPARK_DRIVER_MEMORY", "8g"))
+    executor_memory = config.get("spark_executor_memory", os.getenv("SPARK_EXECUTOR_MEMORY", "8g"))
     
     global spark_session 
     try:

@@ -238,8 +238,8 @@ class Trace:
 
 Active_Pairs_table_schema = StructType([
             StructField("trace_id", StringType(), True),
-            StructField("eventA", StringType(), False),
-            StructField("eventB", StringType(), False),
+            StructField("source", StringType(), False),
+            StructField("target", StringType(), False),
             StructField("last_checked_timestamp", IntegerType(), False)
 ])
 
