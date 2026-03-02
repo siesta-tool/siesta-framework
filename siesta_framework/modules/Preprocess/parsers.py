@@ -189,7 +189,20 @@ def parse_xml(storage_path: str, spark: SparkSession, preprocess_config: dict) -
     cur_trace_vals: dict = {}  # trace-level field values
     cur_position = 0
 
-    for action, elem in etree.iterparse(local_path, events=('start', 'end'), tag=('trace', 'event')):
+
+    # Bypassing namespace for lxml - This may be jank
+    def iter_no_ns(path):
+        for event, elem in etree.iterparse(path, events=('start', 'end')):
+            # This is the "Face Value" trick: Remove the namespace prefix from the tag
+            if '}' in elem.tag:
+                elem.tag = elem.tag.split('}', 1)[1] 
+            yield event, elem
+
+    # --- Streaming parse ---
+    context = iter_no_ns(local_path)
+
+    for action, elem in context:
+        
         if action == 'start' and elem.tag == 'trace':
             cur_trace_vals = {}
             cur_position = 0
