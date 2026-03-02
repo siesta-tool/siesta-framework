@@ -8,7 +8,7 @@ from pyspark.sql import SparkSession, DataFrame, functions as F
 from pyspark.sql.streaming import StreamingQuery
 from siesta_framework.core.interfaces import StorageManager
 from siesta_framework.model.StorageModel import MetaData, hash_str
-from siesta_framework.model.DataModel import Event, EventConfig, Active_Pairs_table_schema, EventPair, count_table_schema
+from siesta_framework.model.DataModel import Event, EventConfig, Active_Pairs_table_schema, EventPair, count_table_schema, Trace_metadata_table_schema
 from siesta_framework.core.config import get_system_config
 import siesta_framework.core.sparkManager as SparkManager
 from delta.tables import DeltaTable
@@ -143,6 +143,20 @@ class S3Manager(StorageManager):
                 .format("delta") \
                 .mode("overwrite") \
                 .save(metadata.sequence_table_path)
+        
+        # Check if the trace metadata table exists before creating
+        try:
+            self.spark.read.format("delta").load(metadata.trace_metadata_table_path)
+            logger.info(f"S3Manager: Trace Metadata table already exists at {metadata.trace_metadata_table_path}")
+        except Exception:
+            logger.info(f"S3Manager: Trace Metadata table does not exist, will create new one")
+
+            empty_trace_mtd_df = self.spark.createDataFrame([], schema=Trace_metadata_table_schema)
+            empty_trace_mtd_df.write \
+                .format("delta") \
+                .mode("overwrite") \
+                .save(metadata.trace_metadata_table_path)
+
         
         # Check if Last Checked table already exists before creating
         try:
@@ -532,7 +546,34 @@ class S3Manager(StorageManager):
         except Exception as e:
             logger.info(f"S3Manager: Error reading from {metadata.sequence_table_path}: {e}")
             return self.spark.createDataFrame([], schema=Event.get_schema())
-        
+    
+    ####################################################
+    ############## Trace Metadata Methods ##############
+    ####################################################
+
+    def read_trace_metadata_table(self, metadata: Any) -> DataFrame:
+        """
+        Read the trace metadata table
+        """
+        try:
+            df = self.spark.read.format("delta").load(metadata.trace_metadata_table_path)
+            return df
+        except Exception as e:
+            logger.info(f"S3Manager: Error reading from {metadata.trace_metadata_table_path}: {e}")
+            return self.spark.createDataFrame([], schema=Trace_metadata_table_schema)
+    
+    def write_trace_metadata_table(self, trace_metadata_df: DataFrame, metadata: Any) -> None:
+        """
+        Write the Trace metadata table to the DB
+        """
+        try:
+            trace_metadata_df.write \
+                .format("delta") \
+                .mode("overwrite") \
+                .save(metadata.trace_metadata_table_path)  
+        except Exception as e:
+            logger.info(f"S3Manager: Error writing on {metadata.trace_metadata_table_path}: {e}")
+            raise
 
 
     ###########################################
@@ -609,9 +650,13 @@ class S3Manager(StorageManager):
     #################################################
 
     def read_count_table(self, metadata: MetaData) -> DataFrame:
-        #TODO
-        return super().read_count_table(metadata)
-    
+        try:
+            df = self.spark.read.format("delta").load(metadata.count_table_path)
+            return df
+        except Exception as e:
+            logger.info(f"S3Manager: Error reading Count table: {e}")
+            return self.spark.createDataFrame([], schema=count_table_schema)
+
     def write_count_table(self, count_df:DataFrame, metadata:MetaData) -> None:
 
         try:

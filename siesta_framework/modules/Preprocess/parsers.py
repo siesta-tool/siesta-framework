@@ -13,10 +13,29 @@ import os
 import logging
 from pyspark.sql.window import Window
 from pyspark.sql.functions import row_number, col
+from delta.tables import DeltaTable
 
 from siesta_framework.model.StorageModel import MetaData
 
+def updatePositions(eventsDF: DataFrame, metadata: MetaData):
 
+    storage_manager = get_storage_manager()
+
+    trace_metadata_table = storage_manager.read_trace_metadata_table(metadata)
+    updated_events_df = eventsDF\
+        .join(trace_metadata_table, on="trace_id", how="left")\
+        .withColumn("position", F.col("position") + F.coalesce(F.col("max_pos"), F.lit(0)))\
+        .drop("max_pos")
+    updates_to_apply = updated_events_df.groupBy("trace_id").agg(F.max("position").alias("max_pos"))
+
+    updated_metadata_table = trace_metadata_table\
+        .join(updates_to_apply, on="trace_id", how="outer")\
+        .select("trace_id",F.coalesce(updates_to_apply["max_pos"], trace_metadata_table["max_pos"])\
+        .alias("max_pos"))
+    
+    storage_manager.write_trace_metadata_table(updated_metadata_table, metadata)
+
+    return updated_events_df
     
 def process_events_batch(preprocess_config: Dict, batch_df, batch_id=None, metadata: MetaData = None) -> DataFrame | None:
     """
@@ -30,7 +49,9 @@ def process_events_batch(preprocess_config: Dict, batch_df, batch_id=None, metad
     try:
         event_config = EventConfig.from_preprocess_config(preprocess_config, "json")
         events_df = _parse_rows(event_config, batch_df)
-        
+
+        events_df = updatePositions(events_df, metadata)
+
         get_storage_manager().write_sequence_table(events_df, metadata)
         # return events_df
     except Exception as e:
@@ -126,6 +147,9 @@ def process_event_log(preprocess_config: dict, metadata: MetaData) -> DataFrame:
         events_df = parse_csv(log_path, spark, preprocess_config)
     else:
         raise ValueError(f"Unsupported log format: {log_format}")
+    
+    events_df = updatePositions(events_df, metadata)
+
     storage.write_sequence_table(events_df, metadata)
     return events_df
 
@@ -410,12 +434,15 @@ def _parse_rows(config: EventConfig, df: DataFrame) -> DataFrame:
     else:
         result_df = result_df.withColumn("attributes", _EMPTY_MAP)
 
-    # Final projection matching Event schema
-    return result_df.select(*[
+    # read_trace_metadata_table
+    final_projection_df = result_df.select(*[
         F.col(f.name).cast(f.dataType).alias(f.name) if f.name in result_df.columns
         else F.lit(None).cast(f.dataType).alias(f.name)
         for f in schema.fields
     ])
+
+    # Final projection matching Event schema
+    return final_projection_df
 
 
 def upload_log_file_object(preprocess_config: dict, file: Any, destination_path: str) -> str:

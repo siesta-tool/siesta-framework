@@ -252,3 +252,8 @@ count_table_schema = StructType([
     StructField("max_duration", FloatType(), False),
     StructField("sum_squared_duration", DoubleType(), False),
 ])
+
+Trace_metadata_table_schema = StructType([
+    StructField("trace_id", StringType(), False),
+    StructField("max_pos", IntegerType(), True)
+])
