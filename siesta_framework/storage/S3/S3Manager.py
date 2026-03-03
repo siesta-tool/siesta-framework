@@ -133,7 +133,7 @@ class S3Manager(StorageManager):
 
         # Check if sequence table already exists before creating
         try:
-            self.spark.read.format("delta").schema(Event.get_schema()).load(metadata.sequence_table_path)
+            self.spark.read.format("delta").load(metadata.sequence_table_path)
             logger.info(f"S3Manager: Sequence table already exists at {metadata.sequence_table_path}")
         except Exception:
             logger.info(f"S3Manager: Sequence table does not exist, will create new one")
