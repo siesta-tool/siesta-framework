@@ -139,6 +139,9 @@ class Preprocessor(SiestaModule):
 
             timed(build_count_table, "Preprocess.", self.preprocess_config, self.metadata, pairs_df)
 
+            # Release the memory occupied by pairs_df now it's not needed
+            pairs_df.unpersist()
+
             # In CLI mode, we want to keep streaming jobs alive until termination
             if caller == "cli" and self.preprocess_config.get("enable_streaming", False):
                 get_spark_session().streams.awaitAnyTermination()

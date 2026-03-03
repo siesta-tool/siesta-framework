@@ -335,7 +335,20 @@ class StorageManager(ABC):
         """
         pass
 
+   
+    def read_trace_metadata_table(self, metadata: Any) -> DataFrame:
+        """
+        Read the trace metadata table
+        """
+    
     @abstractmethod
+    def write_trace_metadata_table(self, trace_metadata_df: DataFrame, metadata: Any) -> None:
+        """
+        Write the Trace metadata table to the DB
+        """
+    
+  ######################################################################################
+   @abstractmethod
     def read_existential_constraints(self, metadata: MetaData) -> DataFrame:
         """
         Read existing existential constraints from S3.

@@ -238,8 +238,8 @@ class Trace:
 
 Active_Pairs_table_schema = StructType([
             StructField("trace_id", StringType(), True),
-            StructField("eventA", StringType(), False),
-            StructField("eventB", StringType(), False),
+            StructField("source", StringType(), False),
+            StructField("target", StringType(), False),
             StructField("last_checked_timestamp", IntegerType(), False)
 ])
 
@@ -251,4 +251,9 @@ count_table_schema = StructType([
     StructField("min_duration", FloatType(), False),
     StructField("max_duration", FloatType(), False),
     StructField("sum_squared_duration", DoubleType(), False),
+])
+
+Trace_metadata_table_schema = StructType([
+    StructField("trace_id", StringType(), False),
+    StructField("max_pos", IntegerType(), True)
 ])

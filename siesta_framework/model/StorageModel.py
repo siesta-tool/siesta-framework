@@ -40,6 +40,9 @@ class MetaData:
     def s3_active_pairs_table(self) -> str:
         return f"s3a://{self.storage_namespace}/{self.log_name}/active_pairs_table"
     @property
+    def s3_trace_metadata_table(self) -> str:
+        return f"s3a://{self.storage_namespace}/{self.log_name}/trace_metadata_table"
+    @property
     def s3_mining(self) -> str:
         return f"s3a://{self.storage_namespace}/{self.log_name}/declare_constraints/"
     @property
@@ -72,8 +75,14 @@ class MetaData:
     def count_table_path(self) -> str:
         return self.s3_count_table if self.storage_type == "s3" else ""
     @property
-    def last_checked_table_path(self) -> str:
-        return self.s3_last_checked_table if self.storage_type == "s3" else ""
+    def active_pairs_table_path(self) -> str:
+        return self.s3_active_pairs_table if self.storage_type == "s3" else ""
+    @property
+    def trace_metadata_table_path(self) -> str:
+        return self.s3_trace_metadata_table if self.storage_type == "s3" else ""
+
+########################################################
+
     @property
     def mining_path(self) -> str:
         return self.s3_mining if self.storage_type == "s3" else ""
@@ -110,6 +119,7 @@ class MetaData:
     @property
     def unordered_constraints_path(self) -> str:
         return self.s3_mining + "unordered.parquet" if self.storage_type == "s3" else ""
+
 
     def __init__(self, storage_namespace: str = "siesta", storage_type: str = "s3", log_name: str = "default_log"):
         self.storage_namespace = storage_namespace
