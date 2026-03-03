@@ -1,9 +1,10 @@
 {
-  "log_name": "example_log",
-  "log_path": "datasets/test_nopos.csv",
+  "log_name": "BPI2017",
+  "log_path": "datasets/BPI Challenge 2017.xes",
   "storage_namespace": "siesta",
   "overwrite_data": false,
-  "enable_streaming": true,
+  "enable_streaming": false,
+  "lookback":"7d",
   "kafka_topic": "example_log",
   "field_mappings": {
     "xes": {

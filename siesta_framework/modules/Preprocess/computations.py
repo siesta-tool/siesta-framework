@@ -95,7 +95,7 @@ def extract_active_and_all_pairs(updated_sequence_table_DF: DataFrame, previous_
     else:
         active_pairsRDD_grouped = active_pairsRDD.map(lambda row: (
             row.trace_id,
-            (row.eventA, row.eventB, row.last_checked_timestamp)
+            (row.source, row.target, row.last_checked_timestamp)
         )).groupByKey()
         
         full = trace_rdd.groupByKey().leftOuterJoin(active_pairsRDD_grouped).map(

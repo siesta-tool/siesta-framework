@@ -134,10 +134,14 @@ class Preprocessor(SiestaModule):
             build_active_pairs_index_and_count_streamed(self.preprocess_config, self.metadata, batch_activity_index_df=activity_index_df)
         else:
             pairs_df, _ = timed(build_active_pairs_table, "Preprocess.", self.preprocess_config, self.metadata, batch_activity_index_df=activity_index_df)
+            # pairs_df is cached inside build_active_pairs_table
             
             timed(build_pairs_index_table, "Preprocess.", self.preprocess_config, self.metadata, pairs_df)
 
             timed(build_count_table, "Preprocess.", self.preprocess_config, self.metadata, pairs_df)
+
+            # Release the memory occupied by pairs_df now it's not needed
+            pairs_df.unpersist()
 
             # In CLI mode, we want to keep streaming jobs alive until termination
             if caller == "cli" and self.preprocess_config.get("enable_streaming", False):
