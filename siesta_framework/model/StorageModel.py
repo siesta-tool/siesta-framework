@@ -62,7 +62,7 @@ class MetaData:
         return self.s3_mining + "negation.parquet"
     @property
     def s3_all_activity_pairs(self) -> str:
-        return self.s3_mining + "all_activity_pairs.delta"
+        return self.s3_mining + "all_activity_pairs"
     
     # Table paths for Storage Managers (extend for more compatibility)
     @property
