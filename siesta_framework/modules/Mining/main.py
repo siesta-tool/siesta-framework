@@ -13,6 +13,7 @@ from siesta_framework.modules.Mining.existential import discover_existential
 from siesta_framework.modules.Mining.positional import discover_positional
 from siesta_framework.modules.Mining.ordered import discover_ordered
 from siesta_framework.modules.Mining.unordered import discover_unordered
+from siesta_framework.modules.Mining.negations import discover_negations
 from pyspark.sql import SparkSession, DataFrame, functions as F
 
 import csv
@@ -115,7 +116,7 @@ class Miner(SiestaModule):
         self.mining_config.update(config)
 
         # Ensure that the specified categories are valid before proceeding with mining.
-        valid_categories = {"positional", "existential", "ordered", "unordered", "*"}
+        valid_categories = {"positional", "existential", "ordered", "unordered", "negation", "*"}
         if not set(self.mining_config["categories"]).issubset(valid_categories):
             raise ValueError(f"Invalid categories specified in mining_config: {self.mining_config['categories']}. Valid options are: {valid_categories}.")
 
@@ -150,6 +151,7 @@ class Miner(SiestaModule):
         # Each miner function returns a DataFrame with a common schema, and we union them together 
         # while adding a "category" column to identify the source of each constraint.
         miners = []
+        include_trace_lists = self.mining_config.get("include_trace_lists", False)
         for category in self.mining_config["categories"]:
             if category in ["positional", "*"]:
                 miners.append(("positional", discover_positional))
@@ -159,6 +161,8 @@ class Miner(SiestaModule):
                 miners.append(("ordered", discover_ordered))
             if category in ["unordered", "*"]:
                 miners.append(("unordered", discover_unordered))
+            if category in ["negation", "*"]:
+                miners.append(("negation", lambda e, m: discover_negations(e, m, include_trace_lists)))
         
         constraints_df_list = []
         for category, miner_func in miners:
@@ -186,7 +190,17 @@ class Miner(SiestaModule):
         :param constraints: DataFrame based on ConstraintEntry schema (template, source, target, occurrences, trace_id)
         """
         # Aggregate trace_ids for the same (template, source, target, occurrences) tuples
-        grouped_constraints = constraints_df.groupBy(
+        # Handle pre-aggregated constraints (support-only negation mode) separately
+        has_precomputed = "_support_count" in constraints_df.columns
+
+        if has_precomputed:
+            precomputed = constraints_df.filter(F.col("_support_count").isNotNull())
+            trace_level = constraints_df.filter(F.col("_support_count").isNull()).drop("_support_count")
+        else:
+            trace_level = constraints_df
+            precomputed = None
+
+        grouped_constraints = trace_level.groupBy(
             "category", "template", "source", "target", "occurrences"
         ).agg(
             F.collect_list("trace_id").alias("trace_ids")
@@ -197,6 +211,15 @@ class Miner(SiestaModule):
             "support",
             (F.size(F.col("trace_ids")) / F.lit(trace_count))
         )
+
+        if precomputed is not None:
+            grouped_pre = precomputed.select(
+                F.col("category"), F.col("template"), F.col("source"),
+                F.col("target"), F.col("occurrences"),
+                (F.col("_support_count") / F.lit(trace_count)).alias("support"),
+                F.array().cast("array<string>").alias("trace_ids"),
+            )
+            grouped_constraints = grouped_constraints.unionByName(grouped_pre)
 
         # Prepare a CSV-friendly DataFrame
         select_cols = [

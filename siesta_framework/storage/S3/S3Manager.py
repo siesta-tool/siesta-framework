@@ -533,7 +533,7 @@ class S3Manager(StorageManager):
             raise
 
 
-    def read_sequence_table(self, metadata: MetaData) -> DataFrame:
+    def read_sequence_table(self, metadata: MetaData, filter_out: Any | None = None) -> DataFrame:
         """
         Read data as a DataFrame from the SequenceTable stored in S3.
         
@@ -544,10 +544,14 @@ class S3Manager(StorageManager):
         """
         try:
             df = self.spark.read.format("delta").load(metadata.sequence_table_path)
+            logger.info(f"Read {df.count()} records from {metadata.sequence_table_path}.")
+            if filter_out == "mined" and metadata.last_mined_timestamp:
+                df = df.select("*").where(col("start_timestamp") > lit(metadata.last_mined_timestamp.strftime("%Y-%m-%dT%H:%M:%S")))
             return df
         except Exception as e:
-            logger.info(f"S3Manager: Error reading from {metadata.sequence_table_path}: {e}")
+            logger.info(f"Error reading from {metadata.sequence_table_path}: {e}")
             return self.spark.createDataFrame([], schema=Event.get_schema())
+
     
     ####################################################
     ############## Trace Metadata Methods ##############
@@ -787,3 +791,40 @@ class S3Manager(StorageManager):
         except Exception as e:
             logger.error(f"Error writing unordered constraints to {metadata.unordered_constraints_path}: {e}")
             raise        
+
+    def read_negation_constraints(self, metadata: MetaData) -> DataFrame:
+        try:
+            df = self.spark.read.parquet(metadata.negation_constraints_path)
+            logger.info(f"Read negation constraints from {metadata.negation_constraints_path}.")
+            return df.select("template", "source", "target", "trace_id")
+        except Exception as _:
+            logger.info(f"No existing negation constraints found at {metadata.negation_constraints_path}. Returning empty DataFrame.")
+            return self.spark.createDataFrame([], schema=ConstraintEntry.get_schema()).select("template", "source", "target", "trace_id")
+
+    def write_negation_constraints(self, metadata: MetaData, df: DataFrame) -> None:
+        try:
+            df = self._complete_schema(df, ConstraintEntry.get_schema())
+            df.write.parquet(path=metadata.negation_constraints_path, mode="overwrite")
+            logger.info(f"Wrote negation constraints to {metadata.negation_constraints_path}.")
+        except Exception as e:
+            logger.error(f"Error writing negation constraints to {metadata.negation_constraints_path}: {e}")
+            raise
+
+    def read_all_activity_pairs(self, metadata: MetaData) -> DataFrame:
+        from pyspark.sql.types import StructType, StructField, StringType
+        schema = StructType([StructField("source", StringType()), StructField("target", StringType())])
+        try:
+            df = self.spark.read.format("delta").load(metadata.all_activity_pairs_path)
+            logger.info(f"Read all_activity_pairs from {metadata.all_activity_pairs_path}.")
+            return df
+        except Exception as _:
+            logger.info(f"No existing all_activity_pairs table found. Returning empty DataFrame.")
+            return self.spark.createDataFrame([], schema=schema)
+
+    def write_all_activity_pairs(self, metadata: MetaData, df: DataFrame) -> None:
+        try:
+            df.write.format("delta").mode("overwrite").save(metadata.all_activity_pairs_path)
+            logger.info(f"Wrote all_activity_pairs to {metadata.all_activity_pairs_path}.")
+        except Exception as e:
+            logger.error(f"Error writing all_activity_pairs to {metadata.all_activity_pairs_path}: {e}")
+            raise

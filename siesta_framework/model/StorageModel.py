@@ -57,6 +57,12 @@ class MetaData:
     @property
     def s3_unordered_constraints(self) -> str:
         return self.s3_mining + "unordered.parquet"
+    @property
+    def s3_negation_constraints(self) -> str:
+        return self.s3_mining + "negation.parquet"
+    @property
+    def s3_all_activity_pairs(self) -> str:
+        return self.s3_mining + "all_activity_pairs.delta"
     
     # Table paths for Storage Managers (extend for more compatibility)
     @property
@@ -98,6 +104,12 @@ class MetaData:
     @property
     def unordered_constraints_path(self) -> str:
         return self.s3_mining + "unordered.parquet" if self.storage_type == "s3" else ""
+    @property
+    def negation_constraints_path(self) -> str:
+        return self.s3_negation_constraints if self.storage_type == "s3" else ""
+    @property
+    def all_activity_pairs_path(self) -> str:
+        return self.s3_all_activity_pairs if self.storage_type == "s3" else ""
     @property
     def active_pairs_table_path(self) -> str:
         return self.s3_active_pairs_table if self.storage_type == "s3" else ""

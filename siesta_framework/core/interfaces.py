@@ -348,7 +348,7 @@ class StorageManager(ABC):
         """
     
   ######################################################################################
-   @abstractmethod
+    @abstractmethod
     def read_existential_constraints(self, metadata: MetaData) -> DataFrame:
         """
         Read existing existential constraints from S3.
@@ -369,5 +369,41 @@ class StorageManager(ABC):
             metadata: MetaData object containing the metadata of the log dataset
         Returns:
             DataFrame with columns (template, source, target, trace_id)
+        """
+        pass
+
+    @abstractmethod
+    def read_negation_constraints(self, metadata: MetaData) -> DataFrame:
+        """
+        Read existing negation constraints from storage as flat ConstraintEntry rows.
+
+        Args:
+            metadata: MetaData object containing the metadata of the log dataset
+        Returns:
+            DataFrame with columns (template, source, target, trace_id)
+        """
+        pass
+
+    @abstractmethod
+    def write_negation_constraints(self, metadata: MetaData, df: DataFrame) -> None:
+        """
+        Write negation constraints to storage.
+        """
+        pass
+
+    @abstractmethod
+    def read_all_activity_pairs(self, metadata: MetaData) -> DataFrame:
+        """
+        Read the incrementally maintained table of all activity pairs (source < target).
+
+        Returns:
+            DataFrame with columns (source, target)
+        """
+        pass
+
+    @abstractmethod
+    def write_all_activity_pairs(self, metadata: MetaData, df: DataFrame) -> None:
+        """
+        Overwrite the all-activity-pairs table.
         """
         pass
