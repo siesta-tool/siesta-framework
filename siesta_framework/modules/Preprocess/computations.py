@@ -200,7 +200,7 @@ def createTuples(
     for ea_ts, ea_pos, ea_attr in e_source:
         # Evaluate based on previous and last_checked
         if ((prev is None or ea_ts >= prev) and 
-            (last_checked is None or ea_ts >= last_checked)):
+            (last_checked is None or ea_ts > last_checked)):
             
             stop = False
             while i < len(e_target) and not stop:
