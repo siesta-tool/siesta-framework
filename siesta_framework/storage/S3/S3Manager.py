@@ -168,7 +168,6 @@ class S3Manager(StorageManager):
             empty_active_pairs_df = self.spark.createDataFrame([], schema=Active_Pairs_table_schema)
             empty_active_pairs_df.write \
                 .format("delta") \
-                .partitionBy("trace_id") \
                 .mode("overwrite") \
                 .save(metadata.active_pairs_table_path)
         
@@ -180,8 +179,8 @@ class S3Manager(StorageManager):
         except Exception:
             logger.info(f"S3Manager: Pairs Index table does not exist, will create new one")
 
-            empty_active_pairs_df = self.spark.createDataFrame([], schema=EventPair.get_schema())
-            empty_active_pairs_df.write \
+            empty_index_pairs = self.spark.createDataFrame([], schema=EventPair.get_schema())
+            empty_index_pairs.write \
                 .format("delta") \
                 .partitionBy("source", "target") \
                 .mode("overwrite") \
@@ -195,11 +194,11 @@ class S3Manager(StorageManager):
         except Exception:
             logger.info(f"S3Manager: Count table does not exist, will create new one")
 
-            empty_active_pairs_df = self.spark.createDataFrame([], schema=count_table_schema)
-            empty_active_pairs_df.write \
+            empty_count_df = self.spark.createDataFrame([], schema=count_table_schema)
+            empty_count_df.write \
                 .format("delta") \
-                .partitionBy("source") \
                 .mode("overwrite") \
+                .partitionBy("source") \
                 .save(metadata.count_table_path)
 
         logger.info(f"S3Manager: Database structure initialized at {metadata.count_table_path}")
