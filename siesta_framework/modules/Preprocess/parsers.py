@@ -12,6 +12,8 @@ from datetime import datetime
 import os
 import logging
 from pyspark.sql.window import Window
+
+logger = logging.getLogger("Preprocess.parsers")
 from pyspark.sql.functions import row_number, col
 from delta.tables import DeltaTable
 
@@ -56,7 +58,7 @@ def process_events_batch(preprocess_config: Dict, batch_df, batch_id=None, metad
         # return events_df
     except Exception as e:
         batch_info = f"batch {batch_id}" if batch_id is not None else "batch"
-        print(f"Error processing {batch_info}: {e}")
+        logger.error(f"Error processing {batch_info}: {e}")
 
 
 
@@ -132,9 +134,9 @@ def process_event_log(preprocess_config: dict, metadata: MetaData) -> DataFrame:
     
     # If local, verify file exists and upload
     if os.path.exists(log_path):
-        print(f"Uploading {log_path} to storage...")
+        logger.info(f"Uploading {log_path} to storage...")
         log_path = storage.upload_file(preprocess_config, log_path, filename)
-        print(f"File uploaded to: {log_path}")
+        logger.info(f"File uploaded to: {log_path}")
     
     # Else, assume log_path is already in storage (e.g., s3a://...)
 
@@ -453,9 +455,9 @@ def upload_log_file_object(preprocess_config: dict, file: Any, destination_path:
     if not storage:
         raise RuntimeError("Storage manager is not initialized.")
 
-    print(f"Uploading file object to storage as {destination_path}...")
+    logger.info(f"Uploading file object to storage as {destination_path}...")
     s3_path = storage.upload_file_object(preprocess_config, file, destination_path)
-    print(f"Parser: File uploaded to: {s3_path}")
+    logger.info(f"File uploaded to: {s3_path}")
     #TODO: handle s3 path
     return s3_path
 

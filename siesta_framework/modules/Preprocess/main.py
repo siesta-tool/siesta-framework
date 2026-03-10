@@ -42,7 +42,7 @@ class Preprocessor(SiestaModule):
 
     
     def api_run(self, preprocess_config: Annotated[str, Form()], log_file: UploadFile | None = None) -> Any:
-        print(f"{self.name} is running via API request.")
+        logger.info(f"{self.name} is running via API request.")
 
         self.siesta_config = get_system_config()
         self.storage = get_storage_manager()
@@ -70,7 +70,7 @@ class Preprocessor(SiestaModule):
         """
         Entry point for Preprocess via the command line.
         """
-        print(f"{self.name} is running with args: {args} and kwargs: {kwargs}")
+        logger.info(f"{self.name} is running with args: {args} and kwargs: {kwargs}")
 
         self.siesta_config = get_system_config()
         self.storage = get_storage_manager()
@@ -96,7 +96,7 @@ class Preprocessor(SiestaModule):
                     self._load_preprocess_config(user_preprocess_config)
                     self.storage.initialize_db(self.preprocess_config)
 
-                    print(f"Preprocess: Configuration loaded from {config_path}")
+                    logger.info(f"Configuration loaded from {config_path}")
             except Exception as e:
                 raise RuntimeError(f"Error loading config from {config_path}: {e}")
 
@@ -107,7 +107,7 @@ class Preprocessor(SiestaModule):
 
         if self.preprocess_config.get("enable_streaming", False):
             from siesta_framework.core.sparkManager import get_spark_session
-            print("Preprocess: Awaiting streaming termination... Press Ctrl+C to stop.")
+            logger.info("Awaiting streaming termination... Press Ctrl+C to stop.")
             get_spark_session().streams.awaitAnyTermination()
     
 
@@ -128,15 +128,15 @@ class Preprocessor(SiestaModule):
         self.storage.read_metadata_table(self.preprocess_config, self.metadata) 
 
         seq_df = timed(build_sequence_table, "Preprocess.", preprocess_config=self.preprocess_config, metadata=self.metadata)
-        activity_index_df = timed(build_activity_index_table, "Preprocess.", events_df=seq_df, metadata=self.metadata)
+        activity_index_df = timed(build_activity_index, "Preprocess.", events_df=seq_df, metadata=self.metadata)
         
         if isinstance(activity_index_df, StreamingQuery):
-            build_active_pairs_index_and_count_streamed(self.preprocess_config, self.metadata, batch_activity_index_df=activity_index_df)
+            build_last_checked_index_and_count_streamed(self.preprocess_config, self.metadata, batch_activity_index_df=activity_index_df)
         else:
-            pairs_df, _ = timed(build_active_pairs_table, "Preprocess.", self.preprocess_config, self.metadata, batch_activity_index_df=activity_index_df)
-            # pairs_df is cached inside build_active_pairs_table
+            pairs_df, _ = timed(build_last_checked_table, "Preprocess.", self.preprocess_config, self.metadata, batch_activity_index_df=activity_index_df)
+            # pairs_df is cached inside build_last_checked_table
             
-            timed(build_pairs_index_table, "Preprocess.", self.preprocess_config, self.metadata, pairs_df)
+            timed(build_pairs_index, "Preprocess.", self.preprocess_config, self.metadata, pairs_df)
 
             timed(build_count_table, "Preprocess.", self.preprocess_config, self.metadata, pairs_df)
 
