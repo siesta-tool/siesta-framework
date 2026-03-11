@@ -33,7 +33,7 @@ DEFAULT_SYSTEM_CONFIG: Dict[str, Any] = {
 
 DEFAULT_PREPROCESS_CONFIG: Dict[str, Any] = {
   "log_name": "example_log",
-  "log_path": "datasets/test.xes",
+  "log_path": "../datasets/test.xes",
   "storage_namespace": "siesta",
   "clear_existing": False,
   "lookback": "7d",

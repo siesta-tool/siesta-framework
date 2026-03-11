@@ -210,5 +210,4 @@ marimo/_lsp/
 __marimo__/
 
 *.xes
-*.csv
 output/*
