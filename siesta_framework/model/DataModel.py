@@ -240,7 +240,7 @@ Last_Checked_table_schema = StructType([
             StructField("trace_id", StringType(), True),
             StructField("source", StringType(), False),
             StructField("target", StringType(), False),
-            StructField("last_checked_timestamp", IntegerType(), False)
+            StructField("last_checked_moment", IntegerType(), False)
 ])
 
 count_table_schema = StructType([

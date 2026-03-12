@@ -7,7 +7,7 @@ import re
 from pyspark import RDD
 from pyspark.sql import DataFrame
 from typing import Iterable, List, Literal, Optional, Tuple
-from pyspark.sql.functions import count_distinct, col, to_timestamp, unix_timestamp, sum as spark_sum, count, min as spark_min, max as spark_max, pow as spark_pow
+from pyspark.sql.functions import col, unix_timestamp, sum as spark_sum, count, min as spark_min, max as spark_max, pow as spark_pow
 from pyspark.sql.types import StructType, StructField, StringType, TimestampType, IntegerType
 from siesta_framework.model.DataModel import Last_Checked_table_schema, EventPair
 import logging
@@ -48,7 +48,7 @@ type Event = Tuple[Event_Type, Timestamp, Position, Attributes]
 type Trace = Tuple[Trace_ID, Tuple[Event]]
 
 
-def extract_last_checked_and_all_pairs(updated_sequence_table_DF: DataFrame, previous_last_checked: DataFrame | None, lookback: str) -> Tuple[DataFrame, DataFrame]:
+def extract_last_checked_and_all_pairs(updated_sequence_table_DF: DataFrame, previous_last_checked: DataFrame | None, lookback: str, batch_min_ts: int, batch_min_pos: int) -> Tuple[DataFrame, DataFrame]:
     """
     Extracts the event type pairs from a DF that contains the complete traces. 
 
@@ -95,7 +95,7 @@ def extract_last_checked_and_all_pairs(updated_sequence_table_DF: DataFrame, pre
     else:
         last_checkedRDD_grouped = last_checkedRDD.map(lambda row: (
             row.trace_id,
-            (row.source, row.target, row.last_checked_timestamp)
+            (row.source, row.target, row.last_checked_moment)
         )).groupByKey()
         
         full = trace_rdd.groupByKey().leftOuterJoin(last_checkedRDD_grouped).map(
@@ -108,11 +108,12 @@ def extract_last_checked_and_all_pairs(updated_sequence_table_DF: DataFrame, pre
     pairs_df = spark.createDataFrame(pairs, schema=pair_index_schema)
     # logger.info(pairs_df.show())
     last_checked_df = spark.createDataFrame(last_checked, schema=Last_Checked_table_schema)
+    merged_last_checked_df = update_last_checked(previous_last_checked, last_checked_df, batch_min_ts, batch_min_pos, real_lookback)
     
     logger.info(f"Extracted {pairs_df.count()} event pairs")
     logger.info(f"Extracted {last_checked_df.count()} last checked entries")
 
-    return pairs_df, last_checked_df
+    return pairs_df, merged_last_checked_df
 
 def _calculate_pairs_stnm(activity_index: Tuple[Trace_ID, Iterable[Event]], last: Optional[Iterable[Tuple[str, str, int]]] | None, lookback: Tuple[int, LookbackType]) -> Tuple[List[Tuple], List[Tuple]]:
     """
@@ -121,7 +122,7 @@ def _calculate_pairs_stnm(activity_index: Tuple[Trace_ID, Iterable[Event]], last
     Args:
         activity_index: The complete activity index.
         last: The list with all the last timestamps that correspond to this event.
-        lookback: The parameter that describes the maximum time difference between 
+        lookback: The parameter that describes the maximum time or position difference between 
             two events in a pair.
 
     Returns:
@@ -136,6 +137,9 @@ def _calculate_pairs_stnm(activity_index: Tuple[Trace_ID, Iterable[Event]], last
     for event_name, timestamp, position, attributes in events:
         activity_index_map[event_name].append((timestamp, position, attributes))
     
+    for key in activity_index_map:
+        activity_index_map[key].sort(key=lambda x: x[1])  # sort by position
+
     # Build lastMap from last_checked
     last_map = {}
     if last:
@@ -306,4 +310,22 @@ def _parse_lookback(lookback: str) -> Tuple[int, LookbackType]:
                 raise ValueError(f"Unsupported unit: {unit}")
 
         return int(total_ms), "time"
-    
+
+def update_last_checked(previous_last_checked: DataFrame|None, current_last_checked: DataFrame, batch_min_ts: int, batch_min_pos: int, real_lookback: Tuple[int, LookbackType]) -> DataFrame:
+     # Merge old and new last_checked, prefer new record where available, keep old otherwise
+    if previous_last_checked is not None:
+        updated_trace_ids = current_last_checked.select("trace_id").distinct()
+        unchanged = previous_last_checked.join(
+            updated_trace_ids, on="trace_id", how="left_anti"
+        )
+        merged_last_checked_df = unchanged.union(current_last_checked)
+    else:
+        merged_last_checked_df = current_last_checked
+
+    # Step 2: Prune records older than lookback relative to the minimum timestamp in the current batch
+    # Only applicable for time-based lookback — index-based has no time dimension to prune on
+    if real_lookback[1] == "time":
+        merged_last_checked_df.filter((col("last_checked_moment") >= batch_min_ts) | ((batch_min_ts - col("last_checked_moment")) < real_lookback[0] / 1000))
+    else:
+        merged_last_checked_df.filter((col("last_checked_moment") >= batch_min_pos) | ((batch_min_pos - col("last_checked_moment")) < real_lookback[0]))
+    return merged_last_checked_df

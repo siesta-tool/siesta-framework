@@ -619,7 +619,7 @@ class S3Manager(StorageManager):
             
             last_checked.write \
                 .format("delta") \
-                .mode("append") \
+                .mode("overwrite") \
                 .option("mergeSchema", "true") \
                 .save(metadata.last_checked_table_path)
             logger.info(f"Wrote last checked data to {metadata.last_checked_table_path}")

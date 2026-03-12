@@ -10,6 +10,7 @@ from siesta_framework.modules.Preprocess.parsers import process_events_batch, pr
 from pyspark.sql.functions import col, from_json
 from pyspark.sql.streaming.query import StreamingQuery
 from siesta_framework.modules.Preprocess.computations import extract_last_checked_and_all_pairs, extract_counts
+from pyspark.sql.functions import min
 import logging
 logger = logging.getLogger(__name__)
 
@@ -139,6 +140,8 @@ def build_last_checked_table(preprocess_config: Dict, metadata: MetaData, batch_
     lookback = preprocess_config.get("lookback", "7d")
 
     updated_trace_ids = batch_activity_index_df.select("trace_id").distinct()
+    batch_min_ts = batch_activity_index_df.agg(min("start_timestamp")).collect()[0][0]
+    batch_min_pos = batch_activity_index_df.agg(min("position")).collect()[0][0]
 
     previous_last_checked = (
         storage.read_last_checked_table(metadata)
@@ -152,7 +155,9 @@ def build_last_checked_table(preprocess_config: Dict, metadata: MetaData, batch_
     pairs_df, last_checked_df = extract_last_checked_and_all_pairs(
         updated_sequence_table_DF=sequence_df,
         previous_last_checked=previous_last_checked,
-        lookback=lookback
+        lookback=lookback,
+        batch_min_ts=batch_min_ts,
+        batch_min_pos=batch_min_pos
     )
 
     # Cache pairs_df so the expensive cogroup isn't recomputed for
@@ -184,6 +189,9 @@ def build_last_checked_index_and_count_streamed(preprocess_config: Dict, metadat
         if micro_batch_df.isEmpty():
             return
 
+
+        batch_min_ts = micro_batch_df.agg(min("start_timestamp")).collect()[0][0]
+        batch_min_pos = micro_batch_df.agg(min("position")).collect()[0][0]
         updated_trace_ids = micro_batch_df.select("trace_id").distinct()
 
         previous_last_checked = (
@@ -198,7 +206,9 @@ def build_last_checked_index_and_count_streamed(preprocess_config: Dict, metadat
         pairs_df, last_checked_df = extract_last_checked_and_all_pairs(
             updated_sequence_table_DF=sequence_df,
             previous_last_checked=previous_last_checked,
-            lookback=lookback
+            lookback=lookback,
+            batch_min_ts=batch_min_ts,
+            batch_min_pos=batch_min_pos
         )
 
         # Cache pairs_df to avoid recomputing the cogroup for each write.
