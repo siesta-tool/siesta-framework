@@ -3,7 +3,9 @@ from typing import Any, Dict
 import boto3
 from botocore.exceptions import ClientError
 from fastapi import UploadFile
+from pyspark.sql.functions import col, lit
 from pyspark import RDD
+from siesta_framework.model.StorageModel import MetaData, hash_str, ConstraintEntry
 from pyspark.sql import SparkSession, DataFrame, functions as F
 from pyspark.sql.streaming import StreamingQuery
 from siesta_framework.core.interfaces import StorageManager
@@ -530,7 +532,7 @@ class S3Manager(StorageManager):
             raise
 
 
-    def read_sequence_table(self, metadata: MetaData) -> DataFrame:
+    def read_sequence_table(self, metadata: MetaData, filter_out: Any | None = None) -> DataFrame:
         """
         Read data as a DataFrame from the SequenceTable stored in S3.
         
@@ -541,10 +543,14 @@ class S3Manager(StorageManager):
         """
         try:
             df = self.spark.read.format("delta").load(metadata.sequence_table_path)
+            logger.info(f"Read {df.count()} records from {metadata.sequence_table_path}.")
+            if filter_out == "mined" and metadata.last_mined_timestamp:
+                df = df.select("*").where(col("start_timestamp") > lit(metadata.last_mined_timestamp.strftime("%Y-%m-%dT%H:%M:%S")))
             return df
         except Exception as e:
             logger.info(f"Error reading from {metadata.sequence_table_path}: {e}")
             return self.spark.createDataFrame([], schema=Event.get_schema())
+
     
     ####################################################
     ############## Trace Metadata Methods ##############
@@ -667,4 +673,157 @@ class S3Manager(StorageManager):
                 .save(metadata.count_table_path)
         
         except Exception as e:
-            logger.info(f"Error writing Count Table: {e}")
+            logger.info(f"S3Manager: Error writing Count Table: {e}")
+
+    def log_exists(self, task_config: Dict[str, Any]) -> bool:
+        """
+        Check whether the log prefix exists in S3 by listing objects under it.
+
+        Args:
+            task_config: Configuration dictionary containing 'log_name' and
+                         'storage_namespace'.
+
+        Returns:
+            True if at least one object is found under the log prefix, False otherwise.
+        """
+        namespace = task_config.get("storage_namespace", "siesta")
+        log_name = task_config.get("log_name", "default_log")
+        prefix = f"{log_name}/"
+        try:
+            response = self.s3_client.list_objects_v2(
+                Bucket=namespace,
+                Prefix=prefix,
+                MaxKeys=1
+            )
+            exists = response.get("KeyCount", 0) > 0
+            if not exists:
+                logger.info(f"Log '{log_name}' not found in bucket '{namespace}'.")
+            return exists
+        except ClientError as e:
+            logger.warning(f"Could not verify existence of log '{log_name}' in bucket '{namespace}': {e}")
+            return False
+
+
+    ###########################################
+    ##### Declarative Mining Constraints ######
+    ###########################################
+    def read_positional_constraints(self, metadata: MetaData, filter_out_df: DataFrame | None = None) -> DataFrame:
+        try:
+            c = self.spark.read.parquet(metadata.positional_constraints_path)
+            logger.info(f"Read positional constraints from {metadata.positional_constraints_path}.")
+
+            if filter_out_df is not None:
+                # Keep only End constraints for unevolved traces
+                end_constraints = c.where(col("template") == "end").join(
+                    filter_out_df.select("trace_id").distinct(),
+                    on="trace_id",
+                    how="left_anti"
+                )
+                # Init constraints are not affected by trace evolution, keep all
+                init_constraints = c.where(col("template") == "init")
+                c = end_constraints.unionByName(init_constraints)
+
+            return c.select("template", "source", "trace_id")
+        except Exception as _:
+            logger.info(f"No existing positional constraints found at {metadata.positional_constraints_path}. Returning empty DataFrame.")
+            return self.spark.createDataFrame([], schema=ConstraintEntry.get_schema()).select("template", "source", "trace_id")
+        
+    def write_positional_constraints(self, metadata: MetaData, df: DataFrame) -> None:
+        try:
+            df = self._complete_schema(df, ConstraintEntry.get_schema())
+            df.write.parquet(path=metadata.positional_constraints_path, mode="overwrite")
+            logger.info(f"Wrote positional constraints to {metadata.positional_constraints_path}.")
+        except Exception as e:
+            logger.error(f"Error writing positional constraints to {metadata.positional_constraints_path}: {e}")
+            raise
+
+    def read_existential_constraints(self, metadata: MetaData) -> DataFrame:
+        try:
+            df = self.spark.read.parquet(metadata.existential_constraints_path)
+            logger.info(f"Read existential constraints from {metadata.existential_constraints_path}.")
+            return df.select("template", "source", "occurrences", "trace_id")
+        except Exception as _:
+            logger.info(f"No existing existential constraints found at {metadata.existential_constraints_path}. Returning empty DataFrame.")
+            return self.spark.createDataFrame([], schema=ConstraintEntry.get_schema()).select("template", "source", "occurrences", "trace_id")
+    
+    def write_existential_constraints(self, metadata: MetaData, df: DataFrame) -> None:
+        try:
+            df = self._complete_schema(df, ConstraintEntry.get_schema())
+            df.write.parquet(path=metadata.existential_constraints_path, mode="overwrite")
+            logger.info(f"Wrote existential constraints to {metadata.existential_constraints_path}.")
+        except Exception as e:
+            logger.error(f"Error writing existential constraints to {metadata.existential_constraints_path}: {e}")
+            raise
+    
+    def read_ordered_constraints(self, metadata: MetaData) -> DataFrame:
+        try:
+            df = self.spark.read.parquet(metadata.ordered_constraints_path)
+            logger.info(f"Read ordered constraints from {metadata.ordered_constraints_path}.")
+            return df.select("template", "source", "target", "trace_id")
+        except Exception as _:
+            logger.info(f"No existing ordered constraints found at {metadata.ordered_constraints_path}. Returning empty DataFrame.")
+            return self.spark.createDataFrame([], schema=ConstraintEntry.get_schema()).select("template", "source", "target", "trace_id")
+    
+    def write_ordered_constraints(self, metadata: MetaData, df: DataFrame) -> None:
+        try:
+            df = self._complete_schema(df, ConstraintEntry.get_schema())
+            df.write.parquet(path=metadata.ordered_constraints_path, mode="overwrite")
+            logger.info(f"Wrote ordered constraints to {metadata.ordered_constraints_path}.")
+        except Exception as e:
+            logger.error(f"Error writing ordered constraints to {metadata.ordered_constraints_path}: {e}")
+            raise
+
+    def read_unordered_constraints(self, metadata: MetaData) -> DataFrame:
+        try:
+            df = self.spark.read.parquet(metadata.unordered_constraints_path)
+            logger.info(f"Read unordered constraints from {metadata.unordered_constraints_path}.")
+            return df.select("template", "source", "target", "trace_id")
+        except Exception as _:
+                logger.info(f"No existing unordered constraints found at {metadata.unordered_constraints_path}. Returning empty DataFrame.")
+                return self.spark.createDataFrame([], schema=ConstraintEntry.get_schema()).select("template", "source", "target", "trace_id")
+        
+    def write_unordered_constraints(self, metadata: MetaData, df: DataFrame) -> None:
+        try:
+            df = self._complete_schema(df, ConstraintEntry.get_schema())
+            df.write.parquet(path=metadata.unordered_constraints_path, mode="overwrite")
+            logger.info(f"Wrote unordered constraints to {metadata.unordered_constraints_path}.")
+        except Exception as e:
+            logger.error(f"Error writing unordered constraints to {metadata.unordered_constraints_path}: {e}")
+            raise        
+
+    def read_negation_constraints(self, metadata: MetaData) -> DataFrame:
+        try:
+            df = self.spark.read.parquet(metadata.negation_constraints_path)
+            logger.info(f"Read negation constraints from {metadata.negation_constraints_path}.")
+            return df.select("template", "source", "target", "trace_id")
+        except Exception as _:
+            logger.info(f"No existing negation constraints found at {metadata.negation_constraints_path}. Returning empty DataFrame.")
+            return self.spark.createDataFrame([], schema=ConstraintEntry.get_schema()).select("template", "source", "target", "trace_id")
+
+    def write_negation_constraints(self, metadata: MetaData, df: DataFrame) -> None:
+        try:
+            df = self._complete_schema(df, ConstraintEntry.get_schema())
+            df.write.parquet(path=metadata.negation_constraints_path, mode="overwrite")
+            logger.info(f"Wrote negation constraints to {metadata.negation_constraints_path}.")
+        except Exception as e:
+            logger.error(f"Error writing negation constraints to {metadata.negation_constraints_path}: {e}")
+            raise
+
+    def read_all_activity_pairs(self, metadata: MetaData) -> DataFrame:
+        from pyspark.sql.types import StructType, StructField, StringType
+        schema = StructType([StructField("source", StringType()), StructField("target", StringType())])
+        try:
+            df = self.spark.read.format("delta").load(metadata.all_activity_pairs_path)
+            logger.info(f"Read all_activity_pairs from {metadata.all_activity_pairs_path}.")
+            return df
+        except Exception as _:
+            logger.info(f"No existing all_activity_pairs table found. Returning empty DataFrame.")
+            return self.spark.createDataFrame([], schema=schema)
+
+    def write_all_activity_pairs(self, metadata: MetaData, df: DataFrame) -> None:
+        try:
+            df.write.format("delta").mode("overwrite").save(metadata.all_activity_pairs_path)
+            logger.info(f"Wrote all_activity_pairs to {metadata.all_activity_pairs_path}.")
+        except Exception as e:
+            logger.error(f"Error writing all_activity_pairs to {metadata.all_activity_pairs_path}: {e}")
+            raise

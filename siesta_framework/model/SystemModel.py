@@ -31,6 +31,7 @@ DEFAULT_SYSTEM_CONFIG: Dict[str, Any] = {
     "checkpoint_dir": "checkpoints",
 }
 
+
 DEFAULT_PREPROCESS_CONFIG: Dict[str, Any] = {
   "log_name": "example_log",
   "log_path": "../datasets/test.xes",
@@ -62,4 +63,23 @@ DEFAULT_PREPROCESS_CONFIG: Dict[str, Any] = {
   },
   "trace_level_fields": ["trace_id"],
   "timestamp_fields": ["start_timestamp"]
+}
+
+
+DEFAULT_MINING_CONFIG: Dict[str, Any] = {
+  "log_name": "example_log",
+  "storage_namespace": "siesta",
+  "storage_type": "s3",
+  "force_recompute": False,
+  "categories": ["*"], # or specific list of template categories(e.g. ["ordered", "positional", "existence", "negation"])
+  # "templates": ["*"], # or specific list of templates (e.g. ["response", "precedence"]) ----NOT IMPLEMENTED YET
+  "grouping": "trace",  # or "window"
+  "identifiers": ["trace_id"],  # fields to identify groups (e.g. 'trace_id' for trace-based, irrelevant for window-based)
+  "window_size": 30,  # position-based window size, if grouping by window
+  "output_path": "../output/example_log", # where to store results
+  "include_trace_lists": False, # whether to include the list of trace_ids supporting each constraint in the output (can be large)
+  "branching_bound": 2,
+  "branching_policy": "and",
+  "support_threshold": 0.0,
+  "confidence_threshold": 0.0,
 }

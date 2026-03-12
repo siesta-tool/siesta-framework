@@ -44,7 +44,25 @@ class MetaData:
         return f"s3a://{self.storage_namespace}/{self.log_name}/trace_metadata_table"
     @property
     def s3_mining(self) -> str:
-        return f"s3a://{self.storage_namespace}/{self.log_name}/declare_table"
+        return f"s3a://{self.storage_namespace}/{self.log_name}/declare_constraints/"
+    @property
+    def s3_positional_constraints(self) -> str:
+        return self.s3_mining + "positional.parquet"
+    @property
+    def s3_existential_constraints(self) -> str:
+        return self.s3_mining + "existential.parquet"
+    @property
+    def s3_ordered_constraints(self) -> str:
+        return self.s3_mining + "ordered.parquet"
+    @property
+    def s3_unordered_constraints(self) -> str:
+        return self.s3_mining + "unordered.parquet"
+    @property
+    def s3_negation_constraints(self) -> str:
+        return self.s3_mining + "negation.parquet"
+    @property
+    def s3_all_activity_pairs(self) -> str:
+        return self.s3_mining + "all_activity_pairs"
     
     # Table paths for Storage Managers (extend for more compatibility)
     @property
@@ -68,6 +86,51 @@ class MetaData:
     @property
     def trace_metadata_table_path(self) -> str:
         return self.s3_trace_metadata_table if self.storage_type == "s3" else ""
+
+########################################################
+
+    @property
+    def mining_path(self) -> str:
+        return self.s3_mining if self.storage_type == "s3" else ""
+    @property
+    def positional_constraints_path(self) -> str:
+        return self.s3_positional_constraints if self.storage_type == "s3" else ""
+    @property
+    def existential_constraints_path(self) -> str:
+        return self.s3_existential_constraints if self.storage_type == "s3" else ""
+    @property
+    def ordered_constraints_path(self) -> str:
+        return self.s3_ordered_constraints if self.storage_type == "s3" else ""
+    @property
+    def unordered_constraints_path(self) -> str:
+        return self.s3_mining + "unordered.parquet" if self.storage_type == "s3" else ""
+    @property
+    def negation_constraints_path(self) -> str:
+        return self.s3_negation_constraints if self.storage_type == "s3" else ""
+    @property
+    def all_activity_pairs_path(self) -> str:
+        return self.s3_all_activity_pairs if self.storage_type == "s3" else ""
+    @property
+    def active_pairs_table_path(self) -> str:
+        return self.s3_active_pairs_table if self.storage_type == "s3" else ""
+    @property
+    def last_checked_table_path(self) -> str:
+        return self.s3_last_checked_table if self.storage_type == "s3" else ""
+    @property
+    def mining_path(self) -> str:
+        return self.s3_mining if self.storage_type == "s3" else ""
+    @property
+    def positional_constraints_path(self) -> str:
+        return self.s3_positional_constraints if self.storage_type == "s3" else ""
+    @property
+    def existential_constraints_path(self) -> str:
+        return self.s3_existential_constraints if self.storage_type == "s3" else ""
+    @property
+    def ordered_constraints_path(self) -> str:
+        return self.s3_ordered_constraints if self.storage_type == "s3" else ""
+    @property
+    def unordered_constraints_path(self) -> str:
+        return self.s3_mining + "unordered.parquet" if self.storage_type == "s3" else ""
 
 
     def __init__(self, storage_namespace: str = "siesta", storage_type: str = "s3", log_name: str = "default_log"):
@@ -94,15 +157,25 @@ class MetaData:
         ])
 
     def to_dict(self) -> dict:
+        f_timestamp = getattr(self, 'first_timestamp', None)
+        if f_timestamp and isinstance(f_timestamp, datetime):
+            f_timestamp = f_timestamp.isoformat()
+        l_timestamp = getattr(self, 'last_timestamp', None)
+        if l_timestamp and isinstance(l_timestamp, datetime):
+            l_timestamp = l_timestamp.isoformat()
+        m_timestamp = getattr(self, 'last_mined_timestamp', None)
+        if m_timestamp and isinstance(m_timestamp, datetime):
+            m_timestamp = m_timestamp.isoformat()
+            
         return {
             "log_name": self.log_name,
             "storage_namespace": self.storage_namespace,
             "trace_count": getattr(self, 'trace_count', 0),
             "event_count": getattr(self, 'event_count', 0),
             "pair_count": getattr(self, 'pair_count', 0),
-            "first_timestamp": self.first_timestamp.isoformat() if getattr(self, 'first_timestamp', None) else None,
-            "last_timestamp": self.last_timestamp.isoformat() if getattr(self, 'last_timestamp', None) else None,
-            "last_mined_timestamp": self.last_mined_timestamp.isoformat() if getattr(self, 'last_mined_timestamp', None) else None,
+            "first_timestamp": f_timestamp,
+            "last_timestamp": l_timestamp,
+            "last_mined_timestamp": m_timestamp,
             "approx_unique_traces": list(self.approx_unique_traces) if getattr(self, 'approx_unique_traces', None) else [],
             "approx_unique_activities": list(self.approx_unique_activities) if getattr(self, 'approx_unique_activities', None) else [],
         }
@@ -128,7 +201,42 @@ class SequenceTableEntry(DataModel.Event):
     
     def to_dict(self) -> dict:
         return super().to_dict()
+
+
+class ConstraintEntry:
+    template: str
+    source: str
+    trace_id: str
+    target: str | None
+ 
+    occurrences: int | None
+ 
+
+    def __init__(self):
+        self.template = ""
+        self.source = ""
+        self.trace_id = ""
+        self.target = None
+        self.occurrences = None
+
+    def to_dict(self) -> dict:
+        return {
+            "template": self.template,
+            "source": self.source,
+            "trace_id": self.trace_id,
+            "target": self.target,
+            "occurrences": self.occurrences,
+        }
     
+    @staticmethod
+    def get_schema() -> StructType:
+        return StructType([
+            StructField("template", StringType(), False),
+            StructField("source", StringType(), False),
+            StructField("trace_id", StringType(), False),
+            StructField("target", StringType(), True),
+            StructField("occurrences", IntegerType(), True),
+        ])
 
 def hash_str(string: str) -> int:
     """

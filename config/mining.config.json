@@ -1,0 +1,6 @@
+{
+    "log_name": "example_log",
+    "storage_namespace": "siesta",
+    "storage_type": "s3",
+    "force_recompute": true
+}

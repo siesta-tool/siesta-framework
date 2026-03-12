@@ -2,7 +2,7 @@ import argparse
 from pathlib import Path
 from typing import Annotated, Any, Dict
 from fastapi import Form, UploadFile
-from siesta_framework.core.sparkManager import get_spark_session
+from siesta_framework.core.sparkManager import get_spark_session, cleanup as spark_cleanup
 from siesta_framework.model.StorageModel import MetaData
 from siesta_framework.model.SystemModel import DEFAULT_PREPROCESS_CONFIG
 from siesta_framework.core.interfaces import SiestaModule, StorageManager
@@ -130,6 +130,10 @@ class Preprocessor(SiestaModule):
         seq_df = timed(build_sequence_table, "Preprocess.", preprocess_config=self.preprocess_config, metadata=self.metadata)
         activity_index_df = timed(build_activity_index, "Preprocess.", events_df=seq_df, metadata=self.metadata)
         
+        # seq_df (checkpointed in update_event_positions) is no longer needed in batch mode
+        if not isinstance(seq_df, StreamingQuery):
+            seq_df.unpersist()
+
         if isinstance(activity_index_df, StreamingQuery):
             build_last_checked_index_and_count_streamed(self.preprocess_config, self.metadata, batch_activity_index_df=activity_index_df)
         else:
@@ -142,6 +146,9 @@ class Preprocessor(SiestaModule):
 
             # Release the memory occupied by pairs_df now it's not needed
             pairs_df.unpersist()
+
+            # Release cached data and Delta metadata after batch processing
+            spark_cleanup()
 
             # In CLI mode, we want to keep streaming jobs alive until termination
             if caller == "cli" and self.preprocess_config.get("enable_streaming", False):

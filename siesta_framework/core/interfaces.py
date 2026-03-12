@@ -3,6 +3,8 @@ from abc import ABC, abstractmethod
 from fastapi import UploadFile
 from fastapi.params import Form
 from pyspark.sql import DataFrame
+from pyspark.sql.functions import lit
+from pyspark.sql.types import StructType
 from pyspark import RDD
 
 from siesta_framework.model.StorageModel import MetaData
@@ -125,13 +127,27 @@ class StorageManager(ABC):
         pass
     
     @abstractmethod
-    def read_metadata_table(self, preprocess_config: Dict[str, Any]) -> MetaData:
+    def log_exists(self, task_config: Dict[str, Any]) -> bool:
+        """
+        Check whether a log dataset already exists in the storage backend.
+
+        Args:
+            task_config: Configuration dictionary containing at least 'log_name'
+                         and 'storage_namespace'.
+
+        Returns:
+            True if the log exists, False otherwise.
+        """
+        pass
+
+    @abstractmethod
+    def read_metadata_table(self, task_config: Dict[str, Any], metadata: MetaData) -> MetaData:
         """
         Construct metadata based on data already stored in the database and new configuration.
         
         Args:
-            preprocess_config: Configuration dictionary passed during execution
-            
+            task_config: Configuration dictionary passed during execution
+            metadata: MetaData object to be updated with information from the database
         Returns:
             MetaData object containing the metadata
         """
@@ -178,7 +194,7 @@ class StorageManager(ABC):
     
     
     @abstractmethod
-    def read_sequence_table(self, metadata: Any) -> DataFrame:
+    def read_sequence_table(self, metadata: MetaData, filter_out: Any | None = None) -> DataFrame:
         """
         Read data as an DataFrame from the SequenceTable.
         
@@ -285,8 +301,41 @@ class StorageManager(ABC):
             metadata: MetaData object containing the metadata
         """
         pass
+    
+    @staticmethod
+    def _complete_schema(df: DataFrame, target_schema: StructType) -> DataFrame:
+        """
+        Ensure a DataFrame conforms to the given target schema by adding any missing
+        columns as nulls (cast to the correct type) and reordering to match schema order.
+
+        Args:
+            df: Input DataFrame that may be missing some columns.
+            target_schema: The expected StructType schema.
+
+        Returns:
+            DataFrame with all schema fields present in order.
+        """
+        existing_cols = set(df.columns)
+        for field in target_schema.fields:
+            if field.name not in existing_cols:
+                df = df.withColumn(field.name, lit(None).cast(field.dataType))
+        return df.select([field.name for field in target_schema.fields])
 
     @abstractmethod
+    def read_positional_constraints(self, metadata: MetaData, filter_out_df: DataFrame | None = None) -> DataFrame:
+        """
+        Read existing positional constraints from storage as flat ConstraintEntry rows.
+
+        Args:
+            metadata: MetaData object containing the metadata of the log dataset
+            filter_out_df: Optional DataFrame of evolved traces; End constraints for those
+                           traces are excluded, while Init constraints are always included.
+        Returns:
+            DataFrame[ConstraintEntry] containing the flat positional constraint rows.
+        """
+        pass
+
+   
     def read_trace_metadata_table(self, metadata: Any) -> DataFrame:
         """
         Read the trace metadata table
@@ -298,3 +347,63 @@ class StorageManager(ABC):
         Write the Trace metadata table to the DB
         """
     
+  ######################################################################################
+    @abstractmethod
+    def read_existential_constraints(self, metadata: MetaData) -> DataFrame:
+        """
+        Read existing existential constraints from S3.
+        
+        Args:
+            metadata: MetaData object containing the metadata of the log dataset
+        Returns:
+            DataFrame[Constraint] containing the existential constraints
+        """
+        pass
+
+    @abstractmethod
+    def read_ordered_constraints(self, metadata: MetaData) -> DataFrame:
+        """
+        Read existing ordered constraints from storage as flat ConstraintEntry rows.
+
+        Args:
+            metadata: MetaData object containing the metadata of the log dataset
+        Returns:
+            DataFrame with columns (template, source, target, trace_id)
+        """
+        pass
+
+    @abstractmethod
+    def read_negation_constraints(self, metadata: MetaData) -> DataFrame:
+        """
+        Read existing negation constraints from storage as flat ConstraintEntry rows.
+
+        Args:
+            metadata: MetaData object containing the metadata of the log dataset
+        Returns:
+            DataFrame with columns (template, source, target, trace_id)
+        """
+        pass
+
+    @abstractmethod
+    def write_negation_constraints(self, metadata: MetaData, df: DataFrame) -> None:
+        """
+        Write negation constraints to storage.
+        """
+        pass
+
+    @abstractmethod
+    def read_all_activity_pairs(self, metadata: MetaData) -> DataFrame:
+        """
+        Read the incrementally maintained table of all activity pairs (source < target).
+
+        Returns:
+            DataFrame with columns (source, target)
+        """
+        pass
+
+    @abstractmethod
+    def write_all_activity_pairs(self, metadata: MetaData, df: DataFrame) -> None:
+        """
+        Overwrite the all-activity-pairs table.
+        """
+        pass

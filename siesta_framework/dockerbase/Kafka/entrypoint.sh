@@ -1,4 +1,6 @@
 #!/bin/bash
+sleep 5  # Give Kafka a moment to initialize before we check its status
+
 set -e
 
 # Detect Host IP (Docker Gateway) dynamically
