@@ -1,17 +1,262 @@
-# siesta-framework
+# Siesta Framework
 
-### notes
-trace ids are strings, activities are strings, positioning inside trace is 1-indexed (int)
+A distributed event log processing and declarative constraint mining framework built with Apache Spark.
 
-Example usages:
-- Run API server (default config) 
+## Features
 
-`python3 main.py`
+- 🔄 **Event Log Preprocessing**: Support for XES, CSV, and JSON formats
+- ⛏️ **Constraint Mining**: Discover declarative constraints (existential, positional, ordered, unordered, negations)
+- 💾 **Distributed Storage**: S3-compatible storage with Delta Lake
+- 🌊 **Streaming Support**: Real-time event processing via Kafka
+- 🎨 **Modern Web UI**: Beautiful, minimal interface for all operations
+- 📡 **REST API**: FastAPI-based API for programmatic access
 
-- Run API server with specific config
+## Quick Start
 
-`python3 main.py --config config/siesta.config.json`
+### Prerequisites
 
-- Run a specific module (CLI mode) 
+- Python 3.10+
+- Apache Spark
+- S3-compatible storage (MinIO or AWS S3)
+- Kafka (optional, for streaming)
 
-`python3 main.py --config config/preprocess.config.json preprocess`
+### Installation
+
+1. Clone the repository:
+   ```bash
+   git clone <repository-url>
+   cd siesta-framework
+   ```
+
+2. Create and activate virtual environment:
+   ```bash
+   cd siesta_framework
+   python3 -m venv venv
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   ```
+
+3. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+### Running the Framework
+
+#### Option 1: Web UI (Recommended)
+
+The easiest way to use Siesta Framework is through the web interface:
+
+```bash
+./start.sh
+```
+
+This will start both the API server and the web UI. Then open your browser to:
+- **Web UI**: http://localhost:8501
+- **API Docs**: http://localhost:8000/docs
+
+See the [UI README](ui/README.md) for more details.
+
+#### Option 2: API Server Only
+
+Run the API server (default config):
+```bash
+cd siesta_framework
+python3 main.py
+```
+
+Run with specific config:
+```bash
+python3 main.py --config config/siesta.config.json
+```
+
+#### Option 3: CLI Mode
+
+Run a specific module directly:
+```bash
+python3 main.py --config config/preprocess.config.json preprocess
+```
+
+## Architecture
+
+```
+siesta-framework/
+├── config/                 # Configuration files
+│   ├── siesta.config.json
+│   ├── preprocess.config.json
+│   └── mining.config.json
+├── siesta_framework/       # Core framework
+│   ├── core/              # Core components
+│   ├── modules/           # Processing modules
+│   │   ├── Preprocess/   # Event log preprocessing
+│   │   └── Mining/       # Constraint mining
+│   ├── storage/          # Storage implementations
+│   ├── api/              # REST API
+│   └── main.py           # Entry point
+├── ui/                    # Web interface
+│   ├── app.py            # Streamlit app
+│   ├── pages/            # UI pages
+│   └── utils/            # UI utilities
+├── datasets/             # Sample datasets
+└── output/              # Mining results
+```
+
+## Usage Examples
+
+### Preprocessing an Event Log
+
+#### Via Web UI
+1. Navigate to the **Preprocess** page
+2. Upload your event log file
+3. Configure field mappings
+4. Click **Run Preprocess**
+
+#### Via API
+```bash
+curl -X POST "http://localhost:8000/preprocess/run" \
+  -F "preprocess_config={\"log_name\":\"my_log\",\"storage_namespace\":\"siesta\",\"overwrite_data\":false}" \
+  -F "log_file=@datasets/example.csv"
+```
+
+#### Via CLI
+```bash
+python3 main.py --config config/preprocess.config.json preprocess
+```
+
+### Mining Constraints
+
+#### Via Web UI
+1. Navigate to the **Mining** page
+2. Select a preprocessed log
+3. Choose constraint types and thresholds
+4. Click **Run Mining**
+5. View and download results
+
+#### Via API
+```bash
+curl -X POST "http://localhost:8000/mining/run" \
+  -F "mining_config={\"log_name\":\"my_log\",\"storage_namespace\":\"siesta\",\"force_recompute\":true}"
+```
+
+#### Via CLI
+```bash
+python3 main.py --config config/mining.config.json mining
+```
+
+## Configuration
+
+### System Configuration (siesta.config.json)
+
+```json
+{
+  "storage_type": "s3",
+  "s3_endpoint": "http://localhost:9000",
+  "s3_access_key": "minioadmin",
+  "s3_secret_key": "minioadmin",
+  "spark_master": "spark://localhost:7077",
+  "api": {
+    "host": "0.0.0.0",
+    "port": 8000
+  }
+}
+```
+
+### Preprocessing Configuration
+
+```json
+{
+  "log_name": "my_event_log",
+  "storage_namespace": "siesta",
+  "field_mappings": {
+    "csv": {
+      "activity": "activity",
+      "trace_id": "case_id",
+      "start_timestamp": "timestamp"
+    }
+  }
+}
+```
+
+### Mining Configuration
+
+```json
+{
+  "log_name": "my_event_log",
+  "storage_namespace": "siesta",
+  "output_path": "output/constraints.csv",
+  "constraint_types": ["existential", "ordered"],
+  "support_threshold": 0.8,
+  "confidence_threshold": 0.9
+}
+```
+
+## Module Overview
+
+### Preprocess Module
+
+Transforms raw event logs into structured, indexed tables ready for constraint mining.
+
+**Supported formats**: XES, CSV, JSON  
+**Output tables**: events, sequence, activity_index, metadata
+
+### Mining Module
+
+Discovers declarative constraints from preprocessed logs.
+
+**Constraint types**:
+- Existential (Existence, Absence, Exactly)
+- Positional (Init, End)
+- Ordered (Response, Precedence, ChainResponse, ChainPrecedence)
+- Unordered (CoExistence, NotCoExistence)
+- Negations (NotResponse, NotPrecedence)
+
+## Storage
+
+Siesta uses S3-compatible storage with Delta Lake format for efficient distributed data processing.
+
+**Tables created per log**:
+- `events`: Raw event data
+- `sequence`: Ordered event sequences
+- `activity_index`: Activity lookup table
+- `pairs_index`: Activity pair relationships
+- `count`: Statistics and counts
+- `metadata`: Log metadata
+
+## Development
+
+### Adding a New Module
+
+1. Create module directory in `siesta_framework/modules/`
+2. Implement `SiestaModule` interface
+3. Add `register_routes()` for API endpoints
+4. Implement `cli_run()` for CLI mode
+5. Framework auto-discovers the module
+
+### Running Tests
+
+```bash
+pytest tests/
+```
+
+## Technical Notes
+
+- Trace IDs: strings
+- Activities: strings  
+- Position in trace: 1-indexed integers
+- All timestamps are stored in ISO format
+- Delta Lake provides ACID transactions and versioning
+
+## License
+
+[Add your license here]
+
+## Contributing
+
+Contributions are welcome! Please ensure:
+- Code follows existing patterns
+- Tests pass
+- Documentation is updated
+- Commit messages are clear
+
+## Support
+
+For issues, questions, or contributions, please visit the project repository.
