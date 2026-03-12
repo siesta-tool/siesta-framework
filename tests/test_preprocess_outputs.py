@@ -353,5 +353,5 @@ class TestLastCheckedTable:
     def test_timestamp_positive(self, preprocessed):
         lc_df = preprocessed["storage"].read_last_checked_table(preprocessed["metadata"])
         for row in lc_df.collect():
-            assert row.last_checked_timestamp > 0, \
+            assert row.last_checked_moment > 0, \
                 f"Invalid timestamp for ({row.trace_id}, {row.source}, {row.target})"
