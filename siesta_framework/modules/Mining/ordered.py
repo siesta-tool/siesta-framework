@@ -45,10 +45,25 @@ def _mine_trace_pandas(pdf: pd.DataFrame) -> pd.DataFrame:
             tgt_indices = act_positions[tgt_act]
 
             # Check if source ever appears before target
-            if src_indices[0] >= tgt_indices[-1]:
-                # No src position < any tgt position
-                if not np.any(src_indices[:, None] < tgt_indices[None, :]):
-                    continue
+            # (indices are sorted, so min(src) >= max(tgt) means no src < any tgt)
+            any_src_before_tgt = src_indices[0] < tgt_indices[-1]
+
+            # --- Not Succession: a never occurs before b ---
+            is_not_succession = not any_src_before_tgt
+
+            # --- Not Chain Succession: a is never immediately followed by b ---
+            is_not_chain_succession = not any(
+                next_activity[s] == tgt_act for s in src_indices
+            )
+
+            if not any_src_before_tgt:
+                # No positive ordered constraints can hold,
+                # but negation constraints might
+                if is_not_succession:
+                    rows.append(("not_succession", src_act, trace_id, tgt_act, None))
+                if is_not_chain_succession:
+                    rows.append(("not_chain_succession", src_act, trace_id, tgt_act, None))
+                continue
 
             # --- Response ---
             # Every src occurrence must have at least one later tgt
@@ -96,6 +111,7 @@ def _mine_trace_pandas(pdf: pd.DataFrame) -> pd.DataFrame:
                 is_response, is_precedence,
                 is_alt_response, is_alt_precedence,
                 is_chain_response, is_chain_precedence,
+                is_not_chain_succession,
             ]):
                 continue
 
@@ -115,6 +131,8 @@ def _mine_trace_pandas(pdf: pd.DataFrame) -> pd.DataFrame:
                 rows.append(("chain_precedence", src_act, trace_id, tgt_act, None))
             if is_chain_response and is_chain_precedence:
                 rows.append(("chain_succession", src_act, trace_id, tgt_act, None))
+            if is_not_chain_succession:
+                rows.append(("not_chain_succession", src_act, trace_id, tgt_act, None))
 
     return pd.DataFrame(rows, columns=["template", "source", "trace_id", "target", "occurrences"])
 

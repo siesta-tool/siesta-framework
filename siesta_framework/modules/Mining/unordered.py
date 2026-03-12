@@ -43,11 +43,7 @@ def _mine_trace_unordered_pandas(pdf: pd.DataFrame) -> pd.DataFrame:
             if a_in and b_in:
                 rows.append(("coexistence", a, trace_id, b, None))
             
-            # # Not Co-existence: a and b do NOT both occur together #TODO: MOVE TO NEGATIONS
-            # # Satisfied if: only a, only b, or neither
-            # if not (a_in and b_in):
-            #     rows.append(("not_coexistence", a, trace_id, b, None))
-            
+          
             # Choice: at least one of a or b is present
             if a_in or b_in:
                 rows.append(("choice", a, trace_id, b, None))
