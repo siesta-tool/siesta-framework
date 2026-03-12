@@ -207,9 +207,9 @@ class StorageManager(ABC):
         pass
     
     @abstractmethod
-    def read_activity_index_table(self, metadata: Any) -> DataFrame:
+    def read_activity_index(self, metadata: Any) -> DataFrame:
         """
-        Load the activity index from the database (stored in activity_index_table).
+        Load the activity index from the database (stored in activity_index).
         
         Args:
             metadata: MetaData object containing the metadata
@@ -220,9 +220,9 @@ class StorageManager(ABC):
         pass
     
     @abstractmethod
-    def read_active_pairs_table(self, metadata: Any) -> DataFrame:
+    def read_last_checked_table(self, metadata: Any) -> DataFrame:
         """
-        Load data from the ActivePairsTable, containing the last timestamp per event type pair per trace.
+        Load data from the LastCheckedTable, containing the last timestamp per event type pair per trace.
         
         Args:
             metadata: MetaData object containing the metadata
@@ -233,7 +233,7 @@ class StorageManager(ABC):
         pass
 
     @abstractmethod
-    def read_pairs_index_table(self, metadata: Any) -> DataFrame:
+    def read_pairs_index(self, metadata: Any) -> DataFrame:
         """
         Load data from the Pairs Index
 
@@ -244,12 +244,12 @@ class StorageManager(ABC):
         """
     
     @abstractmethod
-    def write_active_pairs_table(self, active_pairs: DataFrame, metadata: Any) -> None:
+    def write_last_checked_table(self, last_checked: DataFrame, metadata: Any) -> None:
         """
         Store new records for last checked timestamps back in the database.
         
         Args:
-            active_pairs: DataFrame containing timestamp of last completion for each event type pair per trace
+            last_checked: DataFrame containing timestamp of last completion for each event type pair per trace
             metadata: MetaData object containing the metadata
         """
         pass
@@ -281,7 +281,7 @@ class StorageManager(ABC):
         pass
     
     @abstractmethod
-    def write_activity_index_table(self, events_df: DataFrame, metadata: MetaData) -> None:
+    def write_activity_index(self, events_df: DataFrame, metadata: MetaData) -> None:
         """
         Write events to the activity index table. Updates the metadata object.
         
@@ -292,7 +292,7 @@ class StorageManager(ABC):
         pass
     
     @abstractmethod
-    def write_pairs_index_table(self, new_pairs: DataFrame, metadata: Any) -> None:
+    def write_pairs_index(self, new_pairs: DataFrame, metadata: Any) -> None:
         """
         Write the combined pairs back to the database, grouped by interval and first event.
         

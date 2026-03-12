@@ -7,9 +7,9 @@ import re
 from pyspark import RDD
 from pyspark.sql import DataFrame
 from typing import Iterable, List, Literal, Optional, Tuple
-from pyspark.sql.functions import count_distinct, col, to_timestamp, unix_timestamp, sum as spark_sum, count, min as spark_min, max as spark_max, pow as spark_pow
+from pyspark.sql.functions import col, unix_timestamp, sum as spark_sum, count, min as spark_min, max as spark_max, pow as spark_pow
 from pyspark.sql.types import StructType, StructField, StringType, TimestampType, IntegerType
-from siesta_framework.model.DataModel import Active_Pairs_table_schema, EventPair
+from siesta_framework.model.DataModel import Last_Checked_table_schema, EventPair
 import logging
 from siesta_framework.core.sparkManager import get_spark_session
 logger = logging.getLogger("ExtractPairs")
@@ -48,7 +48,7 @@ type Event = Tuple[Event_Type, Timestamp, Position, Attributes]
 type Trace = Tuple[Trace_ID, Tuple[Event]]
 
 
-def extract_active_and_all_pairs(updated_sequence_table_DF: DataFrame, previous_active_pairs: DataFrame | None, lookback: str) -> Tuple[DataFrame, DataFrame]:
+def extract_last_checked_and_all_pairs(updated_sequence_table_DF: DataFrame, previous_last_checked: DataFrame | None, lookback: str, batch_min_ts: int, batch_min_pos: int) -> Tuple[DataFrame, DataFrame]:
     """
     Extracts the event type pairs from a DF that contains the complete traces. 
 
@@ -68,7 +68,7 @@ def extract_active_and_all_pairs(updated_sequence_table_DF: DataFrame, previous_
 
     Args:
         activity_index_DF: The DataFrame that contains the complete activity index. activity (str)|trace_id (str)|position (int)|    start_timestamp (ts)|          attributes (json)
-        previous_active_pairs: The loaded values as a DataFrame from the active pairs table (it should be None 
+        previous_last_checked: The loaded values as a DataFrame from the last checked table (it should be None 
             if it is the first time that events are indexed in this log database).
         lookback: The parameter that describes the maximum time difference that two 
             events can have in order to create an event type pair.
@@ -86,33 +86,34 @@ def extract_active_and_all_pairs(updated_sequence_table_DF: DataFrame, previous_
         (row.activity, row.start_timestamp, row.position, row.attributes)
     ))
     
-    active_pairsRDD = previous_active_pairs.rdd if previous_active_pairs else None
+    last_checkedRDD = previous_last_checked.rdd if previous_last_checked else None
     
     
-    if not active_pairsRDD or active_pairsRDD.count() == 0:
+    if not last_checkedRDD or last_checkedRDD.count() == 0:
         logger.info("No previously indexed pairs found. Extracting all pairs from scratch.")
         full = trace_rdd.groupByKey().map(lambda x: _calculate_pairs_stnm(x, None, real_lookback))
     else:
-        active_pairsRDD_grouped = active_pairsRDD.map(lambda row: (
+        last_checkedRDD_grouped = last_checkedRDD.map(lambda row: (
             row.trace_id,
-            (row.source, row.target, row.last_checked_timestamp)
+            (row.source, row.target, row.last_checked_moment)
         )).groupByKey()
         
-        full = trace_rdd.groupByKey().leftOuterJoin(active_pairsRDD_grouped).map(
+        full = trace_rdd.groupByKey().leftOuterJoin(last_checkedRDD_grouped).map(
             lambda x: _calculate_pairs_stnm((x[0], x[1][0]), x[1][1], real_lookback)
         )
     
     pairs = full.flatMap(lambda x: x[0])
-    active_pairs = full.flatMap(lambda x: x[1])
+    last_checked = full.flatMap(lambda x: x[1])
     spark = get_spark_session()
     pairs_df = spark.createDataFrame(pairs, schema=pair_index_schema)
     # logger.info(pairs_df.show())
-    active_pairs_df = spark.createDataFrame(active_pairs, schema=Active_Pairs_table_schema)
+    last_checked_df = spark.createDataFrame(last_checked, schema=Last_Checked_table_schema)
+    merged_last_checked_df = update_last_checked(previous_last_checked, last_checked_df, batch_min_ts, batch_min_pos, real_lookback)
     
     logger.info(f"Extracted {pairs_df.count()} event pairs")
-    logger.info(f"Extracted {active_pairs_df.count()} last checked entries")
+    logger.info(f"Extracted {last_checked_df.count()} last checked entries")
 
-    return pairs_df, active_pairs_df
+    return pairs_df, merged_last_checked_df
 
 def _calculate_pairs_stnm(activity_index: Tuple[Trace_ID, Iterable[Event]], last: Optional[Iterable[Tuple[str, str, int]]] | None, lookback: Tuple[int, LookbackType]) -> Tuple[List[Tuple], List[Tuple]]:
     """
@@ -121,7 +122,7 @@ def _calculate_pairs_stnm(activity_index: Tuple[Trace_ID, Iterable[Event]], last
     Args:
         activity_index: The complete activity index.
         last: The list with all the last timestamps that correspond to this event.
-        lookback: The parameter that describes the maximum time difference between 
+        lookback: The parameter that describes the maximum time or position difference between 
             two events in a pair.
 
     Returns:
@@ -136,7 +137,10 @@ def _calculate_pairs_stnm(activity_index: Tuple[Trace_ID, Iterable[Event]], last
     for event_name, timestamp, position, attributes in events:
         activity_index_map[event_name].append((timestamp, position, attributes))
     
-    # Build lastMap from active_pairs
+    for key in activity_index_map:
+        activity_index_map[key].sort(key=lambda x: x[1])  # sort by position
+
+    # Build lastMap from last_checked
     last_map = {}
     if last:
         for eventA, eventB, timestamp in last:
@@ -149,7 +153,7 @@ def _calculate_pairs_stnm(activity_index: Tuple[Trace_ID, Iterable[Event]], last
     combinations = _findCombinations(all_events)
     
     results = []
-    new_active_pairs = []
+    new_last_checked = []
     
     for key1, key2 in combinations:
         ts1 = activity_index_map.get(key1, [])
@@ -165,16 +169,16 @@ def _calculate_pairs_stnm(activity_index: Tuple[Trace_ID, Iterable[Event]], last
         
         # If there are any, append them and keep the last timestamp
         if nres:
-            new_active_pairs.append(nres[-1])
+            new_last_checked.append(nres[-1])
             results.extend(nres)
     
     # Convert to last_checked format: (eventA, eventB, trace_id, timestamp)
-    active_pairs_list = [
+    last_checked_list = [
         (x[2], x[0], x[1], x[4])  # trace_id, eventA, eventB, timestampB 
-        for x in new_active_pairs
+        for x in new_last_checked
     ]
     
-    return results, active_pairs_list
+    return results, last_checked_list
 
     
 def createTuples(
@@ -200,7 +204,7 @@ def createTuples(
     for ea_ts, ea_pos, ea_attr in e_source:
         # Evaluate based on previous and last_checked
         if ((prev is None or ea_ts >= prev) and 
-            (last_checked is None or ea_ts >= last_checked)):
+            (last_checked is None or ea_ts > last_checked)):
             
             stop = False
             while i < len(e_target) and not stop:
@@ -306,4 +310,22 @@ def _parse_lookback(lookback: str) -> Tuple[int, LookbackType]:
                 raise ValueError(f"Unsupported unit: {unit}")
 
         return int(total_ms), "time"
-    
+
+def update_last_checked(previous_last_checked: DataFrame|None, current_last_checked: DataFrame, batch_min_ts: int, batch_min_pos: int, real_lookback: Tuple[int, LookbackType]) -> DataFrame:
+     # Merge old and new last_checked, prefer new record where available, keep old otherwise
+    if previous_last_checked is not None:
+        updated_trace_ids = current_last_checked.select("trace_id").distinct()
+        unchanged = previous_last_checked.join(
+            updated_trace_ids, on="trace_id", how="left_anti"
+        )
+        merged_last_checked_df = unchanged.union(current_last_checked)
+    else:
+        merged_last_checked_df = current_last_checked
+
+    # Step 2: Prune records older than lookback relative to the minimum timestamp in the current batch
+    # Only applicable for time-based lookback — index-based has no time dimension to prune on
+    if real_lookback[1] == "time":
+        merged_last_checked_df.filter((col("last_checked_moment") >= batch_min_ts) | ((batch_min_ts - col("last_checked_moment")) < real_lookback[0] / 1000))
+    else:
+        merged_last_checked_df.filter((col("last_checked_moment") >= batch_min_pos) | ((batch_min_pos - col("last_checked_moment")) < real_lookback[0]))
+    return merged_last_checked_df

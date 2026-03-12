@@ -9,7 +9,8 @@ from siesta_framework.model.StorageModel import MetaData
 from siesta_framework.modules.Preprocess.parsers import process_events_batch, process_event_log
 from pyspark.sql.functions import col, from_json
 from pyspark.sql.streaming.query import StreamingQuery
-from siesta_framework.modules.Preprocess.computations import extract_active_and_all_pairs, extract_counts
+from siesta_framework.modules.Preprocess.computations import extract_last_checked_and_all_pairs, extract_counts
+from pyspark.sql.functions import min
 import logging
 logger = logging.getLogger(__name__)
 
@@ -53,7 +54,7 @@ def build_sequence_table(preprocess_config: Dict, metadata: MetaData) -> DataFra
         return process_event_log(preprocess_config, metadata)
 
 
-def build_activity_index_table(metadata: MetaData, events_df: DataFrame | StreamingQuery) -> DataFrame | StreamingQuery:
+def build_activity_index(metadata: MetaData, events_df: DataFrame | StreamingQuery) -> DataFrame | StreamingQuery:
     """
     Build the Activity index Table from the Sequence Table, supporting both batch and streaming modes.
     
@@ -72,27 +73,27 @@ def build_activity_index_table(metadata: MetaData, events_df: DataFrame | Stream
         .load(metadata.sequence_table_path)) 
 
         def process_microbatch(batch_df, batch_id):
-            storage.write_activity_index_table(batch_df, metadata)
+            storage.write_activity_index(batch_df, metadata)
             storage.write_metadata_table(metadata) #temporary for dev
 
     
         write_activity_index_job = (sequence_table_df.writeStream
-            .queryName("build_activity_index_table")
+            .queryName("build_activity_index")
             .foreachBatch(process_microbatch)
             .outputMode("append")
-            .option("checkpointLocation", storage.get_checkpoint_location(metadata, "activity_index_table"))
+            .option("checkpointLocation", storage.get_checkpoint_location(metadata, "activity_index"))
             .start())
         return write_activity_index_job
     
     else:
     
-        storage.write_activity_index_table(events_df=events_df, metadata=metadata)
+        storage.write_activity_index(events_df=events_df, metadata=metadata)
         storage.write_metadata_table(metadata) #temporary for dev
 
         return events_df
 
 
-def build_pairs_index_table(preprocess_config: Dict, metadata: MetaData, batch_pairs_index_df: DataFrame | StreamingQuery):
+def build_pairs_index(preprocess_config: Dict, metadata: MetaData, batch_pairs_index_df: DataFrame | StreamingQuery):
     """
     Build the Index Table from the Active pairs table.
     """
@@ -101,24 +102,24 @@ def build_pairs_index_table(preprocess_config: Dict, metadata: MetaData, batch_p
     storage = get_storage_manager()
 
     if isinstance(batch_pairs_index_df, StreamingQuery):
-        # Already handled inside build_active_pairs_table's foreachBatch
+        # Already handled inside build_last_checked_table's foreachBatch
         logger.info("Preprocess.builders: Pairs index handled by streaming job, skipping.")
         return None
     else:
-        storage.write_pairs_index_table(new_pairs=batch_pairs_index_df, metadata=metadata)
+        storage.write_pairs_index(new_pairs=batch_pairs_index_df, metadata=metadata)
         return batch_pairs_index_df
 
 
 def build_count_table(preprocess_config: Dict, metadata: MetaData, batch_pairs_index_df: DataFrame):
     """
-    Build the Count Table from the active pairs.
+    Build the Count Table from the last checked.
     """
     logger.info("Preprocess.builders: Building Count Table...")
     
     storage = get_storage_manager()
 
     if isinstance(batch_pairs_index_df, StreamingQuery):
-        # Already handled inside build_active_pairs_table's foreachBatch
+        # Already handled inside build_last_checked_table's foreachBatch
         logger.info("Preprocess.builders: Count table handled by streaming job, skipping.")
         return None
     else:
@@ -129,7 +130,7 @@ def build_count_table(preprocess_config: Dict, metadata: MetaData, batch_pairs_i
 
 
 
-def build_active_pairs_table(preprocess_config: Dict, metadata: MetaData, batch_activity_index_df: DataFrame) -> Tuple[DataFrame, DataFrame]:
+def build_last_checked_table(preprocess_config: Dict, metadata: MetaData, batch_activity_index_df: DataFrame) -> Tuple[DataFrame, DataFrame]:
     """
     Build Last Checked.
     """
@@ -139,9 +140,11 @@ def build_active_pairs_table(preprocess_config: Dict, metadata: MetaData, batch_
     lookback = preprocess_config.get("lookback", "7d")
 
     updated_trace_ids = batch_activity_index_df.select("trace_id").distinct()
+    batch_min_ts = batch_activity_index_df.agg(min("start_timestamp")).collect()[0][0]
+    batch_min_pos = batch_activity_index_df.agg(min("position")).collect()[0][0]
 
-    previous_active_pairs = (
-        storage.read_active_pairs_table(metadata)
+    previous_last_checked = (
+        storage.read_last_checked_table(metadata)
         .join(updated_trace_ids, on="trace_id", how="inner")
     )
     sequence_df = (
@@ -149,21 +152,23 @@ def build_active_pairs_table(preprocess_config: Dict, metadata: MetaData, batch_
         .join(updated_trace_ids, on="trace_id", how="inner")
     )
 
-    pairs_df, active_pairs_df = extract_active_and_all_pairs(
+    pairs_df, last_checked_df = extract_last_checked_and_all_pairs(
         updated_sequence_table_DF=sequence_df,
-        previous_active_pairs=previous_active_pairs,
-        lookback=lookback
+        previous_last_checked=previous_last_checked,
+        lookback=lookback,
+        batch_min_ts=batch_min_ts,
+        batch_min_pos=batch_min_pos
     )
 
     # Cache pairs_df so the expensive cogroup isn't recomputed for
     # pairs_index and count_table writes that follow.
     pairs_df.cache()
 
-    storage.write_active_pairs_table(active_pairs_df, metadata)
-    return pairs_df, active_pairs_df
+    storage.write_last_checked_table(last_checked_df, metadata)
+    return pairs_df, last_checked_df
 
 
-def build_active_pairs_index_and_count_streamed(preprocess_config: Dict, metadata: MetaData, batch_activity_index_df: StreamingQuery) -> StreamingQuery:
+def build_last_checked_index_and_count_streamed(preprocess_config: Dict, metadata: MetaData, batch_activity_index_df: StreamingQuery) -> StreamingQuery:
     """
     Building the Last Checked, Pairs Index, and Count Tables concurrently.
     In streaming mode, all three are handled here since pairs_df 
@@ -184,10 +189,13 @@ def build_active_pairs_index_and_count_streamed(preprocess_config: Dict, metadat
         if micro_batch_df.isEmpty():
             return
 
+
+        batch_min_ts = micro_batch_df.agg(min("start_timestamp")).collect()[0][0]
+        batch_min_pos = micro_batch_df.agg(min("position")).collect()[0][0]
         updated_trace_ids = micro_batch_df.select("trace_id").distinct()
 
-        previous_active_pairs = (
-            storage.read_active_pairs_table(metadata)
+        previous_last_checked = (
+            storage.read_last_checked_table(metadata)
             .join(updated_trace_ids, on="trace_id", how="inner")
         )
         sequence_df = (
@@ -195,10 +203,12 @@ def build_active_pairs_index_and_count_streamed(preprocess_config: Dict, metadat
             .join(updated_trace_ids, on="trace_id", how="inner")
         )
 
-        pairs_df, active_pairs_df = extract_active_and_all_pairs(
+        pairs_df, last_checked_df = extract_last_checked_and_all_pairs(
             updated_sequence_table_DF=sequence_df,
-            previous_active_pairs=previous_active_pairs,
-            lookback=lookback
+            previous_last_checked=previous_last_checked,
+            lookback=lookback,
+            batch_min_ts=batch_min_ts,
+            batch_min_pos=batch_min_pos
         )
 
         # Cache pairs_df to avoid recomputing the cogroup for each write.
@@ -206,8 +216,8 @@ def build_active_pairs_index_and_count_streamed(preprocess_config: Dict, metadat
 
         # Write all three tables that depend on pairs here,
         # since pairs_df only lives inside this foreachBatch scope.
-        storage.write_active_pairs_table(active_pairs_df, metadata)
-        storage.write_pairs_index_table(new_pairs=pairs_df, metadata=metadata)
+        storage.write_last_checked_table(last_checked_df, metadata)
+        storage.write_pairs_index(new_pairs=pairs_df, metadata=metadata)
 
         count_df = extract_counts(pairs_df)
         storage.write_count_table(count_df=count_df, metadata=metadata)
@@ -219,7 +229,7 @@ def build_active_pairs_index_and_count_streamed(preprocess_config: Dict, metadat
         sequence_stream_df.writeStream
         .queryName("build_pairs_tables")   # renamed: reflects wider responsibility
         .foreachBatch(process_batch)
-        .option("checkpointLocation", storage.get_checkpoint_location(metadata, "active_pairs"))
+        .option("checkpointLocation", storage.get_checkpoint_location(metadata, "last_checked"))
         .start()
     )
     return job

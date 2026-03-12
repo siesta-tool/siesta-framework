@@ -12,20 +12,25 @@ from datetime import datetime
 import os
 import logging
 from pyspark.sql.window import Window
+
+logger = logging.getLogger("Preprocess.parsers")
 from pyspark.sql.functions import row_number, col
 from delta.tables import DeltaTable
 
 from siesta_framework.model.StorageModel import MetaData
 
-def updatePositions(eventsDF: DataFrame, metadata: MetaData):
+def update_event_positions(eventsDF: DataFrame, metadata: MetaData):
 
     storage_manager = get_storage_manager()
 
-    trace_metadata_table = storage_manager.read_trace_metadata_table(metadata)
+    # Cache the current trace metadata to prevent re-reading after overwrite
+    trace_metadata_table = storage_manager.read_trace_metadata_table(metadata).cache()
+    trace_metadata_table.count()  # Force materialization before overwrite
     updated_events_df = eventsDF\
         .join(trace_metadata_table, on="trace_id", how="left")\
-        .withColumn("position", F.col("position") + F.coalesce(F.col("max_pos"), F.lit(0)))\
-        .drop("max_pos")
+        .withColumn("position", F.col("position") + F.coalesce(F.col("max_pos"), F.lit(-1)) + 1)\
+        .drop("max_pos")\
+        .localCheckpoint()  # Materialize to decouple from trace_metadata_table
     updates_to_apply = updated_events_df.groupBy("trace_id").agg(F.max("position").alias("max_pos"))
 
     updated_metadata_table = trace_metadata_table\
@@ -34,6 +39,7 @@ def updatePositions(eventsDF: DataFrame, metadata: MetaData):
         .alias("max_pos"))
     
     storage_manager.write_trace_metadata_table(updated_metadata_table, metadata)
+    trace_metadata_table.unpersist()
 
     return updated_events_df
     
@@ -50,13 +56,13 @@ def process_events_batch(preprocess_config: Dict, batch_df, batch_id=None, metad
         event_config = EventConfig.from_preprocess_config(preprocess_config, "json")
         events_df = _parse_rows(event_config, batch_df)
 
-        events_df = updatePositions(events_df, metadata)
+        events_df = update_event_positions(events_df, metadata)
 
         get_storage_manager().write_sequence_table(events_df, metadata)
         # return events_df
     except Exception as e:
         batch_info = f"batch {batch_id}" if batch_id is not None else "batch"
-        print(f"Error processing {batch_info}: {e}")
+        logger.error(f"Error processing {batch_info}: {e}")
 
 
 
@@ -132,9 +138,9 @@ def process_event_log(preprocess_config: dict, metadata: MetaData) -> DataFrame:
     
     # If local, verify file exists and upload
     if os.path.exists(log_path):
-        print(f"Uploading {log_path} to storage...")
+        logger.info(f"Uploading {log_path} to storage...")
         log_path = storage.upload_file(preprocess_config, log_path, filename)
-        print(f"File uploaded to: {log_path}")
+        logger.info(f"File uploaded to: {log_path}")
     
     # Else, assume log_path is already in storage (e.g., s3a://...)
 
@@ -148,7 +154,7 @@ def process_event_log(preprocess_config: dict, metadata: MetaData) -> DataFrame:
     else:
         raise ValueError(f"Unsupported log format: {log_format}")
     
-    events_df = updatePositions(events_df, metadata)
+    events_df = update_event_positions(events_df, metadata)
 
     storage.write_sequence_table(events_df, metadata)
     return events_df
@@ -377,16 +383,32 @@ def _parse_rows(config: EventConfig, df: DataFrame) -> DataFrame:
 
     # Get the source column name for trace_id to use in partitioning
     trace_id_source = config.field_mappings.get('trace_id')
+    position_source = config.field_mappings.get('position')
 
-    # Add position column using window function
+    # Check if a position column exists in the data to use as intra-trace sort key
+    has_position_col = position_source is not None and position_source in df.columns
+
+    # Preserve original row order for fallback ordering
+    df = df.withColumn("_row_idx", monotonically_increasing_id())
+
+    # Assign 0-based intra-trace positions
     if trace_id_source and trace_id_source in df.columns:
+        if has_position_col:
+            # Position column indicates intra-trace ordering within the batch
+            order_col = F.col(position_source)
+        else:
+            # No position column: use original row order
+            order_col = F.col("_row_idx")
         df = df.withColumn("position", row_number().over(
-            Window.partitionBy(trace_id_source).orderBy(trace_id_source)
-        ))
+            Window.partitionBy(trace_id_source).orderBy(order_col)
+        ) - 1)
     else:
+        # No trace_id column: global row ordering
         df = df.withColumn("position", row_number().over(
-            Window.orderBy(monotonically_increasing_id())
-        ))
+            Window.orderBy("_row_idx")
+        ) - 1)
+
+    df = df.drop("_row_idx")
 
     schema = Event.get_schema()
     schema_type_map = {f.name: f.dataType for f in schema.fields}
@@ -453,9 +475,9 @@ def upload_log_file_object(preprocess_config: dict, file: Any, destination_path:
     if not storage:
         raise RuntimeError("Storage manager is not initialized.")
 
-    print(f"Uploading file object to storage as {destination_path}...")
+    logger.info(f"Uploading file object to storage as {destination_path}...")
     s3_path = storage.upload_file_object(preprocess_config, file, destination_path)
-    print(f"Parser: File uploaded to: {s3_path}")
+    logger.info(f"File uploaded to: {s3_path}")
     #TODO: handle s3 path
     return s3_path
 
