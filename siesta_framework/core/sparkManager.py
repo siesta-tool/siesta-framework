@@ -143,8 +143,38 @@ def get_spark_session() -> SparkSession:
         raise RuntimeError("SparkSession not initialized. Call startup() first.")
     return spark_session
 
-def __del__():
+
+def cleanup():
+    """Release cached data and Delta metadata without stopping the session.
+    
+    Call this after completing a batch of work (e.g., preprocessing or mining)
+    to free memory while keeping the session alive for subsequent requests.
+    """
+    global spark_session
+    if spark_session is None:
+        return
+
+    # Clear all cached RDDs/DataFrames
+    try:
+        sc = spark_session.sparkContext
+        for rdd_id in list(sc._jsc.getPersistentRDDs().keys()):
+            sc._jsc.getPersistentRDDs().get(rdd_id).unpersist(True)
+    except Exception:
+        pass
+
+    # Clear Delta Lake's transaction log cache
+    try:
+        spark_session._jvm.org.apache.spark.sql.delta.DeltaLog.clearCache()
+    except Exception:
+        pass
+
+
+def shutdown():
+    """Stop the Spark session and release all resources."""
+    global spark_session
     if spark_session:
+        cleanup()
         print("Shutting down SparkSession...")
         spark_session.stop()
+        spark_session = None
         print("SparkSession stopped successfully.")

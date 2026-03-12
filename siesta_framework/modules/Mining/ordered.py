@@ -160,7 +160,8 @@ def discover_ordered(evolved_df: DataFrame, metadata: MetaData) -> DataFrame:
     :return: DataFrame with columns (template, source, target, trace_id, occurrences).
     """
     storage = get_storage_manager()
-    old_constraints_df = storage.read_ordered_constraints(metadata)
+    old_constraints_df = storage.read_ordered_constraints(metadata).cache()
+    old_constraints_df.count()
 
     # Invalidate old constraints for traces that have evolved 
     evolved_trace_ids = evolved_df.select("trace_id").distinct()
@@ -179,6 +180,7 @@ def discover_ordered(evolved_df: DataFrame, metadata: MetaData) -> DataFrame:
     # Force materialization
     ordered_constraints = ordered_constraints.cache()
     ordered_constraints.count()
+    old_constraints_df.unpersist()
 
     storage.write_ordered_constraints(metadata, ordered_constraints)
 

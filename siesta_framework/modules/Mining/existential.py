@@ -60,4 +60,9 @@ def discover_existential(evolved_df, metadata: MetaData) -> DataFrame:
         .withColumn("occurrences", F.col("occurrences") + 1) \
         .select("template", "source", "trace_id", "occurrences")
     
-    return exactly_df.unionByName(existence_df).unionByName(absence_df)
+    result = exactly_df.unionByName(existence_df).unionByName(absence_df)
+    result = result.cache()
+    result.count()
+    exactly_df.unpersist()
+
+    return result

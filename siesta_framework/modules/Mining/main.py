@@ -9,6 +9,7 @@ from siesta_framework.core.interfaces import SiestaModule, StorageManager
 from siesta_framework.core.config import get_system_config
 from siesta_framework.core.logger import timed
 from siesta_framework.core.storageFactory import get_storage_manager
+from siesta_framework.core.sparkManager import cleanup as spark_cleanup
 from siesta_framework.modules.Mining.existential import discover_existential
 from siesta_framework.modules.Mining.positional import discover_positional
 from siesta_framework.modules.Mining.ordered import discover_ordered
@@ -121,7 +122,7 @@ class Miner(SiestaModule):
             raise ValueError(f"Invalid categories specified in mining_config: {self.mining_config['categories']}. Valid options are: {valid_categories}.")
 
         # Ensure output_path is unique for each run to avoid overwriting results
-        given_output_path = config.get("output_path", "output/" + config.get("log_name", "mining_results"))
+        given_output_path = config.get("output_path", "../output/" + config.get("log_name", "mining_results"))
         Path(given_output_path).parent.mkdir(parents=True, exist_ok=True)
         self.mining_config["output_path"] = given_output_path + "_" + str(datetime.datetime.now().timestamp()) + ".csv"
 
@@ -164,9 +165,12 @@ class Miner(SiestaModule):
             if category in ["negation", "*"]:
                 miners.append(("negation", lambda e, m: discover_negations(e, m, include_trace_lists)))
         
+        raw_miner_results = []
         constraints_df_list = []
         for category, miner_func in miners:
-            constraints_df_list.append(miner_func(evolved_df, self.metadata).withColumn("category", F.lit(category)))
+            result = miner_func(evolved_df, self.metadata)
+            raw_miner_results.append(result)
+            constraints_df_list.append(result.withColumn("category", F.lit(category)))
 
         constraints_df = constraints_df_list[0]
         for constaint_df in constraints_df_list[1:]:
@@ -174,11 +178,19 @@ class Miner(SiestaModule):
 
         # Update metadata with new last mining timestamp based on the max timestamp of the evolved traces
         self.metadata.last_mined_timestamp = evolved_df.agg({"start_timestamp": "max"}).collect()[0][0] if not evolved_df.rdd.isEmpty() else self.metadata.last_mined_timestamp
+        evolved_df.unpersist()
         self.storage.write_metadata_table(self.metadata)
 
         # Output the discovered constraints to a CSV file on the driver's local filesystem 
         # based on the specified output path in the mining configuration.
         self._output_constraints(constraints_df, self.metadata.trace_count)
+
+        # Release cached miner results now that output is written
+        for df in raw_miner_results:
+            df.unpersist(blocking=False)
+
+        # Release Delta metadata and any remaining cached data
+        spark_cleanup()
 
 
     def _output_constraints(self, constraints_df: DataFrame, trace_count: int):

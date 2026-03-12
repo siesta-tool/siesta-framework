@@ -24,7 +24,8 @@ def discover_positional(evolved: DataFrame, metadata: MetaData) -> DataFrame:
     storage = get_storage_manager()
 
     # Get Init and End constraints that are related to unevolved traces (flat ConstraintEntry rows).
-    old_valid = storage.read_positional_constraints(metadata, filter_out_df=evolved)
+    old_valid = storage.read_positional_constraints(metadata, filter_out_df=evolved).cache()
+    old_valid.count()
 
     # Init constraints: one flat row per (activity, trace_id) at position 1
     init_events = evolved.where(col("position") == 1)
@@ -52,6 +53,7 @@ def discover_positional(evolved: DataFrame, metadata: MetaData) -> DataFrame:
     # Force materialization before writing
     positional_constraints = positional_constraints.cache()
     positional_constraints.count()
+    old_valid.unpersist()
 
     storage.write_positional_constraints(metadata, positional_constraints)
     

@@ -100,9 +100,10 @@ def discover_unordered(evolved_df: DataFrame, metadata: MetaData) -> DataFrame:
     # Compute global activity set for generating all pairs
     global_activities = single_table.select("activity").distinct()
     
-    # Collect global activities to a comma-separated string for broadcasting
-    global_activities_list = [row.activity for row in global_activities.collect()]     # TODO: if global activity set is very large, this could be a bottleneck. In that case, consider alternative strategies (e.g., partitioning by activity subsets).
-    global_activities_str = ",".join(sorted(global_activities_list))
+    # Aggregate global activities into a single sorted comma-separated string
+    global_activities_str = global_activities.agg(
+        F.concat_ws(",", F.sort_array(F.collect_set("activity")))
+    ).first()[0]
     
     # Mine constraints for evolved traces
     if evolved_trace_ids.count() == 0:

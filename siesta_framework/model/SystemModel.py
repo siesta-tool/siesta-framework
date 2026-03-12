@@ -76,7 +76,7 @@ DEFAULT_MINING_CONFIG: Dict[str, Any] = {
   "grouping": "trace",  # or "window"
   "identifiers": ["trace_id"],  # fields to identify groups (e.g. 'trace_id' for trace-based, irrelevant for window-based)
   "window_size": 30,  # position-based window size, if grouping by window
-  "output_path": "output/example_log", # where to store results
+  "output_path": "../output/example_log", # where to store results
   "include_trace_lists": False, # whether to include the list of trace_ids supporting each constraint in the output (can be large)
   "branching_bound": 2,
   "branching_policy": "and",

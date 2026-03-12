@@ -59,7 +59,7 @@ def process_events_batch(preprocess_config: Dict, batch_df, batch_id=None, metad
         events_df = update_event_positions(events_df, metadata)
 
         get_storage_manager().write_sequence_table(events_df, metadata)
-        # return events_df
+        events_df.unpersist()  # Release checkpointed data
     except Exception as e:
         batch_info = f"batch {batch_id}" if batch_id is not None else "batch"
         logger.error(f"Error processing {batch_info}: {e}")

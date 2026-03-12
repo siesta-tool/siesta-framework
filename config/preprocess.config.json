@@ -1,6 +1,6 @@
 {
-  "log_name": "example_log",
-  "log_path": "datasets/test_nopos.csv",
+  "log_name": "bpic2017",
+  "log_path": "datasets/bpic2017.csv",
   "storage_namespace": "siesta",
   "overwrite_data": false,
   "enable_streaming": false,
