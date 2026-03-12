@@ -19,7 +19,7 @@ def _update_all_activity_pairs(metadata: MetaData) -> DataFrame:
     """
     storage = get_storage_manager()
 
-    all_activities = storage.read_activity_index_table(metadata) \
+    all_activities = storage.read_activity_index(metadata) \
         .select("activity").distinct()
 
     stored_pairs = storage.read_all_activity_pairs(metadata)
@@ -102,7 +102,7 @@ def discover_negations(evolved_df: DataFrame, metadata: MetaData,
     # ------------------------------------------------------------------
     # TRACE-LIST MODE  (incremental)
     # ------------------------------------------------------------------
-    all_trace_ids = storage.read_activity_index_table(metadata) \
+    all_trace_ids = storage.read_activity_index(metadata) \
         .select("trace_id").distinct()
 
     # Read & materialize old negation constraints before overwriting

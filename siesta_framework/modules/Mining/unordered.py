@@ -90,7 +90,7 @@ def discover_unordered(evolved_df: DataFrame, metadata: MetaData) -> DataFrame:
     )
 
     # Build complete activity set per evolved trace
-    single_table = storage.read_activity_index_table(metadata)
+    single_table = storage.read_activity_index(metadata)
     
     # Complete activity set for evolved traces
     complete_activities = single_table.join(
