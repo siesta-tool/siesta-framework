@@ -28,52 +28,68 @@ A distributed event log processing and declarative constraint mining framework b
    cd siesta-framework
    ```
 
-2. Create and activate virtual environment:
+2. Create and activate a virtual environment (Recommended):
    ```bash
-   cd siesta_framework
    python3 -m venv venv
    source venv/bin/activate  # On Windows: venv\Scripts\activate
    ```
 
 3. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+   You can choose which dependencies to install using the provided scripts:
+
+   - **All dependencies** (core, UI, and testing):
+     ```bash
+     python install_dependencies.py
+     ```
+   - **Core Siesta framework only**:
+     ```bash
+     cd siesta
+     python install_dependencies.py
+     ```
+   - **Web UI only**:
+     ```bash
+     cd ui
+     python install_dependencies.py
+     ```
+   - **Testing only**:
+     ```bash
+     cd tests
+     python install_dependencies.py
+     ```
 
 ### Running the Framework
 
-#### Option 1: Web UI (Recommended)
+Since the components run independently, use the two separate main files to start the UI and API.
 
-The easiest way to use Siesta Framework is through the web interface:
+#### 1. API Server
 
+Start the core API server (default config):
 ```bash
-./start.sh
-```
-
-This will start both the API server and the web UI. Then open your browser to:
-- **Web UI**: http://localhost:8501
-- **API Docs**: http://localhost:8000/docs
-
-See the [UI README](ui/README.md) for more details.
-
-#### Option 2: API Server Only
-
-Run the API server (default config):
-```bash
-cd siesta_framework
-python3 main.py
+cd siesta
+python main.py
 ```
 
 Run with specific config:
 ```bash
-python3 main.py --config config/siesta.config.json
+python main.py --config ../config/siesta.config.json
 ```
+- **API Docs**: http://localhost:8000/docs
 
-#### Option 3: CLI Mode
+#### 2. Web UI
 
-Run a specific module directly:
+In a new terminal window (with the virtual environment activated), run the UI:
 ```bash
-python3 main.py --config config/preprocess.config.json preprocess
+cd ui
+streamlit run main.py
+```
+- **Web UI**: http://localhost:8501
+
+#### CLI Mode
+
+Run a specific module directly (bypassing the API server):
+```bash
+cd siesta
+python main.py --config ../config/preprocess.config.json preprocess
 ```
 
 ## Architecture
@@ -84,7 +100,7 @@ siesta-framework/
 │   ├── siesta.config.json
 │   ├── preprocess.config.json
 │   └── mining.config.json
-├── siesta_framework/       # Core framework
+├── siesta/               # Core framework
 │   ├── core/              # Core components
 │   ├── modules/           # Processing modules
 │   │   ├── Preprocess/   # Event log preprocessing
@@ -119,7 +135,8 @@ curl -X POST "http://localhost:8000/preprocess/run" \
 
 #### Via CLI
 ```bash
-python3 main.py --config config/preprocess.config.json preprocess
+cd siesta
+python main.py --config ../config/preprocess.config.json preprocess
 ```
 
 ### Mining Constraints
@@ -139,7 +156,8 @@ curl -X POST "http://localhost:8000/mining/run" \
 
 #### Via CLI
 ```bash
-python3 main.py --config config/mining.config.json mining
+cd siesta
+python main.py --config ../config/mining.config.json mining
 ```
 
 ## Configuration
@@ -225,7 +243,7 @@ Siesta uses S3-compatible storage with Delta Lake format for efficient distribut
 
 ### Adding a New Module
 
-1. Create module directory in `siesta_framework/modules/`
+1. Create module directory in `siesta/modules/`
 2. Implement `SiestaModule` interface
 3. Add `register_routes()` for API endpoints
 4. Implement `cli_run()` for CLI mode

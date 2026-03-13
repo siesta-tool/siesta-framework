@@ -38,7 +38,7 @@ EXPECTED_TOTAL_PAIRS = 10
 
 def _read_pairs_df(preprocessed):
     """Read the pairs index directly (S3Manager.read_pairs_index returns None)."""
-    from siesta_framework.core.sparkManager import get_spark_session
+    from siesta.core.sparkManager import get_spark_session
 
     spark = get_spark_session()
     return spark.read.format("delta").load(
@@ -54,7 +54,7 @@ class TestSequenceTable:
     """Verify the Sequence Table stored in S3."""
 
     def test_schema(self, preprocessed):
-        from siesta_framework.model.DataModel import Event
+        from siesta.model.DataModel import Event
 
         seq_df = preprocessed["storage"].read_sequence_table(preprocessed["metadata"])
         expected = {f.name for f in Event.get_schema().fields}
@@ -164,7 +164,7 @@ class TestTraceMetadata:
 class TestPairsIndex:
 
     def test_schema(self, preprocessed):
-        from siesta_framework.model.DataModel import EventPair
+        from siesta.model.DataModel import EventPair
 
         pairs_df = _read_pairs_df(preprocessed)
         expected = {f.name for f in EventPair.get_schema().fields}
@@ -317,7 +317,7 @@ class TestLastCheckedTable:
         assert lc_df.count() > 0
 
     def test_schema(self, preprocessed):
-        from siesta_framework.model.DataModel import Last_Checked_table_schema
+        from siesta.model.DataModel import Last_Checked_table_schema
 
         lc_df = preprocessed["storage"].read_last_checked_table(preprocessed["metadata"])
         expected = {f.name for f in Last_Checked_table_schema.fields}

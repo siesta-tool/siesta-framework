@@ -43,7 +43,7 @@ A beautiful, modern, and minimal web interface for the Siesta Framework event lo
 
 1. Make sure the Siesta Framework API is running:
    ```bash
-   cd ../siesta_framework
+   cd ../siesta
    python main.py
    ```
 
