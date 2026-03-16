@@ -1,5 +1,38 @@
-from typing import Dict, Any
+from typing import List, Literal, TypedDict, Any, NotRequired as Optional ,Dict, Any
 
+
+
+###############################################
+# TYPES
+###############################################
+
+# QUERY
+
+# Equivalent to type QUERY_EVENT
+class Query_Event(TypedDict, total=False):
+    activity: str
+    position: int
+    symbol: Optional[str]
+
+# Equivalent to type QUERY_CONTSRAINT
+Query_Constraint = Any
+
+# Equivalent to type QUERY_METHOD_INPUT
+class Query_Method_Input(TypedDict, total=False):
+    pattern: List[Query_Event]
+    constraints: Optional[List[Query_Constraint]]
+
+# Equivalent to type QUERY_CONFIG
+class Query_Config(TypedDict, total=False):
+    log_name: str
+    storage_namespace: str
+    method: Literal['stats', 'patterns', 'detection', 'explore', 'violations']
+    query: Query_Method_Input
+    mode: Optional[str]
+
+###############################################
+# DEFAULTS
+###############################################
 
 DEFAULT_SYSTEM_CONFIG: Dict[str, Any] = {
     # Storage configuration
@@ -66,6 +99,18 @@ DEFAULT_PREPROCESS_CONFIG: Dict[str, Any] = {
 }
 
 
+DEFAULT_QUERY_CONFIG: Query_Config = {
+    "log_name": "example_log",
+    "storage_namespace": "siesta",
+    "method": "stats",
+    "query": {
+        "pattern": [],
+        # "constraints" is optional
+    },
+    # "mode" is optional
+}
+
+
 DEFAULT_MINING_CONFIG: Dict[str, Any] = {
   "log_name": "example_log",
   "storage_namespace": "siesta",
@@ -83,3 +128,4 @@ DEFAULT_MINING_CONFIG: Dict[str, Any] = {
   "support_threshold": 0.0,
   "confidence_threshold": 0.0,
 }
+

@@ -1,0 +1,24 @@
+{
+  "log_name": "bpic2017",
+  "storage_namespace": "siesta",
+  "method": "stats",
+  "query": {
+    "pattern": [
+      {
+        "activity": "A",
+        "position": 0
+      },
+      {
+        "activity": "B",
+        "position": 1,
+        "symbol": "+"
+      }
+    ],
+    "constraints": [
+      {
+        "type": "time_window",
+        "value": "5m"
+      }
+    ]
+  }
+}
