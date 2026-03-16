@@ -8,6 +8,7 @@ from siesta_framework.core.storageFactory import get_storage_manager
 from siesta_framework.core.sparkManager import get_spark_session, cleanup as spark_cleanup
 from siesta_framework.core.config import get_system_config
 from siesta_framework.core.logger import timed
+from siesta_framework.model.StorageModel import MetaData
 from siesta_framework.model.SystemModel import DEFAULT_QUERY_CONFIG, Query_Config
 import json
 import logging
@@ -27,6 +28,7 @@ class Example(SiestaModule):
     storage: StorageManager
     siesta_config: Dict[str, Any]
     query_config: Query_Config
+    metadata: MetaData | None
 
     type exampleSimpleType = int | str
     type exampleComplicatedType = Dict[str, Tuple[int, exampleSimpleType]]
@@ -76,17 +78,23 @@ class Example(SiestaModule):
         else:
             raise RuntimeError(f"Config not provided")
         
-        self._dissect_query(self.query_config)
+        self.metadata = MetaData(
+            storage_namespace=self.query_config.get("storage_namespace", "siesta"),
+            log_name=self.query_config.get("log_name", "default_log"),
+            storage_type=self.query_config.get("storage_type", "s3")
+        )
+
+        self._dissect_query(self.query_config, self.metadata)
 
     def _load_query_config(self, config: Query_Config):
         self.query_config = DEFAULT_QUERY_CONFIG.copy()
         self.query_config = self.query_config | config
         logger.info(self.query_config)
 
-    def _dissect_query(self, config: Query_Config):
+    def _dissect_query(self, config: Query_Config, metadata: MetaData):
         match config.get("method", "").lower():
             case "stats":
-                stats_query_processor(config)
+                stats_query_processor(config, metadata)
             case "patterns":
                 pass
             case "detection":

@@ -5,12 +5,17 @@
   "query": {
     "pattern": [
       {
-        "activity": "A",
+        "activity": "A_Create Application",
         "position": 0
       },
       {
-        "activity": "B",
+        "activity": "A_Submitted",
         "position": 1,
+        "symbol": "+"
+      },
+      {
+        "activity": "W_Complete application",
+        "position": 2,
         "symbol": "+"
       }
     ],
