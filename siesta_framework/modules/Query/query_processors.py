@@ -6,7 +6,7 @@ from pyspark.sql import functions as F
 import logging
 logger = logging.getLogger("Query Processors")
 
-def stats_query_processor(config: Query_Config, metadata: MetaData) -> list[str]|None:
+def process_stats_query(config: Query_Config, metadata: MetaData) -> list[str]|None:
     """
     Splits the query events in pairs and retrieves the statistics for each pair from the count table.
     """

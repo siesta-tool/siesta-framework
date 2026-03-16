@@ -12,7 +12,7 @@ from siesta_framework.model.StorageModel import MetaData
 from siesta_framework.model.SystemModel import DEFAULT_QUERY_CONFIG, Query_Config
 import json
 import logging
-from siesta_framework.modules.Query.query_processors import stats_query_processor
+from siesta_framework.modules.Query.query_processors import process_stats_query
 
 
 logger = logging.getLogger("Query")
@@ -94,7 +94,7 @@ class Example(SiestaModule):
     def _dissect_query(self, config: Query_Config, metadata: MetaData):
         match config.get("method", "").lower():
             case "stats":
-                stats_query_processor(config, metadata)
+                process_stats_query(config, metadata)
             case "patterns":
                 pass
             case "detection":
