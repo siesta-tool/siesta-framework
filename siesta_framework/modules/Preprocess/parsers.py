@@ -22,7 +22,7 @@ from siesta_framework.model.StorageModel import MetaData
 def update_event_positions(eventsDF: DataFrame, metadata: MetaData):
 
     storage_manager = get_storage_manager()
-
+    eventsDF = eventsDF.sort("start_timestamp")
     # Cache the current trace metadata to prevent re-reading after overwrite
     trace_metadata_table = storage_manager.read_trace_metadata_table(metadata).cache()
     trace_metadata_table.count()  # Force materialization before overwrite

@@ -201,6 +201,7 @@ class S3Manager(StorageManager):
                 .format("delta") \
                 .mode("overwrite") \
                 .partitionBy("source") \
+                .partitionBy("target") \
                 .save(metadata.count_table_path)
 
         logger.info(f"Database structure initialized at {metadata.count_table_path}")
@@ -668,6 +669,7 @@ class S3Manager(StorageManager):
             count_df.write\
                 .format("delta")\
                 .partitionBy("source")\
+                .partitionBy("target") \
                 .mode("overwrite")\
                 .option("mergeSchema", "true")\
                 .save(metadata.count_table_path)

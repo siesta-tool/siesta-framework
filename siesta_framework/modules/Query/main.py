@@ -84,6 +84,7 @@ class Example(SiestaModule):
             storage_type=self.query_config.get("storage_type", "s3")
         )
 
+
         self._dissect_query(self.query_config, self.metadata)
 
     def _load_query_config(self, config: Query_Config):
@@ -94,7 +95,7 @@ class Example(SiestaModule):
     def _dissect_query(self, config: Query_Config, metadata: MetaData):
         match config.get("method", "").lower():
             case "stats":
-                process_stats_query(config, metadata)
+                timed(process_stats_query, "Stats Query: ", config, metadata)
             case "patterns":
                 pass
             case "detection":

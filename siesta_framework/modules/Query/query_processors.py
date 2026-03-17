@@ -1,8 +1,10 @@
+from siesta_framework.core.logger import timed
 from siesta_framework.core.sparkManager import get_spark_session
 from siesta_framework.core.storageFactory import get_storage_manager
 from siesta_framework.model.StorageModel import MetaData
 from siesta_framework.model.SystemModel import Query_Config
 from pyspark.sql import functions as F
+from functools import reduce
 import logging
 logger = logging.getLogger("Query Processors")
 
@@ -20,7 +22,8 @@ def process_stats_query(config: Query_Config, metadata: MetaData) -> list[str]|N
     logger.info(activities)
     pairs_df = spark.createDataFrame(pairs, ["source", "target"])
     df = count_table.join(pairs_df, on=["source", "target"], how="inner")
-    df.show()
+
+    timed(df.show, "df show")
 
 
 
