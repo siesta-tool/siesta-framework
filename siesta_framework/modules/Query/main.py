@@ -18,7 +18,7 @@ from siesta_framework.modules.Query.query_processors import process_stats_query
 logger = logging.getLogger("Query")
 
 
-class Example(SiestaModule):
+class Query(SiestaModule):
     def __init__(self):
         super().__init__()
 
@@ -38,8 +38,8 @@ class Example(SiestaModule):
 
     def register_routes(self) -> SiestaModule.ApiRoutes:
         return {
-            "example_endpoint": ("GET", self.example_endpoint),
-            "log_info": ("GET", self.get_log_info)
+            "run": ("POST", self.api_run),
+            "test2": ("GET", self.get_log_info)
         }
     
     def cli_run(self, args: Any, **kwargs: Any) -> Any:
@@ -87,6 +87,25 @@ class Example(SiestaModule):
 
         self._dissect_query(self.query_config, self.metadata)
 
+    def api_run(self, query_config: Query_Config) -> str|None:
+        """
+        Entry point for Query via the API.
+        """
+
+        self.siesta_config = get_system_config()
+        self.storage = get_storage_manager()
+
+        
+        self._load_query_config(query_config)
+
+        run_metadata = MetaData(
+            storage_namespace=self.query_config.get("storage_namespace", "siesta"),
+            log_name=self.query_config.get("log_name", "default_log"),
+            storage_type=self.query_config.get("storage_type", "s3")
+        )
+
+        return self._dissect_query(self.query_config, run_metadata)
+
     def _load_query_config(self, config: Query_Config):
         self.query_config = DEFAULT_QUERY_CONFIG.copy()
         self.query_config = self.query_config | config
@@ -95,7 +114,7 @@ class Example(SiestaModule):
     def _dissect_query(self, config: Query_Config, metadata: MetaData):
         match config.get("method", "").lower():
             case "stats":
-                timed(process_stats_query, "Stats Query: ", config, metadata)
+                return timed(process_stats_query, "Stats Query: ", config, metadata)
             case "patterns":
                 pass
             case "detection":

@@ -8,7 +8,7 @@ from functools import reduce
 import logging
 logger = logging.getLogger("Query Processors")
 
-def process_stats_query(config: Query_Config, metadata: MetaData) -> list[str]|None:
+def process_stats_query(config: Query_Config, metadata: MetaData) -> list[any]|None|str: # type: ignore
     """
     Splits the query events in pairs and retrieves the statistics for each pair from the count table.
     """
@@ -23,7 +23,7 @@ def process_stats_query(config: Query_Config, metadata: MetaData) -> list[str]|N
     pairs_df = spark.createDataFrame(pairs, ["source", "target"])
     df = count_table.join(pairs_df, on=["source", "target"], how="inner")
 
-    timed(df.show, "df show")
+    return str(df.collect())
 
 
 
