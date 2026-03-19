@@ -12,7 +12,7 @@ from siesta_framework.model.StorageModel import MetaData
 from siesta_framework.model.SystemModel import DEFAULT_QUERY_CONFIG, Query_Config
 import json
 import logging
-from siesta_framework.modules.Query.query_processors import process_stats_query
+import siesta_framework.modules.Query.query_processors as query_processors
 
 
 logger = logging.getLogger("Query")
@@ -107,6 +107,7 @@ class Query(SiestaModule):
         return self._dissect_query(self.query_config, run_metadata)
 
     def _load_query_config(self, config: Query_Config):
+        #TODO: Add schema validation w/ explainability
         self.query_config = DEFAULT_QUERY_CONFIG.copy()
         self.query_config = self.query_config | config
         logger.info(self.query_config)
@@ -114,11 +115,11 @@ class Query(SiestaModule):
     def _dissect_query(self, config: Query_Config, metadata: MetaData):
         match config.get("method", "").lower():
             case "stats":
-                return timed(process_stats_query, "Stats Query: ", config, metadata)
+                return timed(query_processors.process_stats_query, "Stats Query: ", config, metadata)
             case "patterns":
                 pass
             case "detection":
-                pass
+                return timed(query_processors.process_detection_query, "Detection Query: ", config, metadata)
             case "explore":
                 pass
             case "violations":

@@ -17,9 +17,11 @@ class Query_Event(TypedDict, total=False):
 # Equivalent to type QUERY_CONTSRAINT
 Query_Constraint = Any
 
+Pattern = List[Query_Event]
+
 # Equivalent to type QUERY_METHOD_INPUT
 class Query_Method_Input(TypedDict, total=False):
-    pattern: List[Query_Event]
+    pattern: Pattern
     constraints: Optional[List[Query_Constraint]]
 
 # Equivalent to type QUERY_CONFIG

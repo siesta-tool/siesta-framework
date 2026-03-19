@@ -2,11 +2,27 @@ from siesta_framework.core.logger import timed
 from siesta_framework.core.sparkManager import get_spark_session
 from siesta_framework.core.storageFactory import get_storage_manager
 from siesta_framework.model.StorageModel import MetaData
-from siesta_framework.model.SystemModel import Query_Config
+from siesta_framework.model.SystemModel import Query_Config, Pattern
 from pyspark.sql import functions as F
+from pyspark.sql.functions import col
+
 from functools import reduce
 import logging
 logger = logging.getLogger("Query Processors")
+
+
+def _extract_consecutive_pairs(pattern: Pattern):
+    activities = sorted( pattern, key=lambda x: x.get("position", 0))
+    consecutive_pairs = set(zip(map(lambda x: x.get("activity"), activities), map(lambda x: x.get("activity"), activities[1:])))
+    return consecutive_pairs
+
+def _extract_pairs_for_pattern_detection(pattern: Pattern):
+    # (a, 0, _), (a, 1, ||), (b, 2, _), (a, 3, _)
+    def branch_or_patterns(pattern: Pattern):
+        for event in pattern:
+            
+
+
 
 def process_stats_query(config: Query_Config, metadata: MetaData) -> list[any]|None|str: # type: ignore
     """
@@ -15,15 +31,43 @@ def process_stats_query(config: Query_Config, metadata: MetaData) -> list[any]|N
     spark = get_spark_session()
     count_table = get_storage_manager().read_count_table(metadata)
     
-    activities = sorted( config.get("query", {}).get("pattern", []),\
-                                key=lambda x: x.get("position", 0))
-    pairs = list(zip(map(lambda x: x.get("activity"), activities), map(lambda x: x.get("activity"), activities[1:])))
+    pairs = _extract_consecutive_pairs(config.get("query", {}).get("pattern", []))
     
-    logger.info(activities)
     pairs_df = spark.createDataFrame(pairs, ["source", "target"])
     df = count_table.join(pairs_df, on=["source", "target"], how="inner")
 
     return str(df.collect())
 
 
+def process_detection_query(config: Query_Config, metadata: MetaData):
+    spark = get_spark_session()
+    storage = get_storage_manager()
 
+    # 1. Generating pairs from sequence (abc -> (a,b), (b,c), (c,d))
+    pairs = _extract_consecutive_pairs(config.get("query", {}).get("pattern", []))
+    
+    print(pairs)
+
+    # 2. TODO: Optimizer
+
+
+
+    # 3. Find trace_ids common on all pairs
+    # inner-join -> count -> filter for 100% support
+    num_pairs = len(pairs)
+    pairs_df = spark.createDataFrame(pairs, ["source", "target"])
+    index_table = storage.read_pairs_index(metadata)
+    intersected_ids = (
+        index_table
+        .join(pairs_df, on=["source", "target"], how="inner")
+        .groupBy("trace_id")
+        .agg(F.count_distinct("source", "target").alias("pair_count"))
+        # Only keep IDs that appeared in every single pair
+        .filter(F.col("pair_count") == num_pairs)
+        .select("trace_id")
+    )
+
+    count = intersected_ids.count()
+    print(count)
+    return str(count)
+    

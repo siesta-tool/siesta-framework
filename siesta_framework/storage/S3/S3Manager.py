@@ -407,7 +407,16 @@ class S3Manager(StorageManager):
     ###########################################
 
     def read_pairs_index(self, metadata: Any) -> DataFrame:
-        return None
+        """
+        Read the S3 Index table
+        """ 
+        try:
+            df = self.spark.read.format("delta").load(metadata.pairs_index_path)
+            return df
+        except Exception as e:
+            logger.info(f"Error reading from {metadata.pairs_index_path}: {e}")
+            return self.spark.createDataFrame([], schema=EventPair.get_schema())
+
 
     def write_pairs_index(self, new_pairs: DataFrame, metadata: MetaData) -> None:
         """
