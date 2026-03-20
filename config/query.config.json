@@ -3,6 +3,7 @@
   "storage_namespace": "siesta",
   "method": "detection",
   "query": {
+    "alt_pattern": "O_Created ( O_Accepted || O_Canceled )",
     "pattern": [
       {
         "activity": "A_Create Application",

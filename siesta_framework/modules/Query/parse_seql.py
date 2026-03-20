@@ -12,7 +12,8 @@ Grammar
     pattern    ::= or_expr
     or_expr    ::= seq_expr ('||' seq_expr)*
     seq_expr   ::= element+
-    element    ::= atom quantifier?
+    element    ::= neg_atom quantifier?
+    neg_atom   ::= ('!' | '^') atom | atom      # negation prefix
     quantifier ::= '*' | '+' | '?'
     atom       ::= activity | '(' or_expr ')'
     activity   ::= LABEL ('[' attr_list ']')?
@@ -24,15 +25,29 @@ Grammar
 Pair semantics
 --------------
 For each OR-branch (a fully resolved alternative of the pattern), every
-ordered pair (A, B) of *distinct-position* activities where A can precede
-B in a valid trace is emitted.  Self-pairs (A → A) are excluded.
+ordered pair (A, B) of *distinct-position* **positive** activities where
+A can precede B in a valid trace is emitted.  Self-pairs (A -> A) are excluded.
+
+Negation
+--------
+A negated element ``!x`` (or ``^x``) marks activity ``x`` as **forbidden**
+between the surrounding positive activities.  Negated activities are never
+pair endpoints; instead they populate the ``forbidden_between`` set of every
+pair whose positions span them::
+
+    a !b c       -> pair (a,c) with forbidden_between={b}
+    a !(b||c) d  -> pair (a,d) with forbidden_between={b,c}   # OR is unioned
+    a !b c d     -> (a,c): forbidden={b}; (a,d): forbidden={b}; (c,d): forbidden={}
+
+The CEP engine uses ``forbidden_between`` to reject candidates where any
+forbidden activity appears between ``pos_a`` and ``pos_b`` in the trace.
 
 Attribute constraints travel with each pair so that a downstream CEP
 engine can validate them against ``ActivityPairsIndex`` candidates.
 
 Example
 -------
->>> pairs = extract_responded_pairs("ab*(c||d)")
+>>> pairs = extract_responded_pairs("a b*(c||d)")
 >>> [(p.source.label, p.target.label) for p in pairs]
 [('a', 'b'), ('a', 'c'), ('b', 'c'), ('a', 'b'), ('a', 'd'), ('b', 'd')]
 """
@@ -142,18 +157,10 @@ class Quantifier(Enum):
         return "" if self == Quantifier.ONE else self.value
 
 
-# Forward declarations for recursive types
-class SeqNode:
-    """A concatenation of elements (left-to-right)."""
-
-class OrNode:
-    """An alternation of sequences (resolved into separate branches)."""
-
-
 @dataclass
 class ElementNode:
-    """An atom with an optional repetition quantifier."""
-    atom: Union[ActivityNode, SeqNode, OrNode]
+    """An atom (possibly negated) with an optional repetition quantifier."""
+    atom: Union[ActivityNode, SeqNode, OrNode, NegatedNode]
     quantifier: Quantifier = Quantifier.ONE
 
     def __str__(self) -> str:
@@ -179,7 +186,61 @@ class OrNode:
         return " || ".join(str(b) for b in self.branches)
 
 
-PatternNode = Union[ActivityNode, SeqNode, OrNode]
+@dataclass
+class NegatedNode:
+    """
+    A negated atom — activity or OR-group — introduced by ``!`` or ``^``.
+
+    Semantics
+    ---------
+    The activities inside must **not** appear between the positive activities
+    that surround this node in the sequence.  When the inner node is an
+    ``OrNode``, *all* its alternatives are forbidden (OR is unioned, not
+    branched).
+
+    Examples::
+
+        !b          -> activity b is forbidden
+        ^b          -> same, caret is an alias for !
+        !(b||c)     -> both b and c are forbidden (union)
+        !Validate   -> activity Validate is forbidden
+    """
+    inner: PatternNode      # ActivityNode or OrNode of activities
+
+    def forbidden_activities(self) -> List[ActivityNode]:
+        """
+        Collect every ``ActivityNode`` reachable inside this negation.
+
+        OR-alternatives are **unioned** (no branch split): ``!(a||b)``
+        yields ``[a, b]``, both forbidden in a single sequence slot.
+        """
+        return _collect_forbidden(self.inner)
+
+    def __str__(self) -> str:
+        inner = str(self.inner)
+        if isinstance(self.inner, (SeqNode, OrNode)):
+            inner = f"({inner})"
+        return f"!{inner}"
+
+
+def _collect_forbidden(node: PatternNode) -> List[ActivityNode]:
+    """Recursively gather all ActivityNodes inside a negated sub-pattern."""
+    if isinstance(node, ActivityNode):
+        return [node]
+    if isinstance(node, OrNode):
+        result: List[ActivityNode] = []
+        for branch in node.branches:
+            result.extend(_collect_forbidden(branch))
+        return result
+    if isinstance(node, SeqNode):
+        result = []
+        for elem in node.elements:
+            result.extend(_collect_forbidden(elem.atom))
+        return result
+    return []
+
+
+PatternNode = Union[ActivityNode, SeqNode, OrNode, NegatedNode]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -189,6 +250,7 @@ PatternNode = Union[ActivityNode, SeqNode, OrNode]
 class TT(Enum):
     """Token types."""
     OR       = "OR"
+    NOT      = "NOT"      # ! or ^  — negation prefix
     LABEL    = "LABEL"
     LPAREN   = "LPAREN"
     RPAREN   = "RPAREN"
@@ -208,6 +270,7 @@ class TT(Enum):
 
 _RAW_PATTERNS: List[Tuple[TT, str]] = [
     (TT.OR,     r'\|\|'),
+    (TT.NOT,    r'[!^]'),
     (TT.STRING, r'"[^"]*"'),
     (TT.VAR,    r'\$\d+'),
     (TT.LABEL,  r'[A-Za-z_][A-Za-z0-9_]*'),
@@ -333,9 +396,16 @@ class Parser:
             )
         return SeqNode(elements)
 
-    # element ::= atom quantifier?
+    # element  ::= neg_atom quantifier?
+    # neg_atom ::= ('!' | '^') atom | atom
     def _element(self) -> ElementNode:
+        negated = False
+        if self._at(TT.NOT):
+            self._consume(TT.NOT)
+            negated = True
         atom = self._atom()
+        if negated:
+            atom = NegatedNode(inner=atom)
         quant = Quantifier.ONE
         if   self._at(TT.STAR):  self._consume(); quant = Quantifier.STAR
         elif self._at(TT.PLUS):  self._consume(); quant = Quantifier.PLUS
@@ -404,13 +474,16 @@ class Parser:
 class BoundActivity:
     """
     An activity as it appears in a fully-linearised branch, carrying the
-    *effective* quantifier inherited from all enclosing group quantifiers.
+    *effective* quantifier inherited from all enclosing group quantifiers,
+    and a flag indicating whether it is a **negation** (forbidden) marker.
     """
     activity: ActivityNode
     quantifier: Quantifier
+    negated: bool = False          # True  → forbidden-between marker
 
     def __repr__(self) -> str:
-        return f"{self.activity}{self.quantifier}"
+        prefix = "!" if self.negated else ""
+        return f"{prefix}{self.activity}{self.quantifier}"
 
 
 def _combine_quantifiers(inner: Quantifier, outer: Quantifier) -> Quantifier:
@@ -438,6 +511,8 @@ def _linearise(node: PatternNode) -> List[List[BoundActivity]]:
     ``OrNode`` causes a split (union of children's sequences).
     ``SeqNode`` causes a cartesian product of its elements' sequences.
     ``ActivityNode`` returns a singleton sequence.
+    ``NegatedNode`` returns a single sequence of forbidden-marked activities
+      (OR inside a negation is **unioned**, not branched).
 
     Returns
     -------
@@ -445,7 +520,12 @@ def _linearise(node: PatternNode) -> List[List[BoundActivity]]:
         Each inner list is one fully-resolved linear sequence.
     """
     if isinstance(node, ActivityNode):
-        return [[BoundActivity(node, Quantifier.ONE)]]
+        return [[BoundActivity(node, Quantifier.ONE, negated=False)]]
+
+    if isinstance(node, NegatedNode):
+        # Collect all forbidden activities without branching on OR
+        forbidden = node.forbidden_activities()
+        return [[BoundActivity(a, Quantifier.ONE, negated=True) for a in forbidden]]
 
     if isinstance(node, OrNode):
         result: List[List[BoundActivity]] = []
@@ -470,7 +550,8 @@ def _linearise(node: PatternNode) -> List[List[BoundActivity]]:
 def _linearise_element(elem: ElementNode) -> List[List[BoundActivity]]:
     """
     Linearise an element, propagating its quantifier to every contained
-    activity.  Each alternative of the atom produces one entry in the result.
+    positive activity.  Negated activities keep their ``negated=True`` flag
+    but also receive the quantifier (the CEP engine may ignore it).
     """
     atom_alts = _linearise(elem.atom)
     return [
@@ -478,6 +559,7 @@ def _linearise_element(elem: ElementNode) -> List[List[BoundActivity]]:
             BoundActivity(
                 activity=ba.activity,
                 quantifier=_combine_quantifiers(ba.quantifier, elem.quantifier),
+                negated=ba.negated,
             )
             for ba in alt
         ]
@@ -492,7 +574,7 @@ def _linearise_element(elem: ElementNode) -> List[List[BoundActivity]]:
 @dataclass
 class RespondedPair:
     """
-    A responded-existence pair ``(source → target)`` derived from the pattern.
+    A responded-existence pair ``(source -> target)`` derived from the pattern.
 
     Attributes
     ----------
@@ -504,23 +586,33 @@ class RespondedPair:
         Effective repetition quantifier of the source in its branch.
     target_quantifier : Quantifier
         Effective repetition quantifier of the target in its branch.
+    forbidden_between : Tuple[ActivityNode, ...]
+        Activities that must **not** appear between ``source`` and ``target``
+        in a matching trace.  Populated by ``!x`` / ``^x`` elements that
+        sit at positions strictly between source and target in the pattern.
+        The CEP engine is responsible for enforcing this constraint against
+        the ``ActivityPairsIndex`` candidates.
     branch_id : int
         0-based index of the OR-branch this pair originated from.
         Pairs from different branches may share the same label-pair but
-        carry different attribute constraint contexts.
+        carry different attribute or negation constraint contexts.
 
     Usage with ActivityPairsIndex
     ------------------------------
     ::
 
         candidates = index.get(pair.key, [])
-        # candidates: [(trace_id, pos_a, pos_b, attrs_a, attrs_b), …]
-        # Forward pair + candidates to the CEP engine for constraint checking.
+        # candidates: [(trace_id, pos_a, pos_b, attrs_a, attrs_b), ...]
+        # Forward pair + candidates to the CEP engine for full validation:
+        #   - attribute constraints (source.constraints, target.constraints)
+        #   - forbidden_between: no activity in this set may appear at
+        #     any position k with pos_a < k < pos_b in the trace
     """
     source: ActivityNode
     target: ActivityNode
     source_quantifier: Quantifier
     target_quantifier: Quantifier
+    forbidden_between: Tuple[ActivityNode, ...]
     branch_id: int
 
     # ── convenience ──────────────────────────────────────────────────────
@@ -531,15 +623,23 @@ class RespondedPair:
         return (self.source.label, self.target.label)
 
     def short(self) -> str:
-        """Compact label-only representation (``ab``, ``ac``, …)."""
+        """Compact label-only representation (``ab``, ``ac``, ...)."""
         return f"{self.source.label}{self.target.label}"
+
+    def forbidden_labels(self) -> Tuple[str, ...]:
+        """Label-only set of forbidden-between activities."""
+        return tuple(a.label for a in self.forbidden_between)
 
     def __str__(self) -> str:
         sq = "" if self.source_quantifier == Quantifier.ONE else str(self.source_quantifier)
         tq = "" if self.target_quantifier == Quantifier.ONE else str(self.target_quantifier)
+        fb = ""
+        if self.forbidden_between:
+            labels = ", ".join(a.label for a in self.forbidden_between)
+            fb = f"  forbidden={{{labels}}}"
         return (
-            f"({self.source}{sq} → {self.target}{tq})"
-            f"  [branch={self.branch_id}]"
+            f"({self.source}{sq} -> {self.target}{tq})"
+            f"  [branch={self.branch_id}]{fb}"
         )
 
     def __repr__(self) -> str:
@@ -547,9 +647,22 @@ class RespondedPair:
             f"RespondedPair(source={self.source!r}, target={self.target!r}, "
             f"src_q={self.source_quantifier.value}, "
             f"tgt_q={self.target_quantifier.value}, "
+            f"forbidden={self.forbidden_labels()}, "
             f"branch={self.branch_id})"
         )
 
+    def __eq__(self, other):
+        """Compare to check equality"""
+        return (
+            # instance of the same class
+            isinstance(other, RespondedPair)
+            and self.source == other.source
+            and self.target == other.target
+        )
+
+    def __hash__(self):
+        """Generate hash value for this instance"""
+        return hash((self.source, self.target))
 
 def _pairs_from_sequence(
     seq: List[BoundActivity],
@@ -558,19 +671,31 @@ def _pairs_from_sequence(
     """
     Generate all ordered, non-self responded pairs from one linear sequence.
 
-    For each pair of positions ``i < j`` (strict), emit
-    ``(seq[i].activity, seq[j].activity)``.  Self-pairs are excluded.
+    Only **positive** (non-negated) activities can be pair endpoints.
+    For each pair of positive positions ``i < j``, every negated
+    ``BoundActivity`` at a position strictly between ``i`` and ``j``
+    contributes to the pair's ``forbidden_between`` set.
     """
     pairs: List[RespondedPair] = []
-    n = len(seq)
-    for i in range(n):
-        for j in range(i + 1, n):
+    # Only positive activities are pair endpoints
+    pos_indices = [k for k, ba in enumerate(seq) if not ba.negated]
+    n = len(pos_indices)
+    for ii in range(n):
+        for jj in range(ii + 1, n):
+            i, j = pos_indices[ii], pos_indices[jj]
+            # Collect negated activities strictly between i and j
+            forbidden: Tuple[ActivityNode, ...] = tuple(
+                seq[k].activity
+                for k in range(i + 1, j)
+                if seq[k].negated
+            )
             pairs.append(
                 RespondedPair(
                     source=seq[i].activity,
                     target=seq[j].activity,
                     source_quantifier=seq[i].quantifier,
                     target_quantifier=seq[j].quantifier,
+                    forbidden_between=forbidden,
                     branch_id=branch_id,
                 )
             )
@@ -657,7 +782,7 @@ def parse_pattern(pattern: str) -> PatternNode:
     return Parser(tokenize(pattern)).parse()
 
 
-def extract_responded_pairs(pattern: str) -> List[RespondedPair]:
+def extract_responded_pairs(pattern: str) -> List[List[RespondedPair]]:
     """
     Parse *pattern* and return all responded pairs.
 
@@ -709,73 +834,13 @@ def extract_responded_pairs(pattern: str) -> List[RespondedPair]:
     """
     ast = parse_pattern(pattern)
     sequences = _linearise(ast)
-    result: List[RespondedPair] = []
-    for branch_id, seq in enumerate(sequences):
-        result.extend(_pairs_from_sequence(seq, branch_id))
-    return result
+    # result: List[RespondedPair] = []
+    # for branch_id, seq in enumerate(sequences):
+    #     result.extend(_pairs_from_sequence(seq, branch_id))
+    # return result
+    results = [_pairs_from_sequence(seq, branch_id) for branch_id, seq in enumerate(sequences)]
+    return results
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 8.  ActivityPairsIndex query helper
-# ═══════════════════════════════════════════════════════════════════════════
-
-TraceId  = str
-Position = int
-Attrs    = Dict[str, object]
-
-# A single row from the index for a given (label_a, label_b) key
-IndexRow = Tuple[TraceId, Position, Position, Attrs, Attrs]
-
-# The full index structure
-ActivityPairsIndex = Dict[Tuple[str, str], List[IndexRow]]
-
-
-@dataclass
-class QueryResult:
-    """
-    The result of looking up one :class:`RespondedPair` in the index.
-
-    ``candidates`` holds all raw index rows for the label-pair; attribute
-    constraint checking is delegated to the CEP engine.
-    """
-    pair: RespondedPair
-    candidates: List[IndexRow]
-
-    def __repr__(self) -> str:
-        return (
-            f"QueryResult(pair={self.pair.short()!r}, "
-            f"branch={self.pair.branch_id}, "
-            f"candidates={len(self.candidates)})"
-        )
-
-
-def query_index(
-    pairs: List[RespondedPair],
-    index: ActivityPairsIndex,
-) -> List[QueryResult]:
-    """
-    Perform label-based lookups for every responded pair.
-
-    Attribute constraints are **not** evaluated here; the raw
-    ``IndexRow`` candidates are returned verbatim for the CEP engine.
-
-    Parameters
-    ----------
-    pairs : List[RespondedPair]
-        Output of :func:`extract_responded_pairs`.
-    index : ActivityPairsIndex
-        Maps ``(label_a, label_b)`` →
-        ``[(trace_id, pos_a, pos_b, attrs_a, attrs_b), …]``.
-
-    Returns
-    -------
-    List[QueryResult]
-        One entry per pair (same order), with its candidate index rows.
-    """
-    return [
-        QueryResult(pair=pair, candidates=index.get(pair.key, []))
-        for pair in pairs
-    ]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -788,48 +853,19 @@ def _demo() -> None:
     examples = [
         # (pattern, description, use_compact)
         # (
-        #     "ab*(c||d)",
-        #     "Compact single-char notation (auto-expanded): a b*(c||d)",
-        #     True,
-        # ),
-        # (
-        #     'a[resource="nick"]b*c',
-        #     "Fixed attribute value (brackets act as separators)",
-        #     False,
-        # ),
-        # (
-        #     'a[resource=$1]b[resource=$1]*c',
-        #     "Variable binding — shared attribute across activities",
-        #     False,
-        # ),
-        # (
-        #     'a[amount=$1]b[amount=$1+5]*(c||d)',
-        #     "Variable with arithmetic offset + OR",
-        #     False,
-        # ),
-        # (
-        #     '(a||b)(c||d)',
-        #     "Nested OR — cartesian product of branches (compact)",
-        #     True,
-        # ),
-        # (
-        #     'ab+c?d',
-        #     "Mixed quantifiers: b one-or-more, c optional (compact)",
-        #     True,
-        # ),
-        # (
-        #     'a[res=$1, role="admin"]b[res=$1]*c[res=$2-3]',
-        #     "Multiple attribute constraints",
-        #     False,
-        # ),
-        # (
-        #     'Submit_Application[resource="nick"] Review[user=$1]* Approve[user=$1]',
-        #     "Real process-mining labels with multi-word activities",
-        #     False,
+        #     'abcd[amount=$\"15\"]',
+        #     'example',
+        #     True
         # ),
         (
-            'a b[r=$1,ra=$2] c (d||e||f[r=$1,rb="15"])* a b[r=$1,ra=$2] c (d||e||f[r=$1,rb="15"])* a',
-            "Real process-mining labels with multi-word activities",
+            'a[amount=$1]b[amount=$1+5]*(c||d)',
+            "Variable with arithmetic offset + OR",
+            False,
+        ),
+        # ── negation examples ─────────────────────────────────────────
+        (
+            'a !b c',
+            "Negation: a -> c with b forbidden between",
             False,
         ),
     ]
@@ -857,58 +893,23 @@ def _demo() -> None:
             shorts = ", ".join(p.short() for p in branch_pairs)
             print(f"\n  Branch {bid}: {shorts}")
             for p in branch_pairs:
+                fb = (
+                    f"  !! forbidden={{{', '.join(p.forbidden_labels())}}}"
+                    if p.forbidden_between else ""
+                )
                 src_c = (
-                    f"  src_constraints={list(p.source.constraints)}"
+                    f"  src_attrs={list(p.source.constraints)}"
                     if p.source.constraints else ""
                 )
                 tgt_c = (
-                    f"  tgt_constraints={list(p.target.constraints)}"
+                    f"  tgt_attrs={list(p.target.constraints)}"
                     if p.target.constraints else ""
                 )
                 print(
                     f"    ({p.source.label}{p.source_quantifier}"
-                    f" → {p.target.label}{p.target_quantifier})"
-                    f"{src_c}{tgt_c}"
+                    f" -> {p.target.label}{p.target_quantifier})"
+                    f"{fb}{src_c}{tgt_c}"
                 )
-
-    # ── ActivityPairsIndex query demo ─────────────────────────────────────
-    print(f"\n{separator}")
-    print("  ActivityPairsIndex query demo  →  pattern: a b*(c||d)")
-    print(separator)
-
-    sample_index: ActivityPairsIndex = {
-        ("a", "b"): [
-            ("trace1", 0, 1, {"resource": "nick"}, {"resource": "nick"}),
-            ("trace2", 0, 2, {"resource": "alice"}, {"resource": "bob"}),
-        ],
-        ("a", "c"): [
-            ("trace1", 0, 3, {"resource": "nick"}, {}),
-        ],
-        ("b", "c"): [
-            ("trace1", 1, 3, {"resource": "nick"}, {}),
-            ("trace1", 2, 3, {"resource": "nick"}, {}),
-        ],
-        ("a", "d"): [],
-        ("b", "d"): [
-            ("trace3", 1, 4, {"resource": "carol"}, {}),
-        ],
-    }
-
-    pairs = extract_responded_pairs(expand_compact("ab*(c||d)"))
-    results = query_index(pairs, sample_index)
-
-    for qr in results:
-        print(
-            f"  {qr.pair.short()!r:5s}  branch={qr.pair.branch_id}"
-            f"  → {len(qr.candidates)} candidate(s)"
-        )
-        for row in qr.candidates:
-            trace_id, pos_a, pos_b, attrs_a, attrs_b = row
-            print(
-                f"         trace={trace_id!r}  "
-                f"pos=({pos_a},{pos_b})  "
-                f"attrs_src={attrs_a}  attrs_tgt={attrs_b}"
-            )
 
 
 if __name__ == "__main__":
