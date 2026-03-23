@@ -332,6 +332,135 @@ def tokenize(text: str) -> List[Token]:
     return tokens
 
 
+def split_pattern_to_list(pattern: str) -> list:
+    """
+    Parse *pattern* and return a flat, ordered list of every activity
+    occurrence — positive and negated — as plain dictionaries.
+
+    This is a read-only inspection utility; it does **not** resolve OR
+    branches or perform pair extraction.  Each activity appears in the
+    order it is written in the pattern, with its quantifier and attribute
+    annotations intact.
+
+    Parameters
+    ----------
+    pattern : str
+        A SeQL pattern string, e.g.::
+
+            'ACT_A[x="1", y=$1]* ACT_B[y="5"] ACT_C[y=$1+2]'
+
+        Note: bare numeric literals (``x=1``) are not supported by the
+        parser — wrap them in quotes (``x="1"``) or use a variable
+        (``x=$1``).
+
+    Returns
+    -------
+    list[dict]
+        One dict per activity occurrence, in left-to-right pattern order.
+        Each dict has the following keys:
+
+        ``label`` : str
+            The activity name (e.g. ``"ACT_A"``).
+        ``quantifier`` : str or None
+            ``"*"``, ``"+"``, ``"?"`` or ``None`` (exactly once).
+        ``negated`` : bool
+            ``True`` if the activity was preceded by ``!`` / ``^``.
+        ``attributes`` : list[dict]
+            One dict per ``name=value`` annotation, each with keys:
+
+            ``name`` : str  — attribute name
+            ``kind`` : ``"literal"`` | ``"variable"``
+            ``value`` : str — the raw literal value (quotes stripped), or
+                              the variable reference as a string
+                              (e.g. ``"$1"``, ``"$2+5"``, ``"$3-10"``).
+
+    Examples
+    --------
+    >>> split_pattern_to_list('ACT_A[x="1", y=$1]* ACT_B[y="5"] ACT_C[y=$1+2]')
+    [
+      {'label': 'ACT_A', 'quantifier': '*', 'negated': False,
+       'attributes': [
+         {'name': 'x', 'kind': 'literal',  'value': '1'},
+         {'name': 'y', 'kind': 'variable', 'value': '$1'},
+       ]},
+      {'label': 'ACT_B', 'quantifier': None, 'negated': False,
+       'attributes': [
+         {'name': 'y', 'kind': 'literal', 'value': '5'},
+       ]},
+      {'label': 'ACT_C', 'quantifier': None, 'negated': False,
+       'attributes': [
+         {'name': 'y', 'kind': 'variable', 'value': '$1+2'},
+       ]},
+    ]
+    """
+    ast = parse_pattern(pattern)
+    results = []
+    _collect_activities(ast, negated=False, quantifier=Quantifier.ONE, out=results)
+    return results
+
+
+def _collect_activities(
+    node,
+    negated: bool,
+    quantifier: "Quantifier",
+    out: list,
+) -> None:
+    """Recursive AST walker that appends activity dicts to *out*."""
+
+    if isinstance(node, ActivityNode):
+        # Build the quantifier symbol string
+        q_map = {
+            Quantifier.ONE:  None,
+            Quantifier.STAR: "*",
+            Quantifier.PLUS: "+",
+            Quantifier.OPT:  "?",
+        }
+        # Serialise each attribute constraint
+        attrs = []
+        for c in node.constraints:
+            if isinstance(c.value, StringLiteral):
+                attrs.append({
+                    "name":  c.name,
+                    "kind":  "literal",
+                    "value": c.value.value,          # quotes already stripped
+                })
+            elif isinstance(c.value, VarExpr):
+                raw = f"${c.value.var_id}"
+                if c.value.op is not None:
+                    raw += f"{c.value.op}{c.value.offset}"
+                attrs.append({
+                    "name":  c.name,
+                    "kind":  "variable",
+                    "value": raw,
+                })
+
+        out.append({
+            "label":      node.label,
+            "quantifier": q_map[quantifier],
+            "negated":    negated,
+            "attributes": attrs,
+        })
+        return
+
+    if isinstance(node, NegatedNode):
+        # Everything inside is negated; quantifier was already propagated
+        # by the ElementNode wrapper, so pass it through unchanged.
+        _collect_activities(node.inner, negated=True, quantifier=quantifier, out=out)
+        return
+
+    if isinstance(node, SeqNode):
+        for elem in node.elements:
+            # Merge the element's own quantifier with any inherited one
+            eff_q = _combine_quantifiers(quantifier, elem.quantifier)
+            _collect_activities(elem.atom, negated=negated, quantifier=eff_q, out=out)
+        return
+
+    if isinstance(node, OrNode):
+        for branch in node.branches:
+            _collect_activities(branch, negated=negated, quantifier=quantifier, out=out)
+        return
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # 4.  Parser  (recursive-descent)
 # ═══════════════════════════════════════════════════════════════════════════

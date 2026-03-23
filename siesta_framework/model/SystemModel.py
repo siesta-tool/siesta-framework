@@ -22,6 +22,8 @@ Pattern = List[Query_Event]
 # Equivalent to type QUERY_METHOD_INPUT
 class Query_Method_Input(TypedDict, total=False):
     pattern: Pattern
+    explore_mode: Optional[str] # "fast", "accurate", "hybrid"
+    explore_k: Optional[int] # 0 = fast exploration
     constraints: Optional[List[Query_Constraint]]
 
 # Equivalent to type QUERY_CONFIG

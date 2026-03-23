@@ -21,7 +21,7 @@ import csv
 import io
 import json
 import logging
-logger = logging.getLogger("Mining")
+logger = logging.getLogger(__name__)
 
 
 class Miner(SiestaModule):
@@ -48,31 +48,31 @@ class Miner(SiestaModule):
         logger.info("Startup complete.")
 
     def api_run(self, mining_config: Annotated[str, Form()]) -> Any:
-        print(f"{self.name} is running via API request.")
+        logger.info(f"{self.name} is running via API request.")
 
         self.siesta_config = get_system_config()
         self.storage = get_storage_manager()
         self._load_mining_config(json.loads(mining_config))
 
-        logger.info(f"Mining: Running mining with args: {mining_config}")
+        logger.info(f"Running mining with args: {mining_config}")
         
         self.mine(caller="api")
 
-        logger.info(f"Mining: Completed. Results available at {self.mining_config['output_path']}.")
+        logger.info(f"Completed. Results available at {self.mining_config['output_path']}.")
         
         with open(self.mining_config["output_path"], 'r', newline="") as f:
             try:
                 return list(csv.DictReader(f))
             except Exception:
-                logger.error(f"Mining: Failed to parse mining results from {self.mining_config['output_path']}. Check if the file is a valid CSV and inspect logs for details.")
-                return f"Mining: Cannot parse mining results. Check logs and {self.mining_config['output_path']} for details."
+                logger.error(f"Failed to parse mining results from {self.mining_config['output_path']}. Check if the file is a valid CSV and inspect logs for details.")
+                return f"Cannot parse mining results. Check logs and {self.mining_config['output_path']} for details."
 
 
     def cli_run(self, args: Any, **kwargs: Any) -> Any:
         """
         Entry point for Mining via the command line.
         """
-        print(f"{self.name} is running with args: {args} and kwargs: {kwargs}")
+        logger.info(f"{self.name} is running with args: {args} and kwargs: {kwargs}")
 
         self.siesta_config = get_system_config()
         self.storage = get_storage_manager()
@@ -97,13 +97,13 @@ class Miner(SiestaModule):
                     self._load_mining_config(user_mining_config)
                     self.storage.initialize_db(self.mining_config)
 
-                    logger.info(f"Mining: Loaded config from {config_path}: {user_mining_config}")
+                    logger.info(f"Loaded config from {config_path}: {user_mining_config}")
             except Exception as e:
                 raise RuntimeError(f"Error loading config from {config_path}: {e}")
 
         self.mine(caller="cli")
 
-        logger.info(f"Mining: Completed. Results available at {self.mining_config['output_path']}.")
+        logger.info(f"Completed. Results available at {self.mining_config['output_path']}.")
         
         return self.mining_config["output_path"]
 

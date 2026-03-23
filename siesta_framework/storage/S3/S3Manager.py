@@ -25,7 +25,7 @@ def _parse_timestamp(ts: str) -> datetime:
     raise ValueError(f"Cannot parse timestamp: {ts!r}")
 
 import logging
-logger = logging.getLogger("S3Manager")
+logger = logging.getLogger(__name__)
 
 class S3Manager(StorageManager):
     
@@ -56,7 +56,7 @@ class S3Manager(StorageManager):
         try:
             self.s3_client = self._create_s3_client()
         except Exception as e:
-            logger.info(f"Error initializing S3 client: {e}")
+            logger.error(f"Error initializing S3 client: {e}")
             raise
         
         # Initialize Spark based on system configuration
@@ -111,7 +111,7 @@ class S3Manager(StorageManager):
                                 )
                     logger.info(f"Cleared existing log data in '{prefix}'")
                 except ClientError as e:
-                    logger.info(f"Error clearing existing data: {e}")
+                    logger.error(f"Error clearing existing data: {e}")
         except ClientError as e:
             error_code = e.response['Error']['Code']
             if error_code == '404':
@@ -120,10 +120,10 @@ class S3Manager(StorageManager):
                     self.s3_client.create_bucket(Bucket=preprocess_config.get("storage_namespace", "siesta"))
                     logger.info(f"Created bucket '{preprocess_config.get('storage_namespace', 'siesta')}'")
                 except ClientError as create_error:
-                    logger.info(f"Error creating bucket: {create_error}")
+                    logger.error(f"Error creating bucket: {create_error}")
                     raise
             else:
-                logger.info(f"Error checking bucket: {e}")
+                logger.error(f"Error checking bucket: {e}")
                 raise
         
 
