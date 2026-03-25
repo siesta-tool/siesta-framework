@@ -1,3 +1,5 @@
+from typing import List
+from pprint import pprint
 from siesta_framework.core.logger import timed
 from siesta_framework.core.sparkManager import get_spark_session
 from siesta_framework.core.storageFactory import get_storage_manager
@@ -5,7 +7,7 @@ from siesta_framework.model.StorageModel import MetaData
 from siesta_framework.model.SystemModel import Query_Config, Pattern
 from pyspark.sql import functions as F
 from pyspark.sql.functions import col
-from siesta_framework.modules.Query.parse_seql import expand_compact, parse_pattern, extract_responded_pairs #TODO Update api names
+from siesta_framework.modules.Query.parse_seql import BoundActivity, Quantifier, expand_compact, parse_pattern, extract_responded_pairs, extract_siesta_pairs #TODO Update api names
 
 from functools import reduce
 import logging
@@ -34,6 +36,18 @@ def process_stats_query(config: Query_Config, metadata: MetaData) -> list[any]|N
     return str(df.collect())
 
 
+def optimize_lf(query_pairs: list[tuple[str, str, int]], metadata:MetaData):
+    """
+    Input: List of pair labels + branch [(source, target, branch_id)]
+    Output: LF optimized query (alr optimized)
+    """
+
+    #TODO: Compare w/sorting - probably worse/equal
+
+    return query_pairs
+
+
+
 def process_detection_query(config: Query_Config, metadata: MetaData):
     spark = get_spark_session()
     storage = get_storage_manager()
@@ -42,22 +56,23 @@ def process_detection_query(config: Query_Config, metadata: MetaData):
     # pairs = _extract_consecutive_pairs(config.get("query", {}).get("pattern", []))
     new_pattern = config.get("query", {}).get("alt_pattern", "")
     
-    pair_branches = extract_responded_pairs(new_pattern)
-    print(pair_branches)
+    # pair_branches = extract_siesta_pairs(new_pattern)
+    pair_branches = set(extract_responded_pairs(new_pattern))
+    
+    #optimizer
 
-    branch_sizes_df = spark.createDataFrame(
-        [(branch[0].branch_id, len(branch)) for branch in pair_branches],
-        ["branch_id", "num_pairs"]
-    )
+    labels_list = optimize_lf(list(map(lambda x: (x.source.label, x.target.label, x.branch_id), pair_branches)), metadata)
+ 
+    query_pairs_df = spark.createDataFrame(labels_list, ["source", "target", "branch_id"])
 
-    pairs = [pair for branch in pair_branches for pair in branch]
+    branch_sizes_df = query_pairs_df.groupby("branch_id").count().withColumnRenamed("count", "num_pairs")
 
-    num_pairs = len(pairs)
-    pairs_df = spark.createDataFrame(list(map(lambda pair: (pair.source.label, pair.target.label, pair.branch_id), pairs)), ["source", "target", "branch_id"])
     index_table = storage.read_pairs_index(metadata)
+
+
     intersected_ids = (
         index_table
-        .join(pairs_df, on=["source", "target"], how="inner")
+        .join(query_pairs_df, on=["source", "target"], how="inner")
         .groupBy("trace_id", "branch_id")
         .agg(F.count_distinct("source", "target").alias("pair_count"))
         .join(branch_sizes_df, on="branch_id")
@@ -68,29 +83,5 @@ def process_detection_query(config: Query_Config, metadata: MetaData):
     )
 
     print(intersected_ids.count())
-    
-    return "result"
 
-    # 2. TODO: Optimizer
-
-
-
-    # 3. Find trace_ids common on all pairs
-    # inner-join -> count -> filter for 100% support
-    num_pairs = len(branches)
-    pairs_df = spark.createDataFrame(branches, ["source", "target"])
-    index_table = storage.read_pairs_index(metadata)
-    intersected_ids = (
-        index_table
-        .join(pairs_df, on=["source", "target"], how="inner")
-        .groupBy("trace_id")
-        .agg(F.count_distinct("source", "target").alias("pair_count"))
-        # Only keep IDs that appeared in every single pair
-        .filter(F.col("pair_count") == num_pairs)
-        .select("trace_id")
-    )
-
-    count = intersected_ids.count()
-    print(count)
-    return str(count)
-    
+    return "test"

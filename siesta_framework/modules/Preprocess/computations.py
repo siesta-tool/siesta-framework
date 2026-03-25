@@ -124,7 +124,7 @@ def _calculate_pairs_stnm(activity_index: Tuple[Trace_ID, Iterable[Event]], last
         last: The list with all the last timestamps that correspond to this event.
         lookback: The parameter that describes the maximum time or position difference between 
             two events in a pair.
-
+    
     Returns:
         tuple: A tuple where the first element is the extracted event type pairs 
             and the second element is the last timestamps for each event type.

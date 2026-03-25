@@ -271,7 +271,7 @@ class TT(Enum):
 _RAW_PATTERNS: List[Tuple[TT, str]] = [
     (TT.OR,     r'\|\|'),
     (TT.NOT,    r'[!^]'),
-    (TT.STRING, r'"(?:[^"\\]|\\.)*"'),
+    (TT.STRING, r'"[^"]*"'),
     (TT.VAR,    r'\$\d+'),
     (TT.LABEL,  r'[A-Za-z_][A-Za-z0-9_]*'),
     (TT.NUMBER, r'\d+'),
@@ -292,8 +292,6 @@ _MASTER_RE = re.compile(
         f"(?P<G{i}>{pat})" for i, (_, pat) in enumerate(_RAW_PATTERNS)
     )
 )
-
-_UNESCAPE_RE = re.compile(r'\\(.)')
 
 
 @dataclass(frozen=True)
@@ -332,135 +330,6 @@ def tokenize(text: str) -> List[Token]:
         pos = m.end()
     tokens.append(Token(TT.EOF, "", pos))
     return tokens
-
-
-def split_pattern_to_list(pattern: str) -> list:
-    """
-    Parse *pattern* and return a flat, ordered list of every activity
-    occurrence — positive and negated — as plain dictionaries.
-
-    This is a read-only inspection utility; it does **not** resolve OR
-    branches or perform pair extraction.  Each activity appears in the
-    order it is written in the pattern, with its quantifier and attribute
-    annotations intact.
-
-    Parameters
-    ----------
-    pattern : str
-        A SeQL pattern string, e.g.::
-
-            'ACT_A[x="1", y=$1]* ACT_B[y="5"] ACT_C[y=$1+2]'
-
-        Note: bare numeric literals (``x=1``) are not supported by the
-        parser — wrap them in quotes (``x="1"``) or use a variable
-        (``x=$1``).
-
-    Returns
-    -------
-    list[dict]
-        One dict per activity occurrence, in left-to-right pattern order.
-        Each dict has the following keys:
-
-        ``label`` : str
-            The activity name (e.g. ``"ACT_A"``).
-        ``quantifier`` : str or None
-            ``"*"``, ``"+"``, ``"?"`` or ``None`` (exactly once).
-        ``negated`` : bool
-            ``True`` if the activity was preceded by ``!`` / ``^``.
-        ``attributes`` : list[dict]
-            One dict per ``name=value`` annotation, each with keys:
-
-            ``name`` : str  — attribute name
-            ``kind`` : ``"literal"`` | ``"variable"``
-            ``value`` : str — the raw literal value (quotes stripped), or
-                              the variable reference as a string
-                              (e.g. ``"$1"``, ``"$2+5"``, ``"$3-10"``).
-
-    Examples
-    --------
-    >>> split_pattern_to_list('ACT_A[x="1", y=$1]* ACT_B[y="5"] ACT_C[y=$1+2]')
-    [
-      {'label': 'ACT_A', 'quantifier': '*', 'negated': False,
-       'attributes': [
-         {'name': 'x', 'kind': 'literal',  'value': '1'},
-         {'name': 'y', 'kind': 'variable', 'value': '$1'},
-       ]},
-      {'label': 'ACT_B', 'quantifier': None, 'negated': False,
-       'attributes': [
-         {'name': 'y', 'kind': 'literal', 'value': '5'},
-       ]},
-      {'label': 'ACT_C', 'quantifier': None, 'negated': False,
-       'attributes': [
-         {'name': 'y', 'kind': 'variable', 'value': '$1+2'},
-       ]},
-    ]
-    """
-    ast = parse_pattern(pattern)
-    results = []
-    _collect_activities(ast, negated=False, quantifier=Quantifier.ONE, out=results)
-    return results
-
-
-def _collect_activities(
-    node,
-    negated: bool,
-    quantifier: "Quantifier",
-    out: list,
-) -> None:
-    """Recursive AST walker that appends activity dicts to *out*."""
-
-    if isinstance(node, ActivityNode):
-        # Build the quantifier symbol string
-        q_map = {
-            Quantifier.ONE:  None,
-            Quantifier.STAR: "*",
-            Quantifier.PLUS: "+",
-            Quantifier.OPT:  "?",
-        }
-        # Serialise each attribute constraint
-        attrs = []
-        for c in node.constraints:
-            if isinstance(c.value, StringLiteral):
-                attrs.append({
-                    "name":  c.name,
-                    "kind":  "literal",
-                    "value": c.value.value,          # quotes already stripped
-                })
-            elif isinstance(c.value, VarExpr):
-                raw = f"${c.value.var_id}"
-                if c.value.op is not None:
-                    raw += f"{c.value.op}{c.value.offset}"
-                attrs.append({
-                    "name":  c.name,
-                    "kind":  "variable",
-                    "value": raw,
-                })
-
-        out.append({
-            "label":      node.label,
-            "quantifier": q_map[quantifier],
-            "negated":    negated,
-            "attributes": attrs,
-        })
-        return
-
-    if isinstance(node, NegatedNode):
-        # Everything inside is negated; quantifier was already propagated
-        # by the ElementNode wrapper, so pass it through unchanged.
-        _collect_activities(node.inner, negated=True, quantifier=quantifier, out=out)
-        return
-
-    if isinstance(node, SeqNode):
-        for elem in node.elements:
-            # Merge the element's own quantifier with any inherited one
-            eff_q = _combine_quantifiers(quantifier, elem.quantifier)
-            _collect_activities(elem.atom, negated=negated, quantifier=eff_q, out=out)
-        return
-
-    if isinstance(node, OrNode):
-        for branch in node.branches:
-            _collect_activities(branch, negated=negated, quantifier=quantifier, out=out)
-        return
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -554,11 +423,7 @@ class Parser:
 
     # activity ::= LABEL ('[' attr_list ']')?
     def _activity(self) -> ActivityNode:
-        if self._at(TT.STRING):          # <- quoted label branch
-            tok = self._consume(TT.STRING)
-            label = _UNESCAPE_RE.sub(r'\1', tok.value[1:-1])  # strip quotes + unescape
-        else:
-            label = self._consume(TT.LABEL).value
+        label = self._consume(TT.LABEL).value
         constraints: List[AttrConstraint] = []
         if self._at(TT.LBRACK):
             self._consume(TT.LBRACK)
@@ -786,18 +651,6 @@ class RespondedPair:
             f"branch={self.branch_id})"
         )
 
-    def __eq__(self, other):
-        """Compare to check equality"""
-        return (
-            # instance of the same class
-            isinstance(other, RespondedPair)
-            and self.source == other.source
-            and self.target == other.target
-        )
-
-    def __hash__(self):
-        """Generate hash value for this instance"""
-        return hash((self.source, self.target))
 
 def _pairs_from_sequence(
     seq: List[BoundActivity],
@@ -816,18 +669,6 @@ def _pairs_from_sequence(
     pos_indices = [k for k, ba in enumerate(seq) if not ba.negated]
     n = len(pos_indices)
     for ii in range(n):
-        if seq[pos_indices[ii]].quantifier in (Quantifier.STAR, Quantifier.PLUS):
-            dup_pair = seq[pos_indices[ii]]
-            pairs.append(
-                RespondedPair(
-                    source=dup_pair.activity,
-                    target=dup_pair.activity,
-                    source_quantifier=dup_pair.quantifier,
-                    target_quantifier=dup_pair.quantifier,
-                    forbidden_between=(),
-                    branch_id=branch_id,
-                )
-            )
         for jj in range(ii + 1, n):
             i, j = pos_indices[ii], pos_indices[jj]
             # Collect negated activities strictly between i and j
@@ -929,7 +770,7 @@ def parse_pattern(pattern: str) -> PatternNode:
     return Parser(tokenize(pattern)).parse()
 
 
-def extract_responded_pairs(pattern: str) -> List[RespondedPair]:
+def extract_responded_pairs(pattern: str) -> List[List[RespondedPair]]:
     """
     Parse *pattern* and return all responded pairs.
 
@@ -981,10 +822,10 @@ def extract_responded_pairs(pattern: str) -> List[RespondedPair]:
     """
     ast = parse_pattern(pattern)
     sequences = _linearise(ast)
-    result: List[RespondedPair] = []
-    for branch_id, seq in enumerate(sequences):
-        result.extend(_pairs_from_sequence(seq, branch_id))
-    return result
+    # result: List[RespondedPair] = []
+    # for branch_id, seq in enumerate(sequences):
+    #     result.extend(_pairs_from_sequence(seq, branch_id))
+    # return result
     results = [_pairs_from_sequence(seq, branch_id) for branch_id, seq in enumerate(sequences)]
     return results
 
@@ -998,7 +839,6 @@ def extract_siesta_pairs(pattern: str) -> List[List[BoundActivity]]:
     sequences = _linearise(ast)
 
     return sequences
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 8.  ActivityPairsIndex query helper
@@ -1063,7 +903,6 @@ def query_index(
     ]
 
 
-
 # ═══════════════════════════════════════════════════════════════════════════
 # 9.  CLI demo
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1073,20 +912,65 @@ def _demo() -> None:
 
     examples = [
         # (pattern, description, use_compact)
-        # (
-        #     'abcd[amount=$\"15\"]',
-        #     'example',
-        #     True
-        # ),
+        (
+            "ab*(c||d)",
+            "Compact single-char notation (auto-expanded): a b*(c||d)",
+            True,
+        ),
+        (
+            'a[resource="nick"]b*c',
+            "Fixed attribute value (brackets act as separators)",
+            False,
+        ),
+        (
+            'a[resource=$1]b[resource=$1]*c',
+            "Variable binding — shared attribute across activities",
+            False,
+        ),
         (
             'a[amount=$1]b[amount=$1+5]*(c||d)',
             "Variable with arithmetic offset + OR",
             False,
         ),
+        (
+            '(a||b)(c||d)',
+            "Nested OR — cartesian product of branches (compact)",
+            True,
+        ),
+        (
+            'ab+c?d',
+            "Mixed quantifiers: b one-or-more, c optional (compact)",
+            True,
+        ),
         # ── negation examples ─────────────────────────────────────────
         (
             'a !b c',
             "Negation: a -> c with b forbidden between",
+            False,
+        ),
+        (
+            'a ^b c',
+            "Negation: caret ^ is identical to !",
+            False,
+        ),
+        (
+            'a !(b||c) d',
+            "Negated OR-group: a -> d with both b and c forbidden (union, no branch split)",
+            False,
+        ),
+        (
+            'a !b c d',
+            "Negation mid-sequence: forbidden spans only the pairs that straddle !b",
+            False,
+        ),
+        (
+            'a !b* (c||d)',
+            "Negation with quantifier (quantifier ignored semantically by CEP)",
+            False,
+        ),
+        (
+            'Submit_Application !Reject[reason="duplicate"] Approve',
+            "Real labels: Approve must follow Submit without Reject in between",
             False,
         ),
     ]
