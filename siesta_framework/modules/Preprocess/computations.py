@@ -325,7 +325,7 @@ def update_last_checked(previous_last_checked: DataFrame|None, current_last_chec
     # Step 2: Prune records older than lookback relative to the minimum timestamp in the current batch
     # Only applicable for time-based lookback — index-based has no time dimension to prune on
     if real_lookback[1] == "time":
-        merged_last_checked_df.filter((col("last_checked_moment") >= batch_min_ts) | ((batch_min_ts - col("last_checked_moment")) < real_lookback[0] / 1000))
+        merged_last_checked_df = merged_last_checked_df.filter((col("last_checked_moment") >= batch_min_ts) | ((batch_min_ts - col("last_checked_moment")) < real_lookback[0] / 1000))
     else:
-        merged_last_checked_df.filter((col("last_checked_moment") >= batch_min_pos) | ((batch_min_pos - col("last_checked_moment")) < real_lookback[0]))
+        merged_last_checked_df = merged_last_checked_df.filter((col("last_checked_moment") >= batch_min_pos) | ((batch_min_pos - col("last_checked_moment")) < real_lookback[0]))
     return merged_last_checked_df
