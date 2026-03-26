@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import List
 
 
-OPENCEP_ROOT = Path(__file__).resolve().parent / "CEP/OpenCEP"
+OPENCEP_ROOT = Path(__file__).resolve().parent / "OpenCEP"
 if str(OPENCEP_ROOT) not in sys.path:
     sys.path.append(str(OPENCEP_ROOT))
 
