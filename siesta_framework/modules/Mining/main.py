@@ -233,6 +233,8 @@ class Miner(SiestaModule):
             )
             grouped_constraints = grouped_constraints.unionByName(grouped_pre)
 
+        grouped_constraints = grouped_constraints.filter(F.col("support") >= self.mining_config.get("support_threshold", 0.0))
+
         # Prepare a CSV-friendly DataFrame
         select_cols = [
             F.col("category"),
