@@ -1,6 +1,6 @@
 {
-  "log_name": "bpic2017",
-  "log_path": "datasets/BPI Challenge 2017.xes",
+  "log_name": "experiment_c",
+  "log_path": "datasets/analysis.xes",
   "storage_namespace": "siesta",
   "overwrite_data": false,
   "enable_streaming": false,

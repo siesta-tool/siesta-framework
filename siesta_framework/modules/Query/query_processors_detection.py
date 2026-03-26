@@ -8,6 +8,7 @@ from siesta_framework.model.SystemModel import Query_Config, Pattern
 from pyspark.sql import functions as F
 from pyspark.sql.functions import col
 from siesta_framework.modules.Query.parse_seql import BoundActivity, Quantifier, expand_compact, parse_pattern, extract_responded_pairs, extract_siesta_pairs #TODO Update api names
+from siesta_framework.modules.Query.CEP_adapter import find_occurrences_dsl
 
 from functools import reduce
 import logging
@@ -56,6 +57,8 @@ def process_detection_query(config: Query_Config, metadata: MetaData):
     # pairs = _extract_consecutive_pairs(config.get("query", {}).get("pattern", []))
     new_pattern = config.get("query", {}).get("alt_pattern", "")
     
+    logger.info(new_pattern)
+    
     # pair_branches = extract_siesta_pairs(new_pattern)
     pair_branches = set(extract_responded_pairs(new_pattern))
     
@@ -82,6 +85,17 @@ def process_detection_query(config: Query_Config, metadata: MetaData):
         .distinct()
     )
 
-    print(intersected_ids.count())
+    # print(intersected_ids.count())
+
+    first_trace = intersected_ids.first()["trace_id"] # type: ignore
+    print(first_trace)
+
+    sequence_table = list(storage.read_sequence_table(metadata).where(col("trace_id").eqNullSafe(first_trace)).select("activity").toPandas()["activity"])
+    print(sequence_table)
+
+    logger.info(new_pattern)
+    res = find_occurrences_dsl(sequence_table, new_pattern, events=[{"name": _, "user": "test"} for _ in sequence_table])
+    print(res)
+
 
     return "test"
