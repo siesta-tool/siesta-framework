@@ -10,6 +10,7 @@ from siesta_framework.core.config import get_system_config
 from siesta_framework.core.logger import timed
 from siesta_framework.core.storageFactory import get_storage_manager
 from pyspark.sql import SparkSession, DataFrame, functions as F
+from siesta_framework.modules.Compare.ngrams import discover_ngrams, save_ngram_results
 
 import csv
 import json
@@ -131,27 +132,35 @@ class Comparator(SiestaModule):
         all_events_df = self.storage.read_sequence_table(self.metadata)
         all_events_df.cache()  # Cache evolved traces as they will be used multiple times
 
-        # Based on the defined value-groups, create groups of events based on the separating key
-        separating_key = self.comparator_config.get("separating_key", "activity")
-        separating_groups = self.comparator_config.get("separating_groups", [])
+        results = discover_ngrams(
+            events=all_events_df,
+            target_activities=self.comparator_config.get("separating_groups", [])[0],
+            n=self.comparator_config.get("method_params", {}).get("n", 2)
+        )
+        save_ngram_results(results, self.comparator_config["output_path"], fmt="csv")
 
-        # grouped_dfs will contain a list of tuples: (group_values_on_separating_key, group_events_df)
-        # e.g. [ (["fail_1", "fail_2"], df_of_fail_events), (["success_1", "success_2"], df_of_success_events) ]
-        # or if only one group is defined: [ (["fail_1", "fail_2"], df_of_fail_events), (["not_fail_1", "not_fail_2"], df_of_non_fail_events) ]
-        grouped_dfs = []
-        if len(separating_groups) < 2:
-            # We consider as second group all values of the separating key that are not in the first group, 
-            # to ensure we have at least 2 groups to compare.
-            group_1_df = all_events_df.filter(F.col(separating_key).isin(separating_groups[0]))
-            group_2_df = all_events_df.filter(~F.col(separating_key).isin(separating_groups[0]))
-            grouped_dfs.append((separating_groups[0], group_1_df))
-            grouped_dfs.append((f"not_{separating_groups[0]}", group_2_df))
-        else:
-            for group in separating_groups:
-                group_df = all_events_df.filter(F.col(separating_key).isin(group))
-                grouped_dfs.append((group, group_df))
+        all_events_df.unpersist()
+        # # Based on the defined value-groups, create groups of events based on the separating key
+        # separating_key = self.comparator_config.get("separating_key", "activity")
+        # separating_groups = self.comparator_config.get("separating_groups", [])
 
-        if self.comparator_config.get("method", "ngrams") == "ngrams":
-            ngrams(grouped_dfs, n = self.comparator_config.get("method_params", {}).get("n", 4))
-        else: # TODO: Implement other comparison methods
-            pass
+        # # grouped_dfs will contain a list of tuples: (group_values_on_separating_key, group_events_df)
+        # # e.g. [ (["fail_1", "fail_2"], df_of_fail_events), (["success_1", "success_2"], df_of_success_events) ]
+        # # or if only one group is defined: [ (["fail_1", "fail_2"], df_of_fail_events), (["not_fail_1", "not_fail_2"], df_of_non_fail_events) ]
+        # grouped_dfs = []
+        # if len(separating_groups) < 2:
+        #     # We consider as second group all values of the separating key that are not in the first group, 
+        #     # to ensure we have at least 2 groups to compare.
+        #     group_1_df = all_events_df.filter(F.col(separating_key).isin(separating_groups[0]))
+        #     group_2_df = all_events_df.filter(~F.col(separating_key).isin(separating_groups[0]))
+        #     grouped_dfs.append((separating_groups[0], group_1_df))
+        #     grouped_dfs.append((f"not_{separating_groups[0]}", group_2_df))
+        # else:
+        #     for group in separating_groups:
+        #         group_df = all_events_df.filter(F.col(separating_key).isin(group))
+        #         grouped_dfs.append((group, group_df))
+
+        # if self.comparator_config.get("method", "ngrams") == "ngrams":
+        #     discover_ngrams(grouped_dfs, n = self.comparator_config.get("method_params", {}).get("n", 4))
+        # else: # TODO: Implement other comparison methods
+        #     pass
