@@ -988,10 +988,17 @@ def extract_responded_pairs(pattern: str) -> List[RespondedPair]:
     results = [_pairs_from_sequence(seq, branch_id) for branch_id, seq in enumerate(sequences)]
     return results
 
-
-def _expand_symbols(sequence: List[BoundActivity]) -> List[BoundActivity]:
+def extract_attribute_pairs(pattern):
+    ast = parse_pattern(pattern)
+    sequences = _linearise(ast)
+    attribute_pairs = set()
+    for branch_id, seq in enumerate(sequences):
+        for boundActivity in seq:
+            if boundActivity.activity.constraints:
+                attribute_pairs.add((boundActivity.activity.label, boundActivity.activity.label, branch_id))
     
-    return []
+    return attribute_pairs
+    
 
 def extract_siesta_pairs(pattern: str) -> List[List[BoundActivity]]:
     ast = parse_pattern(pattern)
