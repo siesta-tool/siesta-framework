@@ -40,11 +40,6 @@ from siesta_framework.modules.Query.parse_seql import (
     SeqNode,
 )
 
-# from CEP_adapter_helpers import (
-#     _extract_split_matches,
-#     _check_gap_constraints
-# )
-
 def _get_accepted_labels(atom) -> set:
     """
     Collect all activity labels that *atom* can directly match.
