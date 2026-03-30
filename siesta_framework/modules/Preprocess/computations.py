@@ -2,13 +2,12 @@
 Functions relating to the generation and filtering of valid event pairs
 """
 from collections import defaultdict
-from datetime import timedelta, datetime
 import re
 from pyspark import RDD
 from pyspark.sql import DataFrame
 from typing import Iterable, List, Literal, Optional, Tuple
-from pyspark.sql.functions import col, unix_timestamp, sum as spark_sum, count, min as spark_min, max as spark_max, pow as spark_pow
-from pyspark.sql.types import StructType, StructField, StringType, TimestampType, IntegerType
+from pyspark.sql.functions import col, sum as spark_sum, count, min as spark_min, max as spark_max, pow as spark_pow
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType
 from siesta_framework.model.DataModel import Last_Checked_table_schema, EventPair
 import logging
 from siesta_framework.core.sparkManager import get_spark_session
@@ -28,7 +27,7 @@ activity_index_schema = StructType([
     StructField("activity", StringType(), True),
     StructField("trace_id", StringType(), True),
     StructField("position", IntegerType(), True),
-    StructField("start_timestamp", TimestampType(), True),
+    StructField("start_timestamp", IntegerType(), True),
     StructField("attributes", StringType(), True)
 ])
 
@@ -40,7 +39,7 @@ pair_index_schema = EventPair.get_schema()
 
 type Trace_ID = str
 type Event_Type = str
-type Timestamp = str
+type Timestamp = int
 type Position = int
 type Attributes = str
 
@@ -80,7 +79,6 @@ def extract_last_checked_and_all_pairs(updated_sequence_table_DF: DataFrame, pre
 
     real_lookback = _parse_lookback(lookback)
     
-    updated_sequence_table_DF = updated_sequence_table_DF.withColumn("start_timestamp", unix_timestamp(col("start_timestamp"), "yyyy-MM-dd'T'HH:mm:ss"))
     trace_rdd: RDD[Tuple[Trace_ID, Event]] = updated_sequence_table_DF.rdd.map(lambda row: (
         row.trace_id,
         (row.activity, row.start_timestamp, row.position, row.attributes)
@@ -106,7 +104,6 @@ def extract_last_checked_and_all_pairs(updated_sequence_table_DF: DataFrame, pre
     last_checked = full.flatMap(lambda x: x[1])
     spark = get_spark_session()
     pairs_df = spark.createDataFrame(pairs, schema=pair_index_schema)
-    # logger.info(pairs_df.show())
     last_checked_df = spark.createDataFrame(last_checked, schema=Last_Checked_table_schema)
     merged_last_checked_df = update_last_checked(previous_last_checked, last_checked_df, batch_min_ts, batch_min_pos, real_lookback)
     

@@ -1,4 +1,3 @@
-from datetime import datetime
 from typing import Any, Dict
 import boto3
 from botocore.exceptions import ClientError
@@ -14,15 +13,6 @@ from siesta_framework.model.DataModel import Event, EventConfig, Last_Checked_ta
 from siesta_framework.core.config import get_system_config
 import siesta_framework.core.sparkManager as SparkManager
 from delta.tables import DeltaTable
-
-def _parse_timestamp(ts: str) -> datetime:
-    """Parse a timestamp string, accepting both with and without milliseconds."""
-    for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
-        try:
-            return datetime.strptime(ts, fmt)
-        except ValueError:
-            continue
-    raise ValueError(f"Cannot parse timestamp: {ts!r}")
 
 import logging
 logger = logging.getLogger(__name__)
@@ -460,8 +450,6 @@ class S3Manager(StorageManager):
         metadata.first_timestamp = None
         metadata.last_timestamp = None
         metadata.last_mined_timestamp = None
-        metadata.approx_unique_traces = set()
-        metadata.approx_unique_activities = set()
         try:
             # Try to read the Delta table directly - if it doesn't exist, an exception will be raised
             metadata_df = self.spark.read.format("delta").load(metadata.metadata_table_path)
@@ -472,11 +460,9 @@ class S3Manager(StorageManager):
                 metadata.trace_count = r.trace_count or 0
                 metadata.event_count = r.event_count or 0
                 metadata.pair_count = r.pair_count or 0
-                metadata.first_timestamp = _parse_timestamp(r.first_timestamp) if r.first_timestamp is not None else None
-                metadata.last_timestamp = _parse_timestamp(r.last_timestamp) if r.last_timestamp is not None else None
-                metadata.last_mined_timestamp = _parse_timestamp(r.last_mined_timestamp) if r.last_mined_timestamp is not None else None
-                metadata.approx_unique_traces = set(r.approx_unique_traces) if r.approx_unique_traces is not None else set()
-                metadata.approx_unique_activities = set(r.approx_unique_activities) if r.approx_unique_activities is not None else set()
+                metadata.first_timestamp = r.first_timestamp
+                metadata.last_timestamp = r.last_timestamp
+                metadata.last_mined_timestamp = r.last_mined_timestamp
                 metadata.storage_type = "s3"
                 logger.info(f"Loaded existing metadata for {log_name}")
         except Exception as e:
@@ -533,10 +519,23 @@ class S3Manager(StorageManager):
             logger.info(f"S3 Manager wrote to sequence table")
 
             # Update metadata object
-            metadata.first_timestamp = datetime(2026, 11, 10, 5)
-            metadata.last_timestamp = datetime(2026, 11, 10, 5)
-            metadata.event_count += events_df.count()
-            metadata.trace_count += events_df.select(F.col("position") == 0).count()
+            ts_agg = events_df.agg(
+                F.min("start_timestamp").alias("min_ts"),
+                F.max("start_timestamp").alias("max_ts"),
+                F.count("*").alias("event_count"),
+                F.sum((F.col("position") == 0).cast("int")).alias("trace_count"),
+            ).collect()[0]
+            if ts_agg.min_ts is not None:
+                metadata.first_timestamp = (
+                    min(metadata.first_timestamp, ts_agg.min_ts)
+                    if getattr(metadata, "first_timestamp", None) else ts_agg.min_ts
+                )
+                metadata.last_timestamp = (
+                    max(metadata.last_timestamp, ts_agg.max_ts)
+                    if getattr(metadata, "last_timestamp", None) else ts_agg.max_ts
+                )
+            metadata.event_count = getattr(metadata, "event_count", 0) + ts_agg.event_count
+            metadata.trace_count = getattr(metadata, "trace_count", 0) + ts_agg.trace_count
         except Exception as e:
             logger.info(f"Error writing on {metadata.sequence_table_path}: {e}")
             raise
@@ -555,7 +554,7 @@ class S3Manager(StorageManager):
             df = self.spark.read.format("delta").load(metadata.sequence_table_path)
             logger.info(f"Read {df.count()} records from {metadata.sequence_table_path}.")
             if filter_out == "mined" and metadata.last_mined_timestamp:
-                df = df.select("*").where(col("start_timestamp") > lit(metadata.last_mined_timestamp.strftime("%Y-%m-%dT%H:%M:%S")))
+                df = df.select("*").where(col("start_timestamp") > lit(metadata.last_mined_timestamp))
             return df
         except Exception as e:
             logger.info(f"Error reading from {metadata.sequence_table_path}: {e}")
@@ -610,12 +609,6 @@ class S3Manager(StorageManager):
                 .option("mergeSchema", "true") \
                 .save(metadata.activity_index_path)
             
-            # unique_activities = events_df.select("activity").distinct().rdd.map(lambda row: hash_str(row.activity)).collect()
-            # globally_uninque_activities = set(unique_activities) - metadata.approx_unique_activities
-            # logger.info(f"Wrote {len(globally_uninque_activities)} new activities to {metadata.activity_index_path}.")
-
-            # Update metadata object
-            # metadata.approx_unique_activities.update(globally_uninque_activities)            
         except Exception as e:
             logger.info(f"Error writing on {metadata.activity_index_path}: {e}")
             raise

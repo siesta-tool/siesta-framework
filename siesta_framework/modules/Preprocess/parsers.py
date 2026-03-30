@@ -6,9 +6,9 @@ from siesta_framework.core.sparkManager import get_spark_session
 from siesta_framework.core.storageFactory import get_storage_manager
 from siesta_framework.model.DataModel import Event, EventConfig
 from pyspark.sql import SparkSession, DataFrame, functions as F
-from pyspark.sql.types import StringType, IntegerType, MapType, ArrayType, TimestampType
+from pyspark.sql.types import StringType, IntegerType, MapType, StructType, StructField
 from pyspark.sql.functions import monotonically_increasing_id, lit
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 import logging
 from pyspark.sql.window import Window
@@ -95,21 +95,24 @@ def _cast_value_by_schema(field_name: str, value, config: EventConfig):
     
     # Cast based on type
     if isinstance(field_type, IntegerType):
+        if config.is_timestamp_field(field_name):
+            try:
+                if isinstance(value, datetime):
+                    if value.tzinfo is None:
+                        value = value.replace(tzinfo=timezone.utc)
+                    return int(value.timestamp())
+                elif isinstance(value, str):
+                    dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    return int(dt.timestamp())
+            except (ValueError, TypeError):
+                return None
         try:
             return int(value)
         except (ValueError, TypeError):
             return None
     elif isinstance(field_type, StringType):
-        # For timestamp fields, convert to ISO format string if needed
-        if config.is_timestamp_field(field_name):
-            if isinstance(value, datetime):
-                return value.isoformat(timespec="seconds")
-            elif isinstance(value, str):
-                try:
-                    dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
-                    return dt.isoformat()
-                except:
-                    return value
         return str(value)
     elif isinstance(field_type, MapType):
         # For attributes, ensure it's a dict with string values
@@ -301,8 +304,23 @@ def parse_xml(storage_path: str, spark: SparkSession, preprocess_config: dict) -
     del activities, trace_ids, positions, timestamps, attr_dicts
 
     # Convert to Spark DataFrame (uses Arrow serialization automatically)
-    schema = Event.get_schema()
-    events_df = spark.createDataFrame(pdf, schema=schema)
+    # Use intermediate schema with StringType for timestamp fields so Spark can parse them
+    event_schema = Event.get_schema()
+    intermediate_schema = StructType([
+        StructField(f.name, StringType() if f.name in timestamp_fields else f.dataType, f.nullable)
+        for f in event_schema.fields
+    ])
+    events_df = spark.createDataFrame(pdf, schema=intermediate_schema)
+    # Convert timestamp strings to Unix seconds (integer)
+    for ts_field in timestamp_fields:
+        events_df = events_df.withColumn(
+            ts_field,
+            F.unix_timestamp(F.col(ts_field), "yyyy-MM-dd'T'HH:mm:ss").cast("int")
+        )
+    # Final cast to enforce Event schema types
+    events_df = events_df.select(*[
+        F.col(f.name).cast(f.dataType).alias(f.name) for f in event_schema.fields
+    ])
 
     logger.info("Spark DataFrame created from parsed XES data.")
     return events_df
@@ -419,13 +437,10 @@ def _parse_rows(config: EventConfig, df: DataFrame) -> DataFrame:
         if source_key and source_key in df.columns:
             target_type = schema_type_map.get(field_name)
             if config.is_timestamp_field(field_name):
-                # Normalize timestamps to ISO-8601 string representation
+                # Parse timestamp string to Unix seconds (integer)
                 result_df = result_df.withColumn(
                     field_name,
-                    F.date_format(
-                        F.col(source_key).cast("timestamp"),
-                        "yyyy-MM-dd'T'HH:mm:ss"
-                    )
+                    F.unix_timestamp(F.col(source_key).cast("timestamp")).cast("int")
                 )
             elif target_type and isinstance(target_type, IntegerType):
                 result_df = result_df.withColumn(field_name, F.col(source_key).cast("int"))

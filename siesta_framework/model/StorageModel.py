@@ -1,5 +1,4 @@
-from datetime import datetime
-from pyspark.sql.types import StructType, StructField, StringType, IntegerType, ArrayType
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType
 from . import DataModel
 import xxhash
 
@@ -9,16 +8,13 @@ class MetaData:
     storage_type: str
     
     trace_count: int
-    approx_unique_traces: set[int]
-
-    event_count: int    
-    approx_unique_activities: set[int]
+    event_count: int
 
     pair_count: int
 
-    first_timestamp: datetime
-    last_timestamp: datetime    
-    last_mined_timestamp: datetime
+    first_timestamp: int
+    last_timestamp: int
+    last_mined_timestamp: int
 
     # S3 Table paths
     @property
@@ -137,8 +133,6 @@ class MetaData:
         self.storage_namespace = storage_namespace
         self.log_name = log_name
         self.storage_type = storage_type
-        self.approx_unique_traces = set()
-        self.approx_unique_activities = set()
 
     @staticmethod
     def get_schema() -> StructType:
@@ -149,35 +143,21 @@ class MetaData:
             StructField("trace_count", IntegerType(), False),
             StructField("event_count", IntegerType(), False),
             StructField("pair_count", IntegerType(), False),
-            StructField("first_timestamp", StringType(), True),
-            StructField("last_timestamp", StringType(), True),
-            StructField("last_mined_timestamp", StringType(), True),
-            StructField("approx_unique_traces", ArrayType(IntegerType()), True),
-            StructField("approx_unique_activities", ArrayType(IntegerType()), True),
+            StructField("first_timestamp", IntegerType(), True),
+            StructField("last_timestamp", IntegerType(), True),
+            StructField("last_mined_timestamp", IntegerType(), True),
         ])
 
     def to_dict(self) -> dict:
-        f_timestamp = getattr(self, 'first_timestamp', None)
-        if f_timestamp and isinstance(f_timestamp, datetime):
-            f_timestamp = f_timestamp.isoformat()
-        l_timestamp = getattr(self, 'last_timestamp', None)
-        if l_timestamp and isinstance(l_timestamp, datetime):
-            l_timestamp = l_timestamp.isoformat()
-        m_timestamp = getattr(self, 'last_mined_timestamp', None)
-        if m_timestamp and isinstance(m_timestamp, datetime):
-            m_timestamp = m_timestamp.isoformat()
-            
         return {
             "log_name": self.log_name,
             "storage_namespace": self.storage_namespace,
             "trace_count": getattr(self, 'trace_count', 0),
             "event_count": getattr(self, 'event_count', 0),
             "pair_count": getattr(self, 'pair_count', 0),
-            "first_timestamp": f_timestamp,
-            "last_timestamp": l_timestamp,
-            "last_mined_timestamp": m_timestamp,
-            "approx_unique_traces": list(self.approx_unique_traces) if getattr(self, 'approx_unique_traces', None) else [],
-            "approx_unique_activities": list(self.approx_unique_activities) if getattr(self, 'approx_unique_activities', None) else [],
+            "first_timestamp": getattr(self, 'first_timestamp', None),
+            "last_timestamp": getattr(self, 'last_timestamp', None),
+            "last_mined_timestamp": getattr(self, 'last_mined_timestamp', None),
         }
     
     def __str__(self) -> str:

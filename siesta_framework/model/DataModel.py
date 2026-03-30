@@ -108,13 +108,12 @@ class Event:
     trace_id: str
     position: int
     
-    start_timestamp: Optional[datetime]
+    start_timestamp: Optional[int]
 
-    attributes: Optional[dict[str, str | datetime | int | float | bool]]
+    attributes: Optional[dict[str, str | int | float | bool]]
 
     def __init__(self, activity: str = None, trace_id: str = None, position: int = None,
-                 start_timestamp: Optional[datetime] = None, end_timestamp: Optional[datetime] = None,
-                 attributes: Optional[dict] = None, **kwargs):
+                 start_timestamp: Optional[int] = None, attributes: Optional[dict] = None, **kwargs):
         self.activity = activity
         self.trace_id = trace_id
         self.position = position
@@ -137,7 +136,7 @@ class Event:
             StructField("activity", StringType(), False),
             StructField("trace_id", StringType(), True),
             StructField("position", IntegerType(), False),
-            StructField("start_timestamp", StringType(), True),
+            StructField("start_timestamp", IntegerType(), True),
             StructField("attributes", MapType(StringType(), StringType()), True)
         ])
 
@@ -146,7 +145,7 @@ class Event:
             "activity": self.activity,
             "trace_id": self.trace_id if self.trace_id else None,
             "position": self.position,
-            "start_timestamp": self.start_timestamp.isoformat() if self.start_timestamp and hasattr(self.start_timestamp, "isoformat") else self.start_timestamp,
+            "start_timestamp": self.start_timestamp,
             "attributes": self.attributes if self.attributes else {}
         }
         return r
@@ -165,16 +164,16 @@ class EventPair:
     def end_position(self) -> int:
         return self.target.position
     @property
-    def start_timestamp(self) -> Optional[datetime]:
+    def start_timestamp(self) -> Optional[int]:
         return self.source.start_timestamp
     
     @property
     def position_diff(self) -> int:
         return self.target.position - self.source.position
     @property
-    def start_timestamp_diff(self) -> Optional[float]:
+    def start_timestamp_diff(self) -> Optional[int]:
         if self.source.start_timestamp and self.target.start_timestamp:
-            return (self.target.start_timestamp - self.source.start_timestamp).total_seconds()
+            return self.target.start_timestamp - self.source.start_timestamp
         return None
 
     def to_dict(self) -> dict:
@@ -191,12 +190,12 @@ class EventPair:
             StructField("source", StringType(), False),
             StructField("target", StringType(), False),
             StructField("trace_id", StringType(), False),
-            StructField("source_timestamp", StringType(), False),
-            StructField("target_timestamp", StringType(), False),
-            StructField("source_position", StringType(), False),
-            StructField("target_position", StringType(), False),
-            StructField("source_attributes", StringType(), True),
-            StructField("target_attributes", StringType(), True)
+            StructField("source_timestamp", IntegerType(), False),
+            StructField("target_timestamp", IntegerType(), False),
+            StructField("source_position", IntegerType(), False),
+            StructField("target_position", IntegerType(), False),
+            StructField("source_attributes", MapType(StringType(), StringType()), True),
+            StructField("target_attributes", MapType(StringType(), StringType()), True)
         ])
 
 
@@ -213,16 +212,9 @@ class Trace:
     def end_position(self) -> int:
         return len(self.events) - 1
     @property
-    def start_timestamp(self) -> Optional[datetime]:
+    def start_timestamp(self) -> Optional[int]:
         if self.events[0].start_timestamp:
             return self.events[0].start_timestamp
-        return None
-    @property
-    def end_timestamp(self) -> Optional[datetime]:
-        if self.events[-1].end_timestamp:
-            return self.events[-1].end_timestamp
-        if "end_timestamp" in self.events[-1].attributes:
-            return self.events[-1].attributes["end_timestamp"]
         return None
     
     def to_dict(self) -> dict:
@@ -231,8 +223,7 @@ class Trace:
             "events": [event.to_dict() for event in self.events] if self.events else [],
             "start_position": self.start_position,
             "end_position": self.end_position,
-            "start_timestamp": self.start_timestamp.isoformat() if self.start_timestamp else None,
-            "end_timestamp": self.end_timestamp.isoformat() if self.end_timestamp else None
+            "start_timestamp": self.start_timestamp
         }
     
 
