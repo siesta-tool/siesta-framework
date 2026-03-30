@@ -49,7 +49,7 @@ def optimize_lf(query_pairs: set[RespondedPair], metadata:MetaData):
 
     #TODO: Compare w/sorting - probably worse/equal
 
-    true_pairs = list(map(lambda x: (x.source.label, x.target.label, x.branch_id), query_pairs))
+    true_pairs = list(set(list(map(lambda x: (x.source.label, x.target.label), query_pairs))))
 
     return true_pairs
 
@@ -61,7 +61,7 @@ MINE_TRACE_SCHEMA = StructType([
 def mine_trace(inputs: pd.DataFrame, pattern: str) -> pd.DataFrame:
     
     trace_id = inputs["trace_id"].iloc[0]
-    return pd.DataFrame([{"trace_id": trace_id, "positions": inputs.shape}])
+    # return pd.DataFrame([{"trace_id": trace_id, "positions": inputs.shape}])
     # return pd.DataFrame([{"trace_id": trace_id, "positions": [0,1]}])
     # Extract source events and target events as uniform records
     source_events = inputs[["source", "source_position", "source_timestamp", "source_attributes"]].rename(columns={
@@ -110,61 +110,24 @@ def process_detection_query_testing(config: Query_Config, metadata: MetaData):
     all_pairs = list(attribute_pairs.union(set(true_pairs)))
 
 
+
+    query_pairs_df = spark.createDataFrame(true_pairs, ["source", "target"])
+    all_pairs_df = spark.createDataFrame(all_pairs, ["source", "target"])
+
+
     relevant_source = set([_[0] for _ in all_pairs])
     relevan_target = set([_[1] for _ in all_pairs])
 
-    index_table = storage.read_pairs_index(metadata).filter(col("source").isin(relevant_source) & col("target").isin(relevan_target))
-    
-    def mine_call_wrapper_2(inputs: pd.DataFrame) -> pd.DataFrame:
-        return mine_trace(inputs, new_pattern)
-    print(index_table.select("trace_id").count())
-    res = index_table.groupBy("trace_id").applyInPandas(mine_call_wrapper_2, schema=MINE_TRACE_SCHEMA)
-
-    return res.collect()
-
-    # Single join: tag all rows with branch info and pair membership
-    # tagged_df = (
-    #     index_table.filter(col("source").isin(relevant_source) | col("target").isin(relevan_target))
-    #     .join(broadcast(all_pairs_df), on=["source", "target"], how="left")  # adds branch_id
-    # )
-
-    # # Pruning: only look at rows matching query pairs (non-null branch_id from true_pairs)
-    # query_pairs_broadcast = broadcast(query_pairs_df)
-    # pruned_trace_ids = (
-    #     tagged_df
-    #     .join(broadcast(query_pairs_df.select("source", "target")),  # no branch_id pulled in
-    #         on=["source", "target"], how="inner")
-    #     .select("trace_id", "branch_id", "source", "target")
-    #     .distinct()
-    #     .groupBy("trace_id", "branch_id")
-    #     .agg(F.count("*").alias("pair_count"))
-    #     .join(broadcast(branch_sizes_df), on="branch_id")
-    #     .filter(F.col("pair_count") == F.col("num_pairs"))
-    #     .select("trace_id")
-    #     .distinct()
-    # )
-
-    # # Fetch positions: reuse tagged_df instead of re-joining index_table
-    # pair_positions_df = tagged_df.join(broadcast(pruned_trace_ids), on="trace_id", how="inner").repartition("trace_id")
-    # logger.info(f"Parsing query took: {time.time() - start}")
-    # def mine_call_wrapper(inputs: pd.DataFrame) -> pd.DataFrame:
-    #     return mine_trace(inputs, new_pattern)
-
-    # matches_df = pair_positions_df.groupBy("trace_id").applyInPandas(mine_call_wrapper, schema=MINE_TRACE_SCHEMA)
-    
-    # return str(matches_df.collect())
-    
-    index_table.cache()
+    index_table = storage.read_pairs_index(metadata).filter(col("source").isin(relevant_source) | col("target").isin(relevan_target))
 
 
     pruned_trace_ids = (
         index_table
         .join(query_pairs_df, on=["source", "target"], how="inner")
-        .groupBy("trace_id", "branch_id")
+        .groupBy("trace_id")
         .agg(F.count_distinct("source", "target").alias("pair_count"))
-        .join(branch_sizes_df, on="branch_id")
         # Only keep IDs that appeared in every single pair
-        .filter(F.col("pair_count") == F.col("num_pairs"))
+        .filter(F.col("pair_count") == len(true_pairs))
         .select("trace_id")
         .distinct()
     )
