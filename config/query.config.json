@@ -1,0 +1,25 @@
+{
+  "log_name": "bpic2017",
+  "storage_namespace": "siesta",
+  "method": "detection",
+  "query": {
+    "alt_pattern": "\"A_Create Application\" A_Submitted",
+    "pattern": [
+      {
+        "activity": "A_Create Application",
+        "position": 0
+      },
+      {
+        "activity": "A_Submitted",
+        "position": 1,
+        "symbol": "+"
+      }
+    ],
+    "constraints": [
+      {
+        "type": "time_window",
+        "value": "5m"
+      }
+    ]
+  }
+}

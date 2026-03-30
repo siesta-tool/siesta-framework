@@ -1,5 +1,42 @@
-from typing import Dict, Any
+from typing import List, Literal, TypedDict, Any, NotRequired as Optional ,Dict, Any
 
+
+
+###############################################
+# TYPES
+###############################################
+
+# QUERY
+
+# Equivalent to type QUERY_EVENT
+class Query_Event(TypedDict, total=False):
+    activity: str
+    position: int
+    symbol: Optional[str]
+
+# Equivalent to type QUERY_CONTSRAINT
+Query_Constraint = Any
+
+Pattern = List[Query_Event]
+
+# Equivalent to type QUERY_METHOD_INPUT
+class Query_Method_Input(TypedDict, total=False):
+    pattern: Pattern
+    explore_mode: Optional[str] # "fast", "accurate", "hybrid"
+    explore_k: Optional[int] # 0 = fast exploration
+    constraints: Optional[List[Query_Constraint]]
+
+# Equivalent to type QUERY_CONFIG
+class Query_Config(TypedDict, total=False):
+    log_name: str
+    storage_namespace: str
+    method: Literal['stats', 'patterns', 'detection', 'explore', 'violations']
+    query: Query_Method_Input
+    mode: Optional[str]
+
+###############################################
+# DEFAULTS
+###############################################
 
 DEFAULT_SYSTEM_CONFIG: Dict[str, Any] = {
     # Storage configuration
@@ -66,20 +103,45 @@ DEFAULT_PREPROCESS_CONFIG: Dict[str, Any] = {
 }
 
 
+DEFAULT_QUERY_CONFIG: Query_Config = {
+    "log_name": "example_log",
+    "storage_namespace": "siesta",
+    "method": "stats",
+    "query": {
+        "pattern": [],
+        # "constraints" is optional
+    },
+    # "mode" is optional
+}
+
+
 DEFAULT_MINING_CONFIG: Dict[str, Any] = {
   "log_name": "example_log",
   "storage_namespace": "siesta",
   "storage_type": "s3",
   "force_recompute": False,
   "categories": ["*"], # or specific list of template categories(e.g. ["ordered", "positional", "existence", "negation"])
-  # "templates": ["*"], # or specific list of templates (e.g. ["response", "precedence"]) ----NOT IMPLEMENTED YET
+  # "templates": ["*"], # TODO or specific list of templates (e.g. ["response", "precedence"])
   "grouping": "trace",  # or "window"
   "identifiers": ["trace_id"],  # fields to identify groups (e.g. 'trace_id' for trace-based, irrelevant for window-based)
   "window_size": 30,  # position-based window size, if grouping by window
   "output_path": "../output/example_log", # where to store results
   "include_trace_lists": False, # whether to include the list of trace_ids supporting each constraint in the output (can be large)
-  "branching_bound": 2,
-  "branching_policy": "and",
+  "branching_bound": 2, #TODO
+  "branching_policy": "and", #TODO
   "support_threshold": 0.0,
-  "confidence_threshold": 0.0,
+  "confidence_threshold": 0.0, #TODO
 }
+
+DEFAULT_COMPARATOR_CONFIG: Dict[str, Any] = {
+  "log_name": "example_log",
+  "storage_namespace": "siesta",
+  "storage_type": "s3",
+  "method": "ngrams", # TODO or "mine, embeddings"
+  "method_params": {"n": 2}, # TODO parameters for the comparison method (e.g. n for n-grams)
+  "separating_key": "activity", # the column to compare on (e.g. activity, resource)
+  "separating_groups": [["fail_1", "fail_2"], ["success_1", "success_2"]], # groups of values to compare (e.g. [["fail", "error"], ["success", "complete"]])
+  "support_threshold": 0.0,
+  "output_path": "../output/example_log", # where to store results
+}
+
