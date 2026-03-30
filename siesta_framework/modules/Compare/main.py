@@ -1,5 +1,7 @@
 import argparse
 import datetime
+import csv
+import json
 from pathlib import Path
 from typing import Annotated, Any, Dict
 from fastapi import Form
@@ -9,15 +11,11 @@ from siesta_framework.core.interfaces import SiestaModule, StorageManager
 from siesta_framework.core.config import get_system_config
 from siesta_framework.core.logger import timed
 from siesta_framework.core.storageFactory import get_storage_manager
-from pyspark.sql import SparkSession, DataFrame, functions as F
-from siesta_framework.modules.Compare.ngrams import discover_ngrams, save_ngram_results
+from pyspark.sql import SparkSession, functions as F
+from siesta_framework.modules.Compare.ngrams import discover_ngrams, save_ngram_results, create_network
+from siesta_framework.modules.Mining.ordered import discover_ordered
 
-import csv
-import json
 import logging
-
-from siesta_framework.modules.Compare import ngrams
-from siesta_framework.modules.Compare.ngrams_network import create_network
 logger = logging.getLogger(__name__)
 
 
@@ -122,7 +120,7 @@ class Comparator(SiestaModule):
     def compare(self, caller: str):
         logger.info(f"Beginning comparator process initiated by {caller}.")
 
-        # Load metadata if available, and evolved traces since last comparator from storage
+        # Load metadata if available otherwise initialize it based on the comparator config.
         self.metadata = MetaData(
             storage_namespace=self.comparator_config.get("storage_namespace", "siesta"),
             log_name=self.comparator_config.get("log_name", "default_log"),
@@ -131,20 +129,33 @@ class Comparator(SiestaModule):
 
         self.metadata = self.storage.read_metadata_table(self.comparator_config, self.metadata) 
         all_events_df = self.storage.read_sequence_table(self.metadata)
-        all_events_df.cache()  # Cache evolved traces as they will be used multiple times
+        all_events_df.cache()
 
-        results = discover_ngrams(
-            events=all_events_df,
-            target_activities=self.comparator_config.get("separating_groups", [])[0],
-            n=self.comparator_config.get("method_params", {}).get("n", 2)
-        )
+        method = self.comparator_config.get("method", "ngrams")
+        params = self.comparator_config.get("method_params", {})
 
-        save_ngram_results(results, self.comparator_config["output_path"], fmt="csv")
-        if self.comparator_config.get("method_params", {}).get("vis", False):
-            with open(self.comparator_config["output_path"].split(".csv")[0] + ".html", 'w') as f:
-                f.write(create_network(self.comparator_config["output_path"]))
 
-        all_events_df.unpersist()
+        # For now, we consider only TWO groups for comparison, defined by the "separating_groups" config parameter.
+
+        if method == "ngrams":
+            results = discover_ngrams(
+                events=all_events_df,
+                target_activities=self.comparator_config.get("separating_groups", [])[0],
+                n=params.get("n", 2)
+            )
+            save_ngram_results(results, self.comparator_config["output_path"], fmt="csv")
+            if params.get("vis", False):
+                with open(self.comparator_config["output_path"].split(".csv")[0] + ".html", 'w') as f:
+                    f.write(create_network(self.comparator_config["output_path"]))
+
+        elif "method" == "dm":
+            ordered_constraints_df = discover_ordered(all_events_df, self.metadata)
+            
+            pass
+
+
+        # The code below will be used for MORE than 2 groups, when we generalize
+
         # # Based on the defined value-groups, create groups of events based on the separating key
         # separating_key = self.comparator_config.get("separating_key", "activity")
         # separating_groups = self.comparator_config.get("separating_groups", [])
@@ -169,3 +180,5 @@ class Comparator(SiestaModule):
         #     discover_ngrams(grouped_dfs, n = self.comparator_config.get("method_params", {}).get("n", 4))
         # else: # TODO: Implement other comparison methods
         #     pass
+
+        all_events_df.unpersist()
