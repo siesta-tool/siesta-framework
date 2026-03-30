@@ -17,6 +17,7 @@ import json
 import logging
 
 from siesta_framework.modules.Compare import ngrams
+from siesta_framework.modules.Compare.ngrams_network import create_network
 logger = logging.getLogger(__name__)
 
 
@@ -137,7 +138,11 @@ class Comparator(SiestaModule):
             target_activities=self.comparator_config.get("separating_groups", [])[0],
             n=self.comparator_config.get("method_params", {}).get("n", 2)
         )
+
         save_ngram_results(results, self.comparator_config["output_path"], fmt="csv")
+        if self.comparator_config.get("method_params", {}).get("vis", False):
+            with open(self.comparator_config["output_path"].split(".csv")[0] + ".html", 'w') as f:
+                f.write(create_network(self.comparator_config["output_path"]))
 
         all_events_df.unpersist()
         # # Based on the defined value-groups, create groups of events based on the separating key
