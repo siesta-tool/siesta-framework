@@ -137,11 +137,36 @@ DEFAULT_COMPARATOR_CONFIG: Dict[str, Any] = {
   "log_name": "example_log",
   "storage_namespace": "siesta",
   "storage_type": "s3",
-  "method": "ngrams", # TODO or "dm, embeddings"
-  "method_params": {"n": 2, "vis": True}, # TODO parameters for the comparison method (e.g. n for n-grams)
-  "separating_key": "activity", # the column to compare on (e.g. activity, resource)
-  "separating_groups": [["fail_1", "fail_2"], ["success_1", "success_2"]], # groups of values to compare (e.g. [["fail", "error"], ["success", "complete"]])
+
+  # Comparison method: "ngrams", "rare_rules", or "targeted_rules"
+  "method": "ngrams",
+
+  # Method-specific parameters:
+  #
+  # method: "ngrams"
+  #   "n"   (int)  - length of n-tuples to extract (e.g. 2 for bigrams)
+  #   "vis" (bool) - generate an interactive HTML network visualization
+  #
+  # method: "rare_rules"
+  #   (no extra params; uses top-level support_threshold)
+  #
+  # method: "targeted_rules"
+  #   "target_label"       (int)   - label for target traces (default 1)
+  #   "filtering_support"  (float) - min fraction of target traces a rule must
+  #                                  appear in before final filtering (default 1.0)
+  #   (uses top-level support_threshold)
+  "method_params": {"n": 2, "vis": True},
+
+  # Column whose values define the two groups to compare (e.g. "activity", "resource")
+  "separating_key": "activity",
+
+  # Two groups of values to compare; first group = target (label 1), second = control (label 0)
+  "separating_groups": [["fail_1", "fail_2"], ["success_1", "success_2"]],
+
+  # Minimum support threshold (interpretation varies by method — see method_params notes above)
   "support_threshold": 0.0,
-  "output_path": "../output/example_log", # where to store results
+
+  # Output directory; a Unix timestamp is automatically appended to avoid overwriting results
+  "output_path": "../output/example_log",
 }
 

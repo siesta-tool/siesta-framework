@@ -211,9 +211,4 @@ class Comparator(SiestaModule):
         #         group_df = all_events_df.filter(F.col(separating_key).isin(group))
         #         grouped_dfs.append((group, group_df))
 
-        # if self.comparator_config.get("method", "ngrams") == "ngrams":
-        #     discover_ngrams(grouped_dfs, n = self.comparator_config.get("method_params", {}).get("n", 4))
-        # else: # TODO: Implement other comparison methods
-        #     pass
-
         all_events_df.unpersist()
