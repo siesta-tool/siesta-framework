@@ -42,21 +42,29 @@ def discover_ngrams(events: DataFrame, target_activities: list[str], n: int = 2)
                                  +1 → n-gram appears in ALL label-1 and NO label-0 traces
                                  -1 → n-gram appears in ALL label-0 and NO label-1 traces
                                   0 → equal relative coverage in both groups
-        confidence_1     : float — in [0, 1]
+        confidence_1   : float — in [0, 1]
                                  count_1 / (count_1 + count_0)
+                                 P(label_1 | ngram present) — purity toward label-1.
                                   1 → every trace containing this n-gram is label-1
                                   0 → every trace containing this n-gram is label-0
                                 0.5 → n-gram is equally split between both groups
         confidence_0   : float — in [0, 1]
+                                 count_0 / (count_0 + count_1)
+                                 P(label_0 | ngram present) — purity toward label-0.
+                                  1 → every trace containing this n-gram is label-0
+                                  0 → every trace containing this n-gram is label-1
+        support_1      : float — in [0, 1]
+                                 count_1 / total_1
+                                 P(ngram | label_1) — fraction of label-1 traces
+                                 that contain this n-gram.
+        support_0      : float — in [0, 1]
                                  count_0 / total_0
-                                 Normalised recall for label-0: what fraction of all
-                                 label-0 traces contain this n-gram.
-                                  1 → n-gram appears in every label-0 trace
-                                  0 → n-gram never appears in label-0 traces
+                                 P(ngram | label_0) — fraction of label-0 traces
+                                 that contain this n-gram.
         support        : float — in [0, 1]
                                  (count_1 + count_0) / (total_1 + total_0)
-                                 Frequency of the n-gram across ALL traces, regardless
-                                 of label.  High support = common pattern.
+                                 Global frequency of the n-gram across ALL traces,
+                                 regardless of label.  High support = common pattern.
         direction      : str   — "label_1" if balance > 0,
                                  "label_0" if balance < 0,
                                  "neutral"  if balance == 0
@@ -157,23 +165,39 @@ def discover_ngrams(events: DataFrame, target_activities: list[str], n: int = 2)
             "balance",
             (F.col("count_1") / F.lit(total_1)) - (F.col("count_0") / F.lit(total_0))
         )
-        # confidence_1: purity toward label-1
+        # confidence_1: P(label_1 | ngram present) — purity toward label-1
         #   count_1 / (count_1 + count_0)  →  [0, 1]
-        #   1.0 = every trace containing this n-gram is label-1 (regardless of coverage)
+        #   1.0 = every trace containing this n-gram is label-1
         #   0.0 = every trace containing this n-gram is label-0
         .withColumn(
             "confidence_1",
             F.col("count_1") / (F.col("count_1") + F.col("count_0"))
         )
-        # confidence_0: normalised recall for label-0
+        # confidence_0: P(label_0 | ngram present) — purity toward label-0
+        #   count_0 / (count_0 + count_1)  →  [0, 1]
+        #   1.0 = every trace containing this n-gram is label-0
+        #   0.0 = every trace containing this n-gram is label-1
+        .withColumn(
+            "confidence_0",
+            F.col("count_0") / (F.col("count_0") + F.col("count_1"))
+        )
+        # support_1: P(ngram | label_1) — fraction of label-1 traces containing this n-gram
+        #   count_1 / total_1  →  [0, 1]
+        #   1.0 = n-gram appears in every label-1 trace
+        #   0.0 = n-gram never appears in any label-1 trace
+        .withColumn(
+            "support_1",
+            F.col("count_1") / F.lit(total_1)
+        )
+        # support_0: P(ngram | label_0) — fraction of label-0 traces containing this n-gram
         #   count_0 / total_0  →  [0, 1]
         #   1.0 = n-gram appears in every label-0 trace
         #   0.0 = n-gram never appears in any label-0 trace
         .withColumn(
-            "confidence_0",
+            "support_0",
             F.col("count_0") / F.lit(total_0)
         )
-        # support: overall frequency across ALL traces, regardless of label
+        # support: global frequency across ALL traces, regardless of label
         #   (count_1 + count_0) / (total_1 + total_0)  →  [0, 1]
         #   1.0 = n-gram appears in every trace
         #   0.0 = n-gram appears in no trace
@@ -190,7 +214,7 @@ def discover_ngrams(events: DataFrame, target_activities: list[str], n: int = 2)
         )
         .select(
             "ngram", "count_1", "count_0",
-            "balance", "confidence_1", "confidence_0", "support",
+            "balance", "confidence_1", "confidence_0", "support_1", "support_0", "support",
             "direction", "ngram_str",
         )
         .orderBy(F.abs(F.col("balance")).desc())
@@ -292,7 +316,7 @@ def save_ngram_results(
     # ------------------------------------------------------------------ #
     # Apply filters — pushed into the DAG, executed on cluster
     # ------------------------------------------------------------------ #
-    fields = ["ngram", "count_1", "count_0", "balance", "confidence_1", "confidence_0", "support", "direction"]
+    fields = ["ngram", "count_1", "count_0", "balance", "confidence_1", "confidence_0", "support_1", "support_0", "support", "direction"]
     write_df = balance_df.select(*fields)
 
     if direction is not None:
@@ -384,7 +408,12 @@ def create_network(input: str | pd.DataFrame | DataFrame) -> str:
     df["direction"] = df["direction"].astype(str).str.strip()
 
     # Back-compat: if old CSV is missing the new columns, synthesise them
-    for col, default in [("confidence_0", float("nan")), ("support", float("nan"))]:
+    for col, default in [
+        ("confidence_0", float("nan")),
+        ("support_1",    float("nan")),
+        ("support_0",    float("nan")),
+        ("support",      float("nan")),
+    ]:
         if col not in df.columns:
             df[col] = default
             print(f"[warn] Column '{col}' not found in CSV — defaulting to NaN. "
@@ -419,8 +448,10 @@ def create_network(input: str | pd.DataFrame | DataFrame) -> str:
     edge_stats: dict = defaultdict(lambda: {
         "count_1": 0, "count_0": 0,
         "balance_sum":      0.0,
-        "confidence_1_sum":   0.0,
+        "confidence_1_sum": 0.0,
         "confidence_0_sum": 0.0,
+        "support_1_sum":    0.0,
+        "support_0_sum":    0.0,
         "support_sum":      0.0,
         "rows": 0,
     })
@@ -458,8 +489,10 @@ def create_network(input: str | pd.DataFrame | DataFrame) -> str:
         if len(steps) < 2:
             continue
         direction    = row["direction"]
-        confidence_1   = safe_float(row["confidence_1"])
+        confidence_1 = safe_float(row["confidence_1"])
         confidence_0 = safe_float(row["confidence_0"])
+        support_1    = safe_float(row["support_1"])
+        support_0    = safe_float(row["support_0"])
         balance      = safe_float(row["balance"])
         support      = safe_float(row["support"])
         c1 = int(row["count_1"])
@@ -477,8 +510,10 @@ def create_network(input: str | pd.DataFrame | DataFrame) -> str:
             s["count_1"]          += c1
             s["count_0"]          += c0
             s["balance_sum"]      += balance
-            s["confidence_1_sum"]   += confidence_1
+            s["confidence_1_sum"] += confidence_1
             s["confidence_0_sum"] += confidence_0
+            s["support_1_sum"]    += support_1
+            s["support_0_sum"]    += support_0
             s["support_sum"]      += support
             s["rows"]             += 1
 
@@ -532,8 +567,10 @@ def create_network(input: str | pd.DataFrame | DataFrame) -> str:
         tgt_id = nodes_seen[tgt]
         rows   = s["rows"]
 
-        avg_confidence_1   = s["confidence_1_sum"]   / rows
+        avg_confidence_1 = s["confidence_1_sum"] / rows
         avg_confidence_0 = s["confidence_0_sum"] / rows
+        avg_support_1    = s["support_1_sum"]    / rows
+        avg_support_0    = s["support_0_sum"]    / rows
         avg_balance      = s["balance_sum"]      / rows
         avg_support      = s["support_sum"]      / rows
         abs_balance      = abs(avg_balance)
@@ -559,10 +596,12 @@ def create_network(input: str | pd.DataFrame | DataFrame) -> str:
         title = (
             f"<b>{src}</b> → <b>{tgt}</b><br>"
             f"Direction: <b>{palette['name']}</b><br>"
-            f"Avg confidence_1\u2081: {avg_confidence_1:.3f}<br>"
-            f"Avg confidence_1\u2080: {avg_confidence_0:.3f}<br>"
+            f"Avg confidence\u2081: {avg_confidence_1:.3f}<br>"
+            f"Avg confidence\u2080: {avg_confidence_0:.3f}<br>"
+            f"Avg support\u2081: {avg_support_1:.3f}<br>"
+            f"Avg support\u2080: {avg_support_0:.3f}<br>"
             f"Avg balance: {avg_balance:.3f}<br>"
-            f"Avg support: {avg_support:.4f}<br>"
+            f"Global support: {avg_support:.4f}<br>"
             f"\u03a3 count_1: {s['count_1']}   \u03a3 count_0: {s['count_0']}<br>"
             f"Ngram rows: {rows}"
         )
@@ -584,10 +623,12 @@ def create_network(input: str | pd.DataFrame | DataFrame) -> str:
             "arrows": {"to": {"enabled": True, "scaleFactor": 0.7}},
             # raw values for JS-side filtering
             "_direction":    direction,
-            "_confidence_1":   round(avg_confidence_1,   4),
+            "_confidence_1": round(avg_confidence_1, 4),
             "_confidence_0": round(avg_confidence_0, 4),
-            "_balance":      round(avg_balance,       4),
-            "_support":      round(avg_support,       4),
+            "_support_1":    round(avg_support_1,    4),
+            "_support_0":    round(avg_support_0,    4),
+            "_balance":      round(avg_balance,      4),
+            "_support":      round(avg_support,      4),
         })
         eid += 1
 
@@ -760,15 +801,28 @@ def create_network(input: str | pd.DataFrame | DataFrame) -> str:
 
     <div class="controls">
         <div class="ctrl-group">
-        <label title="confidence_1₁ = count_1 / (count_1 + count_0) — purity toward label-1">
+        <label title="confidence₁ = count_1 / (count_1 + count_0) — P(label_1 | ngram present)">
             Min conf₁
-            <input type="range" id="conf-slider"  min="0" max="100" value="0" step="1">
-            <span id="conf-val">0.00</span>
+            <input type="range" id="conf1-slider" min="0" max="100" value="0" step="1">
+            <span id="conf1-val">0.00</span>
         </label>
-        <label title="confidence_1₀ = count_0 / total_0 — normalised recall for label-0">
+        <label title="confidence₀ = count_0 / (count_0 + count_1) — P(label_0 | ngram present)">
             Min conf₀
             <input type="range" id="conf0-slider" min="0" max="100" value="0" step="1">
             <span id="conf0-val">0.00</span>
+        </label>
+        </div>
+        <div class="sep"></div>
+        <div class="ctrl-group">
+        <label title="support₁ = count_1 / total_1 — fraction of label-1 traces containing this ngram">
+            Min sup₁
+            <input type="range" id="sup1-slider" min="0" max="100" value="0" step="1">
+            <span id="sup1-val">0.00</span>
+        </label>
+        <label title="support₀ = count_0 / total_0 — fraction of label-0 traces containing this ngram">
+            Min sup₀
+            <input type="range" id="sup0-slider" min="0" max="100" value="0" step="1">
+            <span id="sup0-val">0.00</span>
         </label>
         </div>
         <div class="sep"></div>
@@ -778,8 +832,8 @@ def create_network(input: str | pd.DataFrame | DataFrame) -> str:
             <input type="range" id="bal-slider" min="0" max="100" value="0" step="1">
             <span id="bal-val">0.00</span>
         </label>
-        <label title="support = (count_1+count_0)/(total_1+total_0) — fraction of all traces">
-            Min support
+        <label title="global support = (count_1+count_0)/(total_1+total_0) — fraction of all traces">
+            Min global sup
             <input type="range" id="sup-slider" min="0" max="{support_max_pct}" value="0" step="1">
             <span id="sup-val">0.00</span>
         </label>
@@ -820,7 +874,7 @@ def create_network(input: str | pd.DataFrame | DataFrame) -> str:
         </div>
 
         <div>
-            <h2>confidence_1₁ → width</h2>
+            <h2>confidence₁ → width</h2>
             <div class="enc-guide">
             <div class="enc-row"><div class="wline" style="height:7px"></div> High (≥0.8)</div>
             <div class="enc-row"><div class="wline" style="height:4px"></div> Medium (0.4–0.8)</div>
@@ -905,15 +959,19 @@ def create_network(input: str | pd.DataFrame | DataFrame) -> str:
 
     // ── Filtering ────────────────────────────────────────────────────────────────
     function applyFilters() {{
-        const minConf  = parseFloat(document.getElementById('conf-slider').value)  / 100;
+        const minConf1 = parseFloat(document.getElementById('conf1-slider').value) / 100;
         const minConf0 = parseFloat(document.getElementById('conf0-slider').value) / 100;
+        const minSup1  = parseFloat(document.getElementById('sup1-slider').value)  / 100;
+        const minSup0  = parseFloat(document.getElementById('sup0-slider').value)  / 100;
         const minBal   = parseFloat(document.getElementById('bal-slider').value)   / 100;
         const minSup   = parseFloat(document.getElementById('sup-slider').value)   / 100;
         const dir      = dirFilter.value;
 
         const filtered = ALL_EDGES.filter(e =>
-        e._confidence_1   >= minConf  &&
+        e._confidence_1 >= minConf1 &&
         e._confidence_0 >= minConf0 &&
+        e._support_1    >= minSup1  &&
+        e._support_0    >= minSup0  &&
         Math.abs(e._balance) >= minBal &&
         e._support      >= minSup  &&
         (dir === 'all' || e._direction === dir)
@@ -933,8 +991,10 @@ def create_network(input: str | pd.DataFrame | DataFrame) -> str:
         applyFilters();
         }});
     }}
-    wireSlider('conf-slider',  'conf-val',  100, 2);
+    wireSlider('conf1-slider', 'conf1-val', 100, 2);
     wireSlider('conf0-slider', 'conf0-val', 100, 2);
+    wireSlider('sup1-slider',  'sup1-val',  100, 2);
+    wireSlider('sup0-slider',  'sup0-val',  100, 2);
     wireSlider('bal-slider',   'bal-val',   100, 2);
     wireSlider('sup-slider',   'sup-val',   100, 2);
     dirFilter.addEventListener('change', applyFilters);
@@ -979,11 +1039,13 @@ def create_network(input: str | pd.DataFrame | DataFrame) -> str:
         if (!e) return;
         statsPanel.innerHTML =
         '<div><b>Edge</b></div>' +
-        statRow('Direction',    e._direction) +
-        statRow('confidence_1₁',  e._confidence_1.toFixed(3)) +
-        statRow('confidence_1₀',  e._confidence_0.toFixed(3)) +
-        statRow('Balance',      e._balance.toFixed(3)) +
-        statRow('Support',      e._support.toFixed(4));
+        statRow('Direction',  e._direction) +
+        statRow('confidence₁', e._confidence_1.toFixed(3)) +
+        statRow('confidence₀', e._confidence_0.toFixed(3)) +
+        statRow('support₁',   e._support_1.toFixed(3)) +
+        statRow('support₀',   e._support_0.toFixed(3)) +
+        statRow('Balance',    e._balance.toFixed(3)) +
+        statRow('Global sup', e._support.toFixed(4));
     }});
     network.on('blurEdge', () => {{ statsPanel.innerHTML = emptyStats; }});
 
