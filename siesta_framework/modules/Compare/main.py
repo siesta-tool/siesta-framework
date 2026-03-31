@@ -114,7 +114,7 @@ class Comparator(SiestaModule):
         # Ensure output_path is unique for each run to avoid overwriting results
         given_output_path = config.get("output_path", "../output/" + config.get("log_name", "comparator_results"))
         Path(given_output_path).parent.mkdir(parents=True, exist_ok=True)
-        self.comparator_config["output_path"] = given_output_path + "_" + str(datetime.datetime.now().timestamp()) + ".csv"
+        self.comparator_config["output_path"] = given_output_path + "_" + str(datetime.datetime.now().timestamp())
 
     
     def compare(self, caller: str):
@@ -143,15 +143,55 @@ class Comparator(SiestaModule):
                 target_activities=self.comparator_config.get("separating_groups", [])[0],
                 n=params.get("n", 2)
             )
+            self.comparator_config["output_path"] += ".csv"
             save_ngram_results(results, self.comparator_config["output_path"], fmt="csv")
             if params.get("vis", False):
-                with open(self.comparator_config["output_path"].split(".csv")[0] + ".html", 'w') as f:
+                with open(self.comparator_config["output_path"].replace(".csv", ".html"), 'w') as f:
                     f.write(create_network(self.comparator_config["output_path"]))
 
-        elif "method" == "dm":
+        elif method == "dm":
             ordered_constraints_df = discover_ordered(all_events_df, self.metadata)
-            
-            pass
+
+            target_activities = self.comparator_config.get("separating_groups", [[]])[0]
+
+            # A trace is label_1 if it contains at least one occurrence of any target activity
+            trace_labels = (
+                all_events_df
+                .withColumn("label", F.when(F.col("activity").isin(target_activities), 1).otherwise(0))
+                .groupBy("trace_id")
+                .agg(F.max("label").alias("label_1"))
+            )
+
+            # Support = number of distinct trace_ids per (source, target) pair (on raw constraints, before labeling)
+            support_df = ordered_constraints_df.groupBy("source", "target").agg(
+                F.countDistinct("trace_id").alias("support")
+            )
+
+            support_pct = params.get("support_threshold", 0.1)
+            low_support_threshold = support_pct * self.metadata.trace_count
+            low_support_pairs = support_df.filter(F.col("support") <= low_support_threshold)
+
+            # For low-support pairs, join labels and keep only label_1 traces
+            low_support_label1 = (
+                ordered_constraints_df
+                .join(low_support_pairs.select("source", "target"), on=["source", "target"], how="inner")
+                .join(trace_labels, on="trace_id", how="left")
+                .fillna(0, subset=["label_1"])
+                .filter(F.col("label_1") == 1)
+            )
+
+            # Aggregate: per (source, target, template) → set of matching trace_ids
+            result_df = low_support_label1.groupBy("source", "target", "template").agg(
+                F.collect_set("trace_id").alias("trace_ids")
+            )
+
+            result_list = [json.loads(r) for r in result_df.toJSON().collect()]
+
+            self.comparator_config["output_path"] += ".json"
+            with open(self.comparator_config["output_path"], "w") as f:
+                json.dump(result_list, f, indent=2)
+
+            logger.info(f"DM results written to {self.comparator_config['output_path']}.")
 
 
         # The code below will be used for MORE than 2 groups, when we generalize
