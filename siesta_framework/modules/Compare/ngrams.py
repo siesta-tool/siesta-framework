@@ -16,7 +16,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def discover_ngrams(events: DataFrame, target_activities: list[str], n: int = 2) -> DataFrame:
+def discover_ngrams(events: DataFrame, trace_labels: DataFrame, n: int = 2) -> DataFrame:
     """
     Discover consecutive activity n-tuples that discriminate between
     targeted traces (label=1) and non-targeted traces (label=0).
@@ -25,9 +25,8 @@ def discover_ngrams(events: DataFrame, target_activities: list[str], n: int = 2)
     ----------
     events : pyspark.sql.DataFrame
         Must contain columns: "activity", "trace_id", "start_timestamp".
-    target_activities : list[str]
-        If any of these activities appears in a trace, that trace is labeled 1 (targeted).
-        Traces with none of them are labeled 0 (non-targeted).
+    trace_labels : pyspark.sql.DataFrame
+        Must contain columns: "trace_id", "label" (1 = targeted, 0 = non-targeted).
     n : int, default 2
         Length of the consecutive activity tuples to extract.
 
@@ -71,15 +70,8 @@ def discover_ngrams(events: DataFrame, target_activities: list[str], n: int = 2)
     """
 
     # ------------------------------------------------------------------ #
-    # Step 1 – label each trace (1 if any target activity present, else 0)
+    # Step 1 – count total traces per label
     # ------------------------------------------------------------------ #
-    trace_labels = (
-        events
-        .withColumn("label", F.when(F.col("activity").isin(target_activities), 1).otherwise(0))
-        .groupBy("trace_id")
-        .agg(F.max("label").alias("label"))
-    )
-
     # Total traces per label — needed to normalize balance, confidence_0, and support
     label_counts = (
         trace_labels
