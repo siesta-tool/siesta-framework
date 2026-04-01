@@ -119,7 +119,7 @@ class Query(SiestaModule):
             case "patterns":
                 pass
             case "detection":
-                return timed(query_processors_detection.process_detection_query_testing, "Detection Query: ", config, metadata)
+                return timed(query_processors_detection.process_detection_query_testing_rdd_udf, "Detection Query: ", config, metadata)
             case "explore":
                 pass
             case "violations":

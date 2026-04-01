@@ -3,7 +3,7 @@
   "storage_namespace": "siesta",
   "method": "detection",
   "query": {
-    "alt_pattern": "\"A_Create Application\" \"W_Call incomplete files\"",
+    "alt_pattern": "\"A_Create Application\" \"A_Submitted\"",
     "pattern": [
       {
         "activity": "A_Create Application",

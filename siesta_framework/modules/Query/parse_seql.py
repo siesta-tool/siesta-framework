@@ -995,7 +995,7 @@ def extract_attribute_pairs(pattern):
     for branch_id, seq in enumerate(sequences):
         for boundActivity in seq:
             if boundActivity.activity.constraints:
-                attribute_pairs.add((boundActivity.activity.label, boundActivity.activity.label))
+                attribute_pairs.add((boundActivity.activity.label, boundActivity.activity.label, branch_id))
     
     return attribute_pairs
     
