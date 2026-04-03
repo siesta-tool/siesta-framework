@@ -429,7 +429,7 @@ class S3Manager(StorageManager):
     ########## MetaData Table Methods #########
     ###########################################
 
-    def read_metadata_table(self, preprocess_config: Dict[str, Any], metadata: MetaData) -> MetaData:
+    def read_metadata_table(self, metadata: MetaData) -> MetaData:
         """
         Construct metadata by loading existing metadata from S3 or creating new.
         
@@ -440,8 +440,8 @@ class S3Manager(StorageManager):
             MetaData object containing the current stored metadata
         """
 
-        log_name = preprocess_config.get("log_name", "default_log")
-        namespace = preprocess_config.get("storage_namespace", "siesta")
+        log_name = metadata.log_name
+        namespace = metadata.storage_namespace
 
         # Initialize MetaData object with defaults
         metadata.trace_count = 0

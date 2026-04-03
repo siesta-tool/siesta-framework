@@ -988,13 +988,16 @@ def extract_responded_pairs(pattern: str) -> List[RespondedPair]:
     results = [_pairs_from_sequence(seq, branch_id) for branch_id, seq in enumerate(sequences)]
     return results
 
-def extract_attribute_pairs(pattern):
+def extract_info_pairs(pattern):
+    """
+    Adding self pairs for attributes or negation to better inform CEP
+    """
     ast = parse_pattern(pattern)
     sequences = _linearise(ast)
     attribute_pairs = set()
     for branch_id, seq in enumerate(sequences):
         for boundActivity in seq:
-            if boundActivity.activity.constraints:
+            if boundActivity.activity.constraints or boundActivity.negated:
                 attribute_pairs.add((boundActivity.activity.label, boundActivity.activity.label, branch_id))
     
     return attribute_pairs

@@ -89,7 +89,9 @@ def startup(config: Dict[str, Any] = {}) -> None:
             .config("spark.delta.logStore.class", "org.apache.spark.sql.delta.storage.S3SingleDriverLogStore") \
             .config("spark.hadoop.fs.s3a.fast.upload", "true") \
             .config("spark.hadoop.fs.s3a.multipart.size", "104857600") \
-            .config("spark.jars.packages", packages) 
+            .config("spark.jars.packages", packages) \
+            .config("spark.sql.adaptive.enabled", "true") \
+            .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
         
         # Configure S3 credentials if provided
         if config and config.get("s3_access_key") and config.get("s3_secret_key"):
