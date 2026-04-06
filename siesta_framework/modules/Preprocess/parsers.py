@@ -478,6 +478,13 @@ def _parse_rows(config: EventConfig, df: DataFrame) -> DataFrame:
         for f in schema.fields
     ])
 
+    # Drop records missing required fields; allow nulls in attribute columns
+    final_projection_df = final_projection_df.filter(
+        F.col("trace_id").isNotNull() &
+        F.col("start_timestamp").isNotNull() &
+        F.col("activity").isNotNull()
+    )
+
     # Final projection matching Event schema
     return final_projection_df
 
