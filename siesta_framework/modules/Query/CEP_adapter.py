@@ -28,18 +28,38 @@ from stream.Stream import InputStream, OutputStream
 from transformation.PatternPreprocessingParameters import PatternPreprocessingParameters
 from transformation.PatternTransformationRules import PatternTransformationRules
 
-from siesta_framework.modules.Query.parse_seql import Quantifier
+# For static analysis. The above imports work in runtime
+# from siesta_framework.modules.Query.OpenCEP.CEP import CEP
+# from siesta_framework.modules.Query.OpenCEP.base.DataFormatter import DataFormatter, EventTypeClassifier
+# from siesta_framework.modules.Query.OpenCEP.base.Event import AggregatedEvent, Event
+# from siesta_framework.modules.Query.OpenCEP.base.Pattern import Pattern
+# from siesta_framework.modules.Query.OpenCEP.base.PatternStructure import (
+#     KleeneClosureOperator,
+#     NegationOperator,
+#     OrOperator,
+#     PatternStructure,
+#     PrimitiveEventStructure,
+#     SeqOperator,
+# )
+# from siesta_framework.modules.Query.OpenCEP.condition.CompositeCondition import AndCondition
+# from siesta_framework.modules.Query.OpenCEP.condition.Condition import BinaryCondition, SimpleCondition, TrueCondition, Variable
+# from siesta_framework.modules.Query.OpenCEP.condition.KCCondition import KCValueCondition
+# from siesta_framework.modules.Query.OpenCEP.stream.Stream import InputStream, OutputStream
+# from siesta_framework.modules.Query.OpenCEP.transformation.PatternPreprocessingParameters import PatternPreprocessingParameters
+# from siesta_framework.modules.Query.OpenCEP.transformation.PatternTransformationRules import PatternTransformationRules
 
 from siesta_framework.modules.Query.parse_seql import (
     ActivityNode,
+    AttrConstraint,
     ElementNode,
     NegatedNode,
     OrNode,
     parse_pattern,
     Quantifier,
     SeqNode,
+    StringLiteral,
+    VarExpr,
 )
-
 def _get_accepted_labels(atom) -> set:
     """
     Collect all activity labels that *atom* can directly match.
@@ -340,6 +360,9 @@ def find_occurrences_dsl(
     events      : list of raw event dicts (must align with *sequence*).
     """
     ast, pattern, top_level_parts = translate_dsl_pattern_to_opencep(pattern_str)
+    
+    dsl_constraints = _extract_dsl_constraints_from_ast(ast)
+    all_constraints = list(constraints or []) + dsl_constraints
 
     constraint_events = _normalize_events(sequence, events)
     engine_events     = _build_engine_events(constraint_events)
@@ -347,14 +370,14 @@ def find_occurrences_dsl(
     residual_constraints = _attach_native_conditions(
         pattern,
         top_level_parts,
-        constraints or [],
+        all_constraints,
     )
 
     preprocessing_params = (
         _build_preprocessing_params_for_dsl(ast)
         if _dsl_has_alt(ast) else None
     )
-
+    
     output_items = run_opencep_pattern(pattern, engine_events, preprocessing_params)
 
     candidate_matches = []
@@ -656,6 +679,177 @@ class KleeneValueConstraint:
             value=self.value,
         )
 
+def _signed_offset(op: str | None, offset: int | None) -> int:
+    """Convert a VarExpr (op, offset) pair to a signed integer."""
+    if op is None:
+        return 0
+    return offset if op == "+" else -offset
+
+
+@dataclass(frozen=True)
+class _DSLLiteralConstraint:
+    """
+    Enforces attr == literal_value for one positive element.
+
+    Generated from DSL annotations like ``a[resource="nick"]``.
+    """
+    part_index: int   # index into top_level_parts / split_matches
+    attr: str
+    value: object
+
+    def to_opencep_condition(self, top_level_parts):
+        if self.part_index >= len(top_level_parts):
+            return None
+        name = _primitive_name_for_part(top_level_parts[self.part_index])
+        if name is None:
+            return None   # Kleene/Or part — falls to residual post-filter
+        return SimpleCondition(
+            Variable(name, lambda x, a=self.attr: x[a]),
+            self.value,
+            relation_op=lambda x, y: x == y,
+        )
+
+    def check(self, idxs, events, split_matches=None):
+        if split_matches and self.part_index < len(split_matches):
+            group = split_matches[self.part_index]
+            return all(events[i].get(self.attr) == self.value for i in group)
+        if self.part_index < len(idxs):
+            return events[idxs[self.part_index]].get(self.attr) == self.value
+        return False
+
+
+@dataclass(frozen=True)
+class _DSLVarLinkConstraint:
+    """
+    Enforces cross-event variable equality with optional arithmetic.
+
+    Generated from DSL annotations that share a ``$N`` variable, e.g.:
+        ``a[amount=$1] b[amount=$1+5]``
+    means ``b.amount == a.amount + 5``.
+
+    Each entry in *refs* is ``(part_index, attr, signed_offset)`` where
+    ``signed_offset`` is the numeric delta from the variable's base value.
+    All refs must resolve to the same base value:
+        ``event.attr - signed_offset == constant``
+    """
+    refs: tuple  # tuple of (part_index: int, attr: str, signed_offset: int)
+
+    def to_opencep_condition(self, top_level_parts):
+        # Only emit a native BinaryCondition for simple two-ref cases where
+        # both parts resolve to PrimitiveEventStructure names.
+        if len(self.refs) < 2:
+            return None
+        resolved = []
+        for part_idx, attr, signed in self.refs:
+            if part_idx >= len(top_level_parts):
+                return None
+            name = _primitive_name_for_part(top_level_parts[part_idx])
+            if name is None:
+                return None  # contains Kleene/Or — fall through to post-filter
+            resolved.append((name, attr, signed))
+
+        # Chain all refs against the first one to avoid redundant pairs.
+        base_name, base_attr, base_sig = resolved[0]
+        conditions = []
+        for name, attr, sig in resolved[1:]:
+            diff = base_sig - sig  # base.attr == other.attr + diff
+            conditions.append(BinaryCondition(
+                Variable(base_name, lambda x, a=base_attr: x[a]),
+                Variable(name,      lambda x, a=attr:      x[a]),
+                relation_op=lambda va, vb, d=diff: va == vb + d,
+            ))
+        # Return a single condition (chain via AndCondition when >1).
+        if len(conditions) == 1:
+            return conditions[0]
+        result = conditions[0]
+        for cond in conditions[1:]:
+            result = AndCondition(result, cond)
+        return result
+
+    def check(self, idxs, events, split_matches=None):
+        """Verify all refs normalise to the same base value."""
+        base_val = None
+        for part_idx, attr, signed in self.refs:
+            if split_matches and part_idx < len(split_matches):
+                group = split_matches[part_idx]
+                if not group:
+                    continue
+                raw = events[group[0]].get(attr)
+            elif part_idx < len(idxs):
+                raw = events[idxs[part_idx]].get(attr)
+            else:
+                continue
+            if raw is None:
+                return False
+            normalised = raw - signed
+            if base_val is None:
+                base_val = normalised
+            elif normalised != base_val:
+                return False
+        return True
+
+def _extract_dsl_constraints_from_ast(ast) -> list:
+    """
+    Walk the DSL AST and produce _DSLLiteralConstraint and
+    _DSLVarLinkConstraint objects for every ActivityNode that carries
+    attribute annotations.
+
+    The *part_index* in each constraint corresponds to the element's
+    position in the list of positive (non-negated) top-level elements,
+    which is exactly what _DSLPatternBuilder.top_level_parts tracks.
+    """
+    # Collect positive top-level elements in order.
+    if isinstance(ast, SeqNode):
+        positive_elements = [
+            (pos_idx, elem)
+            for pos_idx, elem in enumerate(
+                e for e in ast.elements if not isinstance(e.atom, NegatedNode)
+            )
+        ]
+    else:
+        # Single root node (ActivityNode, OrNode, …)
+        positive_elements = [
+            (0, ElementNode(atom=ast, quantifier=Quantifier.ONE))
+        ]
+
+    constraints: list = []
+    # var_id → [(part_index, attr, signed_offset)]
+    var_registry: dict[int, list] = {}
+
+    for part_idx, elem in positive_elements:
+        atom = elem.atom
+        # Only simple ActivityNode atoms carry attribute constraints.
+        # OrNode / SeqNode atoms inside Kleene groups are skipped — those
+        # become residual post-filters via the check() path.
+        if not isinstance(atom, ActivityNode):
+            continue
+
+        for constraint in atom.constraints:
+            attr = constraint.name
+            val  = constraint.value
+
+            if isinstance(val, StringLiteral):
+                constraints.append(
+                    _DSLLiteralConstraint(
+                        part_index=part_idx,
+                        attr=attr,
+                        value=val.value,
+                    )
+                )
+
+            elif isinstance(val, VarExpr):
+                var_id = val.var_id
+                signed = _signed_offset(val.op, val.offset)
+                var_registry.setdefault(var_id, []).append(
+                    (part_idx, attr, signed)
+                )
+
+    # Each variable group with ≥2 members becomes one cross-event constraint.
+    for refs in var_registry.values():
+        if len(refs) >= 2:
+            constraints.append(_DSLVarLinkConstraint(refs=tuple(refs)))
+
+    return constraints
 
 def _primitive_name_for_part(part: PatternStructure):
     if isinstance(part, PrimitiveEventStructure):

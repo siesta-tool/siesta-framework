@@ -4,7 +4,7 @@
   "storage_namespace": "siesta",
   "overwrite_data": false,
   "enable_streaming": false,
-  "lookback":"7d",
+  "lookback":"30d",
   "kafka_topic": "example_log",
   "field_mappings": {
     "xes": {

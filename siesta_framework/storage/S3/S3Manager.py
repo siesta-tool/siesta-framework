@@ -174,7 +174,7 @@ class S3Manager(StorageManager):
             empty_index_pairs = self.spark.createDataFrame([], schema=EventPair.get_schema())
             empty_index_pairs.write \
                 .format("delta") \
-                .partitionBy("source", "target") \
+                .partitionBy("source") \
                 .mode("overwrite") \
                 .save(metadata.pairs_index_path)
         
@@ -417,7 +417,7 @@ class S3Manager(StorageManager):
             metadata: MetaData object containing the metadata
         """
         try:
-            new_pairs.write.partitionBy("source", "target").format("delta").mode("append").save(metadata.pairs_index_path)
+            new_pairs.write.partitionBy("source").format("delta").mode("append").save(metadata.pairs_index_path)
             
             # Update metadata
             # metadata.pair_count = new_pairs.count()

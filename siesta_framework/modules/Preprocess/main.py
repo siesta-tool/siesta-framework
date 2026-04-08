@@ -124,8 +124,9 @@ class Preprocessor(SiestaModule):
             storage_type=self.preprocess_config.get("storage_type", "s3")
         )
         
-        # Load existing metadata from storage if available
-        self.storage.read_metadata_table(self.preprocess_config, self.metadata) 
+
+        # # Load existing metadata from storage if available
+        self.storage.read_metadata_table(self.metadata) 
 
         seq_df = timed(build_sequence_table, "Preprocess.", preprocess_config=self.preprocess_config, metadata=self.metadata)
         activity_index_df = timed(build_activity_index, "Preprocess.", events_df=seq_df, metadata=self.metadata)

@@ -816,7 +816,7 @@ def _pairs_from_sequence(
     pos_indices = [k for k, ba in enumerate(seq) if not ba.negated]
     n = len(pos_indices)
     for ii in range(n):
-        if seq[pos_indices[ii]].quantifier in (Quantifier.STAR, Quantifier.PLUS):
+        if seq[pos_indices[ii]].quantifier in (Quantifier.STAR, Quantifier.PLUS) and False:
             dup_pair = seq[pos_indices[ii]]
             pairs.append(
                 RespondedPair(
@@ -997,7 +997,7 @@ def extract_info_pairs(pattern):
     attribute_pairs = set()
     for branch_id, seq in enumerate(sequences):
         for boundActivity in seq:
-            if boundActivity.activity.constraints or boundActivity.negated:
+            if boundActivity.activity.constraints or boundActivity.negated or boundActivity.quantifier in (Quantifier.PLUS, Quantifier.STAR):
                 attribute_pairs.add((boundActivity.activity.label, boundActivity.activity.label, branch_id))
     
     return attribute_pairs
