@@ -53,7 +53,7 @@ class AggregatedEvent(Event):
         self.type = None if len(events) == 0 else events[0].type  # will not be set correctly for nested Kleene closures
         self.probability = probability
         self.payload = {Event.INDEX_ATTRIBUTE_NAME: Event.counter}
-
+        Event.counter += 1
         self.primitive_events = events
 
         # we assume the events to be sorted in ascending order of arrival

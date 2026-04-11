@@ -11,6 +11,7 @@ from siesta_framework.modules.Query.parse_seql import RespondedPair, extract_inf
 from siesta_framework.modules.Query.CEP_adapter import find_occurrences_dsl
 import json
 import logging
+from functools import reduce
 logger = logging.getLogger("Query Processors")
 
 pattern = ""
@@ -171,28 +172,89 @@ def process_detection_query_local(config: Query_Config, metadata: MetaData):
     truer_source_len = len(true_pairs_set)
     true_source = spark.sparkContext.broadcast(set([_[0] for _ in true_pairs_set]))
     true_target = spark.sparkContext.broadcast(set([_[1] for _ in true_pairs_set]))
+    print(true_source.value)
+    print(true_target.value)
     true_all = spark.sparkContext.broadcast(set([_[0] for _ in true_pairs_set]).union(set([_[1] for _ in true_pairs_set])))
     all_pairs_source = spark.sparkContext.broadcast(set([_[0] for _ in all_pairs]))
     all_pairs_target = spark.sparkContext.broadcast(set([_[1] for _ in all_pairs]))
     all_pairs_all = spark.sparkContext.broadcast(set([_[0] for _ in all_pairs]).union(set([_[1] for _ in all_pairs])))
 
-    index_table = storage.read_pairs_index(metadata)#.filter(col("source").isin(relevant_source))
-    tagged_df = (
-        index_table
-        .where(col("source").isin(all_pairs_source.value) & col("target").isin(all_pairs_target.value))
-    )
+    true_pairs_2d = {(p[0], p[1]) for p in true_pairs_set}
+    all_pairs_2d = {(p[0], p[1]) for p in all_pairs}
 
+    # true_pairs_df = F.broadcast(
+    #     spark.createDataFrame(list(true_pairs_2d), ["source", "target"])
+    # )
+    # all_pairs_df = F.broadcast(
+    #     spark.createDataFrame(list(all_pairs_2d), ["source", "target"])
+    # )
+
+    index_table = storage.read_pairs_index(metadata)
+
+    def build_exact_pair_predicate(pairs_2d: set[tuple[str, str]]):
+        """
+        Builds a Spark filter predicate that matches EXACT (source, target) pairs.
+
+        Input schema:  pairs_2d  — set of (source: str, target: str)
+        Applied to df schema:  source: str, target: str, trace_id: str, ...
+
+        Avoids the cross-product false-positive problem of:
+            col("source").isin(sources) & col("target").isin(targets)
+        which would admit (A, D) even if only (A, C) and (B, D) are valid.
+
+        Strategy: group all allowed targets per source, then emit one clause per
+        source:  (source == A AND target IN {C}) OR (source == B AND target IN {D})
+        This is equivalent to an exact-pair membership check without a join.
+        """
+        # Group all allowed targets by their source activity
+        # e.g. {(A,C),(A,D),(B,E)} -> {A: {C,D}, B: {E}}
+        by_source: dict[str, set[str]] = {}
+        for s, t in pairs_2d:
+            by_source.setdefault(s, set()).add(t)
+
+        # One conjunctive clause per source: (source == s AND target IN allowed_targets)
+        clauses = [
+            (F.col("source") == s) & F.col("target").isin(list(targets))
+            for s, targets in by_source.items()
+        ]
+        # If no pairs were provided, nothing should match
+        if not clauses:
+            return F.lit(False)
+        # OR all clauses together: a row matches if it satisfies any (source, targets) group
+        return reduce(lambda a, b: a | b, clauses)
+
+    all_pred = build_exact_pair_predicate(all_pairs_2d)
+    true_pred = build_exact_pair_predicate(true_pairs_2d)
+
+    tagged_df = index_table.where(all_pred)
 
     pruned_trace_ids = (
         tagged_df
-        .where(col("source").isin(true_source.value) & col("target").isin(true_target.value))
+        .where(true_pred)
         .dropDuplicates(["trace_id", "source", "target"])
         .groupBy("trace_id")
         .agg(F.count("*").alias("pair_count"))
-        .filter(F.col("pair_count").eqNullSafe(truer_source_len))
+        .filter(F.col("pair_count") == len(true_pairs_2d))
         .select("trace_id")
         .distinct()
     )
+
+
+
+    # tagged_df = (
+    #     index_table.join(all_pairs_df, on=["source", "target"], how="inner")
+    # )
+
+    # pruned_trace_ids = (
+    #     tagged_df
+    #     .join(true_pairs_df, on=["source", "target"], how="inner")
+    #     .dropDuplicates(["trace_id", "source", "target"])
+    #     .groupBy("trace_id")
+    #     .agg(F.count("*").alias("pair_count"))
+    #     .filter(F.col("pair_count").eqNullSafe(truer_source_len))
+    #     .select("trace_id")
+    #     .distinct()
+    # )
 
     pair_positions_df = (
         tagged_df
@@ -249,8 +311,7 @@ def process_detection_query_local(config: Query_Config, metadata: MetaData):
         positions = find_occurrences_dsl(
             [e["name"] for e in events], new_pattern, events=events
         )
-        # if len(events) == 3 and len(positions) > 0:
-        #     print(events)
+
         return (trace_id, positions)
     
     logger.info(f"Parsing query took: {time.time() - start}")

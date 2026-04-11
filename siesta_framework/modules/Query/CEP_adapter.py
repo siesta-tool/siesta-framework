@@ -49,379 +49,9 @@ from transformation.PatternTransformationRules import PatternTransformationRules
 # from siesta_framework.modules.Query.OpenCEP.transformation.PatternTransformationRules import PatternTransformationRules
 
 from siesta_framework.modules.Query.parse_seql import (
-    ActivityNode,
-    AttrConstraint,
-    ElementNode,
-    NegatedNode,
-    OrNode,
-    parse_pattern,
-    Quantifier,
-    SeqNode,
-    StringLiteral,
-    VarExpr,
+    ActivityNode, AttrConstraint, ElementNode, NegatedNode,
+    OrNode, Quantifier, SeqNode, StringLiteral, VarExpr, parse_pattern,
 )
-def _get_accepted_labels(atom) -> set:
-    """
-    Collect all activity labels that *atom* can directly match.
-    Used to decide which indices belong to which Kleene group.
-    """
-    if isinstance(atom, ActivityNode):
-        return {atom.label}
-    if isinstance(atom, OrNode):
-        labels = set()
-        for branch in atom.branches:
-            labels |= _get_accepted_labels(branch)
-        return labels
-    if isinstance(atom, SeqNode):
-        # For a grouped sequence used as a Kleene body, e.g. (a b)+,
-        # every positive label inside is a candidate.
-        labels = set()
-        for elem in atom.elements:
-            if not isinstance(elem.atom, NegatedNode):
-                labels |= _get_accepted_labels(elem.atom)
-        return labels
-    if isinstance(atom, ElementNode):
-        return _get_accepted_labels(atom.atom)
-    if isinstance(atom, NegatedNode):
-        return set()
-    return set()
-
-
-def _min_events_for_element(elem: ElementNode) -> int:
-    """
-    Minimum number of events *elem* must consume in any valid match.
-    ONE and PLUS require at least 1; STAR and OPT allow 0.
-    Used to reserve slots for downstream elements when Kleene is greedy.
-    """
-    return 1 if elem.quantifier in (Quantifier.ONE, Quantifier.PLUS) else 0
-
-
-def _extract_split_matches_dsl(
-    ast,
-    sequence: List[str],
-    idxs: List[int],
-) -> List[List[int]]:
-    """
-    Assign matched event indices back to their originating pattern groups.
-
-    Parameters
-    ----------
-    ast      : DSL AST root (from ``parse_pattern``).
-    sequence : full label sequence of the trace.
-    idxs     : sorted event indices belonging to this match (from OpenCEP).
-
-    Returns
-    -------
-    List[List[int]]
-        One sublist per top-level positive element, parallel to
-        ``_DSLPatternBuilder.top_level_parts``:
-
-        =========  =================================
-        ONE        always one index  → ``[idx]``
-        OPT        zero or one index → ``[]`` / ``[idx]``
-        PLUS/STAR  zero or more      → ``[idx, idx, ...]``
-        =========  =================================
-
-    Algorithm
-    ---------
-    Walk the positive elements left-to-right, assigning indices greedily.
-    For Kleene elements (PLUS/STAR) a *cap* prevents over-consumption:
-    we always leave enough indices to satisfy the minimum requirements of
-    every element that comes after the current one.  This handles patterns
-    like ``a+ a b`` correctly without backtracking.
-
-    We trust OpenCEP's guarantee that *idxs* is a valid match, so for ONE
-    elements we consume unconditionally rather than re-checking labels.
-    """
-    # ── Normalise to a list of positive top-level elements ───────────────
-    if isinstance(ast, SeqNode):
-        positive_elements = [
-            elem for elem in ast.elements
-            if not isinstance(elem.atom, NegatedNode)
-        ]
-    else:
-        # Single root (ActivityNode, OrNode, …) — one group owns all indices
-        return [list(idxs)]
-
-    if not positive_elements:
-        return []
-
-    matched_labels = [sequence[i] for i in idxs]
-    groups: List[List[int]] = []
-    cursor = 0  # next unassigned position in idxs
-
-    for pos, elem in enumerate(positive_elements):
-        accepted = _get_accepted_labels(elem.atom)
-
-        # How many indices must be kept for all elements that follow?
-        reserved = sum(
-            _min_events_for_element(future)
-            for future in positive_elements[pos + 1:]
-        )
-        # The maximum number of indices this element is allowed to consume
-        cap = len(idxs) - cursor - reserved
-
-        if elem.quantifier == Quantifier.ONE:
-            # Exactly one — consume unconditionally (OpenCEP already validated)
-            groups.append([idxs[cursor]] if cursor < len(idxs) else [])
-            cursor += 1
-
-        elif elem.quantifier == Quantifier.OPT:
-            # Zero or one — only consume if the label matches and budget allows
-            if (
-                cap > 0
-                and cursor < len(idxs)
-                and matched_labels[cursor] in accepted
-            ):
-                groups.append([idxs[cursor]])
-                cursor += 1
-            else:
-                groups.append([])
-
-        else:
-            # PLUS or STAR — greedy within the cap
-            group: List[int] = []
-            limit = cursor + max(0, cap)
-            while (
-                cursor < limit
-                and cursor < len(idxs)
-                and matched_labels[cursor] in accepted
-            ):
-                group.append(idxs[cursor])
-                cursor += 1
-            groups.append(group)
-
-    return groups
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# DSL → OpenCEP pattern builder
-# ═══════════════════════════════════════════════════════════════════════
-
-class _DSLPatternBuilder:
-    """
-    Converts a responded_pairs_dsl AST into an OpenCEP PatternStructure.
-
-    After calling ``build_root``, ``top_level_parts`` holds the
-    non-negated top-level structures in left-to-right order; these are
-    used by ``_attach_native_conditions`` to wire up constraints.
-    """
-
-    def __init__(self):
-        self._counter = 0
-        self.top_level_parts: list = []
-
-    # ── helpers ──────────────────────────────────────────────────────────
-
-    def _next_name(self) -> str:
-        name = f"e{self._counter}"
-        self._counter += 1
-        return name
-
-    def _apply_quantifier(self, structure, quantifier: Quantifier):
-        """Wrap *structure* in the appropriate Kleene closure (or not)."""
-        if quantifier == Quantifier.ONE:
-            return structure
-        if quantifier == Quantifier.PLUS:
-            return KleeneClosureOperator(structure, min_size=1)
-        if quantifier == Quantifier.STAR:
-            return KleeneClosureOperator(structure, min_size=0)
-        if quantifier == Quantifier.OPT:
-            # OpenCEP: min=0, max=1 ≈ optional
-            return KleeneClosureOperator(structure, min_size=0, max_size=1)
-        raise ValueError(f"Unknown quantifier: {quantifier!r}")
-
-    # ── recursive build ──────────────────────────────────────────────────
-
-    def build_element(self, elem: ElementNode):
-        """Build one ElementNode, applying its quantifier to the inner atom."""
-        inner = self.build(elem.atom)
-        return self._apply_quantifier(inner, elem.quantifier)
-
-    def build(self, node):
-        """Convert any DSL AST node to an OpenCEP PatternStructure."""
-
-        if isinstance(node, ActivityNode):
-            return PrimitiveEventStructure(node.label, self._next_name())
-
-        if isinstance(node, NegatedNode):
-            # The inner node may be an ActivityNode or an OrNode whose
-            # alternatives are all forbidden (union, not branch).
-            return NegationOperator(self.build(node.inner))
-
-        if isinstance(node, SeqNode):
-            parts = [self.build_element(elem) for elem in node.elements]
-            # SeqOperator requires at least two args; unwrap singletons.
-            return SeqOperator(*parts) if len(parts) > 1 else parts[0]
-
-        if isinstance(node, OrNode):
-            # OrOperator is binary — chain left-to-right for >2 branches.
-            branches = [self.build(branch) for branch in node.branches]
-            result = branches[0]
-            for branch in branches[1:]:
-                result = OrOperator(result, branch)
-            return result
-
-        if isinstance(node, ElementNode):
-            # Reached when an ElementNode appears outside a SeqNode context.
-            return self.build_element(node)
-
-        raise TypeError(f"Unsupported DSL node type: {type(node).__name__}")
-
-    # ── root entry-point ─────────────────────────────────────────────────
-
-    def build_root(self, node):
-        """
-        Build the root pattern and populate ``top_level_parts``.
-
-        ``top_level_parts`` mirrors what the original ``_PatternBuilder``
-        produced: the non-negated, top-level structures of a SeqNode,
-        used later to attach native OpenCEP conditions.
-        """
-        self.top_level_parts = []
-
-        if isinstance(node, SeqNode):
-            parts = []
-            for elem in node.elements:
-                built = self.build_element(elem)
-                parts.append(built)
-                if not isinstance(elem.atom, NegatedNode):
-                    self.top_level_parts.append(built)
-            return SeqOperator(*parts) if len(parts) > 1 else parts[0]
-
-        # Single-element root (ActivityNode, OrNode, …)
-        built = self.build(node)
-        if not isinstance(node, NegatedNode):
-            self.top_level_parts = [built]
-        return built
-
-
-# ── DSL-aware _has_alt ───────────────────────────────────────────────────
-
-def _dsl_has_alt(node) -> bool:
-    """True iff the DSL AST contains any OR branch anywhere."""
-    if isinstance(node, OrNode):
-        return True
-    if isinstance(node, SeqNode):
-        return any(_dsl_has_alt(elem) for elem in node.elements)
-    if isinstance(node, ElementNode):
-        return _dsl_has_alt(node.atom)
-    if isinstance(node, NegatedNode):
-        return _dsl_has_alt(node.inner)
-    return False
-
-
-# ── public translation helper ────────────────────────────────────────────
-
-def translate_dsl_pattern_to_opencep(pattern_str: str):
-    """
-    Parse *pattern_str* with the DSL parser and produce an OpenCEP Pattern.
-
-    Returns
-    -------
-    (ast, pattern, top_level_parts)
-        Mirrors the return value of ``translate_query_to_pattern`` so the
-        rest of the pipeline is identical.
-    """
-    ast = parse_pattern(pattern_str)
-    builder = _DSLPatternBuilder()
-    pattern = Pattern(
-        builder.build_root(ast),
-        TrueCondition(),
-        timedelta(days=3650),
-    )
-    return ast, pattern, builder.top_level_parts
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# Main entry-point using the DSL parser
-# ═══════════════════════════════════════════════════════════════════════
-
-def find_occurrences_dsl(
-    sequence: List[str],
-    pattern_str: str,
-    returnAll: bool = False,
-    returnSplit: bool = False,
-    constraints=None,
-    events=None,
-):
-    """
-    Drop-in replacement for ``find_occurrences_opencep`` that accepts
-    patterns written in the responded_pairs_dsl grammar instead of
-    the parse_seql grammar.
-
-    Parameters
-    ----------
-    sequence    : list of activity label strings, one per event in order.
-    pattern_str : DSL pattern, e.g. ``'a b+ !c d'`` or ``'a (b||c) d'``.
-    returnAll   : if True, return every non-overlapping match.
-    returnSplit : if True, each result is ``(idxs, split_matches)``.
-    constraints : list of TimeConstraint / EventValueConstraint / … objects.
-    events      : list of raw event dicts (must align with *sequence*).
-    """
-    ast, pattern, top_level_parts = translate_dsl_pattern_to_opencep(pattern_str)
-    
-    dsl_constraints = _extract_dsl_constraints_from_ast(ast)
-    all_constraints = list(constraints or []) + dsl_constraints
-
-    constraint_events = _normalize_events(sequence, events)
-    engine_events     = _build_engine_events(constraint_events)
-
-    residual_constraints = _attach_native_conditions(
-        pattern,
-        top_level_parts,
-        all_constraints,
-    )
-
-    preprocessing_params = (
-        _build_preprocessing_params_for_dsl(ast)
-        if _dsl_has_alt(ast) else None
-    )
-    
-    output_items = run_opencep_pattern(pattern, engine_events, preprocessing_params)
-
-    candidate_matches = []
-    for match in output_items:
-        idxs = sorted(
-            event.payload[Event.INDEX_ATTRIBUTE_NAME]
-            for event in _flatten_match_events(match.events)
-        )
-        split_matches = _extract_split_matches_dsl(ast, sequence, idxs)
-        if not _check_post_filters(
-            residual_constraints, idxs, constraint_events, split_matches
-        ):
-            continue
-        candidate_matches.append(idxs)
-
-    filtered_matches = _dedupe_and_sort(candidate_matches)
-
-    if not filtered_matches:
-        return _empty_result(returnSplit) if not returnAll else []
-
-    if not returnAll:
-        idxs = filtered_matches[0]
-        return _pack_result(
-            idxs, _extract_split_matches_dsl(ast, sequence, idxs), returnSplit
-        )
-
-    results, last_end = [], -1
-    for idxs in filtered_matches:
-        if idxs[0] <= last_end:
-            continue
-        results.append(
-            _pack_result(
-                idxs, _extract_split_matches_dsl(ast, sequence, idxs), returnSplit
-            )
-        )
-        last_end = idxs[-1]
-    return results
-
-
-def _build_preprocessing_params_for_dsl(ast):
-    return PatternPreprocessingParameters([
-        PatternTransformationRules.TOPMOST_OR_PATTERN,
-        PatternTransformationRules.INNER_OR_PATTERN,
-    ])
 
 
 class _OpenCEPEventTypeClassifier(EventTypeClassifier):
@@ -501,6 +131,164 @@ class _PatternBuilder:
         return built
 
 
+class _DSLPatternBuilder:
+    """
+    Converts a parse_seql DSL AST into an OpenCEP PatternStructure.
+ 
+    Mirrors _PatternBuilder but operates on parse_seql AST node types
+    (ActivityNode, SeqNode, OrNode, NegatedNode, ElementNode) rather than
+    the simpler main.py types (Lit, Concat, Alt, Not, Plus, Star).
+ 
+    After calling build_root(), `positive_event_names` holds the ordered
+    list of (ActivityNode, assigned_opencep_name) for every non-negated
+    activity, which is used to build attribute conditions.
+    """
+ 
+    def __init__(self):
+        self._counter = 0
+        self.top_level_parts: List[PatternStructure] = []
+        # (ActivityNode, opencep_name) for each positive (non-negated) event,
+        # in left-to-right traversal order — used for $N VarExpr resolution.
+        self.positive_event_names: List[tuple] = []
+ 
+    def _next_name(self) -> str:
+        name = f"e{self._counter}"
+        self._counter += 1
+        return name
+ 
+    def _build_element(self, elem: ElementNode) -> PatternStructure:
+        """Wrap the atom's PatternStructure in a Kleene closure when needed."""
+        built = self._build_node(elem.atom, inside_negation=False)
+        q = elem.quantifier
+        if q == Quantifier.PLUS:
+            return KleeneClosureOperator(built, min_size=1)
+        if q == Quantifier.STAR:
+            raise NotImplementedError(
+                "OpenCEP DSL adapter does not support the '*' (STAR) quantifier"
+            )
+        if q == Quantifier.OPT:
+            raise NotImplementedError(
+                "OpenCEP DSL adapter does not support the '?' (OPT) quantifier"
+            )
+        return built  # Quantifier.ONE — pass through unchanged
+ 
+    def _build_node(self, node, inside_negation: bool) -> PatternStructure:
+        if isinstance(node, ActivityNode):
+            name = self._next_name()
+            struct = PrimitiveEventStructure(node.label, name)
+            if not inside_negation:
+                self.positive_event_names.append((node, name))
+            return struct
+ 
+        if isinstance(node, SeqNode):
+            return SeqOperator(*(self._build_element(e) for e in node.elements))
+ 
+        if isinstance(node, OrNode):
+            # OrOperator is binary; chain multiple branches left-to-right.
+            branches = [self._build_node(b, inside_negation) for b in node.branches]
+            result = branches[0]
+            for b in branches[1:]:
+                result = OrOperator(result, b)
+            return result
+ 
+        if isinstance(node, NegatedNode):
+            # Activities inside a negation are forbidden markers; they must not
+            # be recorded in positive_event_names or used for conditions.
+            return NegationOperator(self._build_node(node.inner, inside_negation=True))
+ 
+        raise TypeError(f"Unsupported parse_seql AST node: {type(node).__name__}")
+ 
+    def build_root(self, ast) -> PatternStructure:
+        """
+        Build the root PatternStructure and populate top_level_parts.
+ 
+        top_level_parts mirrors the logic of _PatternBuilder.build_root:
+        it contains only the non-negated, top-level elements of a SeqNode
+        so that gap/time constraints can reference them by index.
+        """
+        if isinstance(ast, SeqNode):
+            args: List[PatternStructure] = []
+            self.top_level_parts = []
+            for elem in ast.elements:
+                built = self._build_element(elem)
+                args.append(built)
+                if not isinstance(elem.atom, NegatedNode):
+                    self.top_level_parts.append(built)
+            return SeqOperator(*args)
+ 
+        built = self._build_node(ast, inside_negation=False)
+        self.top_level_parts = [] if isinstance(ast, NegatedNode) else [built]
+        return built
+
+
+def _has_or_dsl(node) -> bool:
+    """Return True if the parse_seql AST contains any alternation (OrNode)."""
+    if isinstance(node, OrNode):
+        return True
+    if isinstance(node, SeqNode):
+        return any(_has_or_dsl(e.atom) for e in node.elements)
+    if isinstance(node, NegatedNode):
+        return _has_or_dsl(node.inner)
+    return False
+
+
+def _build_dsl_attr_conditions(positive_event_names: list) -> List:
+    """
+    Convert DSL attribute constraints into native OpenCEP conditions.
+ 
+    StringLiteral constraints  →  SimpleCondition (unary, per-event check).
+    VarExpr constraints        →  BinaryCondition (cross-event equality /
+                                  arithmetic), where $N refers to the Nth
+                                  positive event in left-to-right pattern order
+                                  (1-based).
+ 
+    Constraints whose VarExpr index is out of range are silently skipped;
+    callers should add a fallback post-filter if strict validation is needed.
+    """
+    conditions: List = []
+    n = len(positive_event_names)
+ 
+    for own_idx, (activity_node, own_name) in enumerate(positive_event_names):
+        for constraint in activity_node.constraints:
+            attr = constraint.name
+            val  = constraint.value
+ 
+            if isinstance(val, StringLiteral):
+                # Unary condition: event[attr] == literal
+                literal = val.value
+                conditions.append(
+                    SimpleCondition(
+                        Variable(own_name, lambda x, a=attr, v=literal: x.get(a) == v)
+                    )
+                )
+ 
+            elif isinstance(val, VarExpr):
+                # Cross-event condition: this event's attr relates to the attr
+                # of the $ref_id-th positive event (1-based).
+                ref_id = val.var_id
+                if ref_id < 1 or ref_id > n:
+                    continue  # out-of-range reference — skip
+                _, ref_name = positive_event_names[ref_id - 1]
+                op     = val.op      # '+' | '-' | None
+                offset = val.offset or 0
+ 
+                if op == "+":
+                    rel = lambda rv, ov, off=offset: ov == rv + off
+                elif op == "-":
+                    rel = lambda rv, ov, off=offset: ov == rv - off
+                else:
+                    rel = lambda rv, ov: ov == rv
+ 
+                conditions.append(
+                    BinaryCondition(
+                        Variable(ref_name, lambda x, a=attr: x.get(a)),
+                        Variable(own_name, lambda x, a=attr: x.get(a)),
+                        relation_op=rel,
+                    )
+                )
+ 
+    return conditions
+
 def _has_alt(node):
     if isinstance(node, Alt):
         return True
@@ -510,7 +298,7 @@ def _has_alt(node):
         return _has_alt(node.node)
     return False
 
-    
+
 def _normalize_events(sequence: List[str], events=None):
     base_ts = datetime(2024, 1, 1)
     normalized = []
@@ -679,177 +467,6 @@ class KleeneValueConstraint:
             value=self.value,
         )
 
-def _signed_offset(op: str | None, offset: int | None) -> int:
-    """Convert a VarExpr (op, offset) pair to a signed integer."""
-    if op is None:
-        return 0
-    return offset if op == "+" else -offset
-
-
-@dataclass(frozen=True)
-class _DSLLiteralConstraint:
-    """
-    Enforces attr == literal_value for one positive element.
-
-    Generated from DSL annotations like ``a[resource="nick"]``.
-    """
-    part_index: int   # index into top_level_parts / split_matches
-    attr: str
-    value: object
-
-    def to_opencep_condition(self, top_level_parts):
-        if self.part_index >= len(top_level_parts):
-            return None
-        name = _primitive_name_for_part(top_level_parts[self.part_index])
-        if name is None:
-            return None   # Kleene/Or part — falls to residual post-filter
-        return SimpleCondition(
-            Variable(name, lambda x, a=self.attr: x[a]),
-            self.value,
-            relation_op=lambda x, y: x == y,
-        )
-
-    def check(self, idxs, events, split_matches=None):
-        if split_matches and self.part_index < len(split_matches):
-            group = split_matches[self.part_index]
-            return all(events[i].get(self.attr) == self.value for i in group)
-        if self.part_index < len(idxs):
-            return events[idxs[self.part_index]].get(self.attr) == self.value
-        return False
-
-
-@dataclass(frozen=True)
-class _DSLVarLinkConstraint:
-    """
-    Enforces cross-event variable equality with optional arithmetic.
-
-    Generated from DSL annotations that share a ``$N`` variable, e.g.:
-        ``a[amount=$1] b[amount=$1+5]``
-    means ``b.amount == a.amount + 5``.
-
-    Each entry in *refs* is ``(part_index, attr, signed_offset)`` where
-    ``signed_offset`` is the numeric delta from the variable's base value.
-    All refs must resolve to the same base value:
-        ``event.attr - signed_offset == constant``
-    """
-    refs: tuple  # tuple of (part_index: int, attr: str, signed_offset: int)
-
-    def to_opencep_condition(self, top_level_parts):
-        # Only emit a native BinaryCondition for simple two-ref cases where
-        # both parts resolve to PrimitiveEventStructure names.
-        if len(self.refs) < 2:
-            return None
-        resolved = []
-        for part_idx, attr, signed in self.refs:
-            if part_idx >= len(top_level_parts):
-                return None
-            name = _primitive_name_for_part(top_level_parts[part_idx])
-            if name is None:
-                return None  # contains Kleene/Or — fall through to post-filter
-            resolved.append((name, attr, signed))
-
-        # Chain all refs against the first one to avoid redundant pairs.
-        base_name, base_attr, base_sig = resolved[0]
-        conditions = []
-        for name, attr, sig in resolved[1:]:
-            diff = base_sig - sig  # base.attr == other.attr + diff
-            conditions.append(BinaryCondition(
-                Variable(base_name, lambda x, a=base_attr: x[a]),
-                Variable(name,      lambda x, a=attr:      x[a]),
-                relation_op=lambda va, vb, d=diff: va == vb + d,
-            ))
-        # Return a single condition (chain via AndCondition when >1).
-        if len(conditions) == 1:
-            return conditions[0]
-        result = conditions[0]
-        for cond in conditions[1:]:
-            result = AndCondition(result, cond)
-        return result
-
-    def check(self, idxs, events, split_matches=None):
-        """Verify all refs normalise to the same base value."""
-        base_val = None
-        for part_idx, attr, signed in self.refs:
-            if split_matches and part_idx < len(split_matches):
-                group = split_matches[part_idx]
-                if not group:
-                    continue
-                raw = events[group[0]].get(attr)
-            elif part_idx < len(idxs):
-                raw = events[idxs[part_idx]].get(attr)
-            else:
-                continue
-            if raw is None:
-                return False
-            normalised = raw - signed
-            if base_val is None:
-                base_val = normalised
-            elif normalised != base_val:
-                return False
-        return True
-
-def _extract_dsl_constraints_from_ast(ast) -> list:
-    """
-    Walk the DSL AST and produce _DSLLiteralConstraint and
-    _DSLVarLinkConstraint objects for every ActivityNode that carries
-    attribute annotations.
-
-    The *part_index* in each constraint corresponds to the element's
-    position in the list of positive (non-negated) top-level elements,
-    which is exactly what _DSLPatternBuilder.top_level_parts tracks.
-    """
-    # Collect positive top-level elements in order.
-    if isinstance(ast, SeqNode):
-        positive_elements = [
-            (pos_idx, elem)
-            for pos_idx, elem in enumerate(
-                e for e in ast.elements if not isinstance(e.atom, NegatedNode)
-            )
-        ]
-    else:
-        # Single root node (ActivityNode, OrNode, …)
-        positive_elements = [
-            (0, ElementNode(atom=ast, quantifier=Quantifier.ONE))
-        ]
-
-    constraints: list = []
-    # var_id → [(part_index, attr, signed_offset)]
-    var_registry: dict[int, list] = {}
-
-    for part_idx, elem in positive_elements:
-        atom = elem.atom
-        # Only simple ActivityNode atoms carry attribute constraints.
-        # OrNode / SeqNode atoms inside Kleene groups are skipped — those
-        # become residual post-filters via the check() path.
-        if not isinstance(atom, ActivityNode):
-            continue
-
-        for constraint in atom.constraints:
-            attr = constraint.name
-            val  = constraint.value
-
-            if isinstance(val, StringLiteral):
-                constraints.append(
-                    _DSLLiteralConstraint(
-                        part_index=part_idx,
-                        attr=attr,
-                        value=val.value,
-                    )
-                )
-
-            elif isinstance(val, VarExpr):
-                var_id = val.var_id
-                signed = _signed_offset(val.op, val.offset)
-                var_registry.setdefault(var_id, []).append(
-                    (part_idx, attr, signed)
-                )
-
-    # Each variable group with ≥2 members becomes one cross-event constraint.
-    for refs in var_registry.values():
-        if len(refs) >= 2:
-            constraints.append(_DSLVarLinkConstraint(refs=tuple(refs)))
-
-    return constraints
 
 def _primitive_name_for_part(part: PatternStructure):
     if isinstance(part, PrimitiveEventStructure):
@@ -1013,6 +630,111 @@ def run_opencep_pattern(pattern: Pattern, events, pattern_preprocessing_params=N
     return output.items
 
 
+def find_occurrences_dsl(
+    sequence: List[str],
+    pattern_str: str,
+    returnAll: bool = False,
+    returnSplit: bool = False,
+    constraints=None,
+    events=None,
+):
+    """
+    Adapter from the parse_seql DSL pattern language into an OpenCEP run.
+ 
+    Accepted DSL features
+    ---------------------
+    - Sequence:      'A B C'
+    - Alternation:   'A (B||C)'
+    - Plus:          'A+ B'
+    - Negation:      'A !B C'   (B must not appear between A and C)
+    - Literal attrs: 'A[resource="alice"] B'
+    - Var refs:      'A[amount=$1] B[amount=$1+100]'
+                     ($N references the Nth positive event, 1-based)
+ 
+    Not supported (raises NotImplementedError, matching find_occurrences_opencep):
+    - Star ('*') and optional ('?') quantifiers
+ 
+    Parameters
+    ----------
+    sequence     : ordered list of event-type names for the trace
+    pattern_str  : parse_seql DSL pattern string
+    returnAll    : if True, return all non-overlapping matches; else first only
+    returnSplit  : if True, return (idxs, split_matches) tuples
+                   (split_matches are [] for DSL paths — no main.py AST)
+    constraints  : optional list of TimeConstraint / GapConstraint objects
+    events       : optional list of event dicts (must align with sequence)
+    """
+    # 1. Parse the DSL pattern and build an OpenCEP Pattern.
+    ast = parse_pattern(pattern_str)
+    builder = _DSLPatternBuilder()
+    pattern_structure = builder.build_root(ast)
+ 
+    pattern = Pattern(
+        pattern_structure,
+        TrueCondition(),
+        timedelta(days=3650),
+    )
+ 
+    # 2. Attach attribute conditions (StringLiteral and VarExpr) natively.
+    for cond in _build_dsl_attr_conditions(builder.positive_event_names):
+        pattern.condition.add_atomic_condition(cond)
+ 
+    # 3. Attach external constraints (TimeConstraint, GapConstraint, …).
+    residual_constraints = _attach_native_conditions(
+        pattern,
+        builder.top_level_parts,
+        constraints or [],
+    )
+ 
+    # 4. Prepare the event stream.
+    constraint_events = _normalize_events(sequence, events)
+    engine_events = _build_engine_events(constraint_events)
+ 
+    # 5. Enable OR-expansion preprocessing when the pattern contains alternation.
+    preprocessing_params = (
+        PatternPreprocessingParameters([
+            PatternTransformationRules.TOPMOST_OR_PATTERN,
+            PatternTransformationRules.INNER_OR_PATTERN,
+        ])
+        if _has_or_dsl(ast) else None
+    )
+ 
+    # 6. Run OpenCEP and collect raw matches.
+    output_items = run_opencep_pattern(pattern, engine_events, preprocessing_params)
+ 
+    # 7. Post-filter with any residual constraints and deduplicate.
+    #    split_matches are passed as [] because _extract_split_matches requires
+    #    a main.py AST (not available here).  Callers should not rely on
+    #    returnSplit when using find_occurrences_dsl.
+    candidate_matches = []
+    for match in output_items:
+        idxs = sorted(
+            event.payload[Event.INDEX_ATTRIBUTE_NAME]
+            for event in _flatten_match_events(match.events)
+        )
+        if not _check_post_filters(residual_constraints, idxs, constraint_events, []):
+            continue
+        candidate_matches.append(idxs)
+ 
+    filtered_matches = _dedupe_and_sort(candidate_matches)
+    if not filtered_matches:
+        return _empty_result(returnSplit) if not returnAll else []
+ 
+    if not returnAll:
+        idxs = filtered_matches[0]
+        return _pack_result(idxs, [], returnSplit)
+ 
+    results = []
+    last_end = -1
+    for idxs in filtered_matches:
+        if idxs[0] <= last_end:
+            continue
+        results.append(_pack_result(idxs, [], returnSplit))
+        last_end = idxs[-1]
+    return results
+ 
+
+
 def find_occurrences_opencep(
     sequence: List[str],
     expr: str,
@@ -1089,4 +811,3 @@ if __name__ == "__main__":
     ]
     sample_sequence = [event["name"] for event in sample_events]
     print(find_occurrences_opencep(sample_sequence, "a b c", events=sample_events))
-    
