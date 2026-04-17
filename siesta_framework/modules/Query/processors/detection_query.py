@@ -1,5 +1,4 @@
 import time
-import pandas as pd
 from siesta_framework.core.logger import timed
 from siesta_framework.core.sparkManager import get_spark_session
 from siesta_framework.core.storageFactory import get_storage_manager
@@ -16,52 +15,17 @@ logger = logging.getLogger("Query Processors")
 
 pattern = ""
 
-def _extract_consecutive_pairs(pattern: Pattern):
-    activities = sorted( pattern, key=lambda x: x.get("position", 0))
-    consecutive_pairs = set(zip(map(lambda x: x.get("activity"), activities), map(lambda x: x.get("activity"), activities[1:])))
-    return consecutive_pairs
-
-
-
-def process_stats_query(config: Query_Config, metadata: MetaData) -> list[any]|None|str: # type: ignore
-    """
-    Splits the query events in pairs and retrieves the statistics for each pair from the count table.
-    """
-    spark = get_spark_session()
-    count_table = get_storage_manager().read_count_table(metadata)
-    
-    pairs = _extract_consecutive_pairs(config.get("query", {}).get("pattern", []))
-    
-    pairs_df = spark.createDataFrame(pairs, ["source", "target"])
-    df = count_table.join(pairs_df, on=["source", "target"], how="inner")
-
-    return str(df.collect())
-
-
-def optimize_lf(query_pairs: set[RespondedPair], metadata:MetaData):
-    """
-    Input: List of pair labels + branch [(source, target, branch_id)]
-    Output: LF optimized query (alr optimized)
-    """
-
-    #TODO: Compare w/sorting - probably worse/equal
-
-    true_pairs = list(set(list(map(lambda x: (x.source.label, x.target.label, x.branch_id), query_pairs))))
-
-    return true_pairs
-
 
 def process_detection_query(config: Query_Config, metadata: MetaData):
 
     spark = get_spark_session()
     storage = get_storage_manager()
-    logger.info(config)
-    # 1. Generating pairs from sequence (abc -> (a,b), (b,c), (c,d))
-    new_pattern = config.get("query", {}).get("alt_pattern", "")
+    
+    new_pattern = config.get("query", {}).get("pattern", "")
     
     logger.info(f"Querying pattern: {new_pattern}")
     
-    #optimizer
+    # lf optimizer
     start = time.time()
     pair_branches = set(extract_responded_pairs(new_pattern))
 
@@ -170,7 +134,7 @@ def process_detection_query(config: Query_Config, metadata: MetaData):
     logger.info(f"Parsing query took: {time.time() - start}")
     res = matches_df.groupByKey().map(validate_trace).filter(lambda result: len(result[1]) > 0).collect()
 
-    return f"Total: {len(res)}, First 5: {res[:5]}"
+    return {"total": len(res), "occurrences": res}
 
 
 def build_exact_pair_predicate(pairs_2d: set[tuple[str, str]]):

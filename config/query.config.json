@@ -3,23 +3,6 @@
   "storage_namespace": "siesta",
   "method": "detection",
   "query": {
-    "alt_pattern": "\"O_Created\" \"O_Sent (mail and online)\" \"W_Complete application\"",
-    "pattern": [
-      {
-        "activity": "A_Create Application",
-        "position": 0
-      },
-      {
-        "activity": "A_Submitted",
-        "position": 1,
-        "symbol": "+"
-      }
-    ],
-    "constraints": [
-      {
-        "type": "time_window",
-        "value": "5m"
-      }
-    ]
+    "pattern": "\"O_Created\" \"O_Sent (mail and online)\" \"W_Complete application\""
   }
 }

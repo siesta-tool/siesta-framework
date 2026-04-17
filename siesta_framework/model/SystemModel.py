@@ -17,12 +17,11 @@ class Query_Event(TypedDict, total=False):
 # Equivalent to type QUERY_CONTSRAINT
 Query_Constraint = Any
 
-Pattern = List[Query_Event]
+Pattern = str
 
 # Equivalent to type QUERY_METHOD_INPUT
 class Query_Method_Input(TypedDict, total=False):
-    pattern: Pattern
-    alt_pattern: str
+    pattern: str
     explore_mode: Optional[str] # "fast", "accurate", "hybrid"
     explore_k: Optional[int] # 0 = fast exploration
     constraints: Optional[List[Query_Constraint]]
@@ -109,9 +108,7 @@ DEFAULT_QUERY_CONFIG: Query_Config = {
     "storage_namespace": "siesta",
     "method": "stats",
     "query": {
-        "pattern": [],
-        "alt_pattern": ""
-        # "constraints" is optional
+        "pattern": "",
     },
     # "mode" is optional
 }

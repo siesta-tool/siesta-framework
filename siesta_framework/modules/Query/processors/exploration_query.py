@@ -7,7 +7,7 @@ from siesta_framework.model.SystemModel import Query_Config, Pattern
 from pyspark.sql import DataFrame, functions as F
 from pyspark.sql.functions import col, array
 from siesta_framework.modules.Query.parse_seql import split_pattern_to_list
-from siesta_framework.modules.Query.query_processors_detection import process_detection_query
+from siesta_framework.modules.Query.processors.detection_query import process_detection_query
 from pyspark.sql.functions import udf
 from pyspark.sql.types import StringType 
 
@@ -28,7 +28,7 @@ def support_udf(target, config: Query_Config, metadata: MetaData) -> float:
     :param metadata: The metadata containing information about the event log, including trace count.
     :return: The support value for the candidate target activity.
     """
-    config["query"]["alt_pattern"] = config.get("query", {}).get("alt_pattern", "").strip() + " " + target
+    config["query"]["pattern"] = config.get("query", {}).get("pattern", "").strip() + " " + target
     return len(process_detection_query(config, metadata)["occurrences"]) / metadata.trace_count
 
 
@@ -62,7 +62,7 @@ def accurate_exploration(config: Query_Config, metadata: MetaData) -> DataFrame:
     :return: A DataFrame with candidate target activities and their corresponding support values, sorted by support.
     """
     # Extract the current pattern from the config and determine the last activity to find candidate targets
-    pattern_data = split_pattern_to_list(config.get("query", {}).get("alt_pattern", ""))
+    pattern_data = split_pattern_to_list(config.get("query", {}).get("pattern", ""))
     activities_pattern = list(map(lambda x: x.get("label"), pattern_data))
     pattern_suffix = activities_pattern[-1] if activities_pattern else ""
     
