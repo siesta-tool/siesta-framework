@@ -84,10 +84,12 @@ class Query(SiestaModule):
             storage_type=self.query_config.get("storage_type", "s3")
         )
 
+        result = self._dissect_query(self.query_config, self.metadata)
+        if result is not None:
+            print(result)
+        return result
 
-        self._dissect_query(self.query_config, self.metadata)
-
-    def api_run(self, query_config: Query_Config) -> str|None:
+    def api_run(self, query_config: Query_Config) -> Any | None:
         """
         Entry point for Query via the API.
         """
@@ -120,7 +122,7 @@ class Query(SiestaModule):
             case "patterns":
                 pass
             case "detection":
-                return timed(query_processors_detection.process_detection_query_local, "Detection Query: ", config, metadata)
+                return timed(query_processors_detection.process_detection_query, "Detection Query: ", config, metadata)
             case "explore":
                 pass
             case "violations":

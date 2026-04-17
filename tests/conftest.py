@@ -219,3 +219,64 @@ def preprocessed_incremental(siesta_app):
     )
 
     return {"storage": storage, "metadata": metadata}
+
+
+QUERY_LOG_NAME = "test_query_detection"
+
+
+@pytest.fixture(scope="session")
+def query_preprocessed(siesta_app):
+    """Preprocess datasets/test.csv for query integration tests.
+
+    Traces
+    ------
+    trace_1 : A(r1,clerk) -> B(r2,analyst) -> C(r3,system)
+    trace_2 : A(r1,clerk) -> C(r3,system)
+    trace_3 : B(r2,analyst) -> C(r3,system) -> D(r4,manager)
+    trace_4 : A(r1,clerk) -> D(r4,manager)
+
+    All four attribute columns (resource, role, cost, lifecycle) are indexed.
+    """
+    from siesta_framework.core.storageFactory import get_storage_manager
+    from siesta_framework.model.StorageModel import MetaData
+    from siesta_framework.modules.Preprocess.main import Preprocessor
+
+    csv_path = os.path.join(
+        os.path.dirname(__file__), "..", "datasets", "test.csv"
+    )
+    config = {
+        "log_name": QUERY_LOG_NAME,
+        "log_path": csv_path,
+        "storage_namespace": TEST_NAMESPACE,
+        "overwrite_data": True,
+        "enable_streaming": False,
+        "lookback": "7d",
+        "field_mappings": {
+            "csv": {
+                "activity": "activity",
+                "trace_id": "trace_id",
+                "position": "position",
+                "start_timestamp": "timestamp",
+                "attributes": ["resource", "role", "cost", "lifecycle"],
+            }
+        },
+        "trace_level_fields": ["trace_id"],
+        "timestamp_fields": ["start_timestamp"],
+    }
+
+    storage = get_storage_manager()
+    preprocessor = Preprocessor()
+    preprocessor.siesta_config = siesta_app.config
+    preprocessor.storage = storage
+    preprocessor._load_preprocess_config(config)
+    preprocessor.storage.initialize_db(preprocessor.preprocess_config)
+    _force_clean_tables(QUERY_LOG_NAME, TEST_NAMESPACE)
+    preprocessor.begin_builders(caller="cli")
+
+    metadata = MetaData(
+        storage_namespace=TEST_NAMESPACE,
+        log_name=QUERY_LOG_NAME,
+        storage_type="s3",
+    )
+
+    return {"storage": storage, "metadata": metadata, "config": config}

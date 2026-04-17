@@ -273,7 +273,7 @@ _RAW_PATTERNS: List[Tuple[TT, str]] = [
     (TT.NOT,    r'[!^]'),
     (TT.STRING, r'"(?:[^"\\]|\\.)*"'),
     (TT.VAR,    r'\$\d+'),
-    (TT.LABEL,  r'[A-Za-z_][A-Za-z0-9_]*'),
+    (TT.LABEL,  r'[A-Za-z_][A-Za-z0-9_:\\]*'),
     (TT.NUMBER, r'\d+'),
     (TT.LPAREN, r'\('),
     (TT.RPAREN, r'\)'),
@@ -996,9 +996,25 @@ def extract_info_pairs(pattern):
     sequences = _linearise(ast)
     attribute_pairs = set()
     for branch_id, seq in enumerate(sequences):
-        for boundActivity in seq:
+        for idx, boundActivity in enumerate(seq):
             if boundActivity.activity.constraints or boundActivity.negated or boundActivity.quantifier in (Quantifier.PLUS, Quantifier.STAR):
                 attribute_pairs.add((boundActivity.activity.label, boundActivity.activity.label, branch_id))
+            if boundActivity.negated:
+                # Find nearest non-negated predecessor
+                prev_positive = next(
+                    (seq[k] for k in range(idx - 1, -1, -1) if not seq[k].negated),
+                    None,
+                )
+                # Find nearest non-negated successor
+                next_positive = next(
+                    (seq[k] for k in range(idx + 1, len(seq)) if not seq[k].negated),
+                    None,
+                )
+                if prev_positive is not None:
+                    attribute_pairs.add((prev_positive.activity.label, boundActivity.activity.label))
+                elif next_positive is not None:
+                    # No positive predecessor — anchor to the next positive event instead
+                    attribute_pairs.add((boundActivity.activity.label, next_positive.activity.label))
     
     return attribute_pairs
     

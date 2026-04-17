@@ -6,7 +6,7 @@ could be added in the future.
 from abc import ABC
 from functools import reduce
 
-KC_MIN_SIZE = 1
+KC_MIN_SIZE = 0
 KC_MAX_SIZE = None
 
 
@@ -170,8 +170,6 @@ class KleeneClosureOperator(UnaryStructure):
         if isinstance(arg, NegationOperator):
             raise Exception("Invalid Argument: KleeneClosureOperator cannot contain NegationOperator as an argument")
         super().__init__(arg)
-        if min_size <= 0:
-            raise Exception("Invalid Argument: KleeneClosure node min_size <= 0!")
         # enforce min_size <= max_size
         if max_size is not None and max_size < min_size:
             raise Exception("Invalid Argument: KleeneClosure node max_size < min_size!")

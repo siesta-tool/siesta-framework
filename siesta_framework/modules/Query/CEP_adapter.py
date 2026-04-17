@@ -1,6 +1,7 @@
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from itertools import product
 from pathlib import Path
 from typing import List
 
@@ -232,6 +233,45 @@ def _has_or_dsl(node) -> bool:
     return False
 
 
+def _expand_star_dsl(node):
+    """
+    Expand every STAR quantifier into two star-free alternatives:
+    one branch replaces ``x*`` with ``x+`` and the other omits ``x``.
+    """
+    if isinstance(node, SeqNode):
+        per_element = []
+        for element in node.elements:
+            atom_alternatives = _expand_star_dsl(element.atom)
+            if element.quantifier == Quantifier.STAR:
+                alternatives = [
+                    ElementNode(atom=atom, quantifier=Quantifier.PLUS)
+                    for atom in atom_alternatives
+                ]
+                alternatives.append(None)
+            else:
+                alternatives = [
+                    ElementNode(atom=atom, quantifier=element.quantifier)
+                    for atom in atom_alternatives
+                ]
+            per_element.append(alternatives)
+
+        expanded = []
+        for combination in product(*per_element):
+            elements = [element for element in combination if element is not None]
+            if elements:
+                expanded.append(SeqNode(elements))
+        return expanded or [node]
+
+    if isinstance(node, OrNode):
+        per_branch = [_expand_star_dsl(branch) for branch in node.branches]
+        return [OrNode(list(branches)) for branches in product(*per_branch)]
+
+    if isinstance(node, NegatedNode):
+        return [NegatedNode(inner) for inner in _expand_star_dsl(node.inner)]
+
+    return [node]
+
+
 def _build_dsl_attr_conditions(positive_event_names: list) -> List:
     """
     Convert DSL attribute constraints into native OpenCEP conditions.
@@ -258,10 +298,29 @@ def _build_dsl_attr_conditions(positive_event_names: list) -> List:
                 literal = val.value
                 conditions.append(
                     SimpleCondition(
-                        Variable(own_name, lambda x, a=attr, v=literal: x.get(a) == v)
+                        Variable(own_name, lambda x, a=attr: x.get(a)),
+                        relation_op=lambda v, lit=literal: v == lit,
                     )
                 )
  
+                def _numeric_eq(ov, rv, offset: int | float, op: str) -> bool:
+                    """Compare two attribute values (possibly strings) with an arithmetic offset.
+
+                    Attribute values stored in the index are always strings.  This helper
+                    converts both sides to float before the arithmetic so that
+                    ``A[cost=$1] B[cost=$1+5]`` works when cost is stored as "10" / "5".
+                    Returns False if either value cannot be converted to a number.
+                    """
+                    try:
+                        rv_f = float(rv)
+                        ov_f = float(ov)
+                    except (TypeError, ValueError):
+                        return False
+                    if op == "+":
+                        return ov_f == rv_f + offset
+                    return ov_f == rv_f - offset
+
+
             elif isinstance(val, VarExpr):
                 # Cross-event condition: this event's attr relates to the attr
                 # of the $ref_id-th positive event (1-based).
@@ -273,9 +332,17 @@ def _build_dsl_attr_conditions(positive_event_names: list) -> List:
                 offset = val.offset or 0
  
                 if op == "+":
-                    rel = lambda rv, ov, off=offset: ov == rv + off
+                    def rel(rv, ov, off=offset):
+                        try:
+                            return float(ov) == float(rv) + off
+                        except (TypeError, ValueError):
+                            return False
                 elif op == "-":
-                    rel = lambda rv, ov, off=offset: ov == rv - off
+                    def rel(rv, ov, off=offset):
+                        try:
+                            return float(ov) == float(rv) - off
+                        except (TypeError, ValueError):
+                            return False
                 else:
                     rel = lambda rv, ov: ov == rv
  
@@ -652,7 +719,7 @@ def find_occurrences_dsl(
                      ($N references the Nth positive event, 1-based)
  
     Not supported (raises NotImplementedError, matching find_occurrences_opencep):
-    - Star ('*') and optional ('?') quantifiers
+    - Optional ('?') quantifier
  
     Parameters
     ----------
@@ -664,57 +731,56 @@ def find_occurrences_dsl(
     constraints  : optional list of TimeConstraint / GapConstraint objects
     events       : optional list of event dicts (must align with sequence)
     """
-    # 1. Parse the DSL pattern and build an OpenCEP Pattern.
+    # 1. Parse the DSL pattern and expand every STAR into two star-free queries:
+    #    one with PLUS semantics and one with the STAR branch omitted.
     ast = parse_pattern(pattern_str)
-    builder = _DSLPatternBuilder()
-    pattern_structure = builder.build_root(ast)
- 
-    pattern = Pattern(
-        pattern_structure,
-        TrueCondition(),
-        timedelta(days=3650),
-    )
- 
-    # 2. Attach attribute conditions (StringLiteral and VarExpr) natively.
-    for cond in _build_dsl_attr_conditions(builder.positive_event_names):
-        pattern.condition.add_atomic_condition(cond)
- 
-    # 3. Attach external constraints (TimeConstraint, GapConstraint, …).
-    residual_constraints = _attach_native_conditions(
-        pattern,
-        builder.top_level_parts,
-        constraints or [],
-    )
- 
-    # 4. Prepare the event stream.
+    expanded_asts = _expand_star_dsl(ast)
+
+    # 2. Prepare the event stream once and reuse it across the expanded queries.
     constraint_events = _normalize_events(sequence, events)
     engine_events = _build_engine_events(constraint_events)
- 
-    # 5. Enable OR-expansion preprocessing when the pattern contains alternation.
-    preprocessing_params = (
-        PatternPreprocessingParameters([
-            PatternTransformationRules.TOPMOST_OR_PATTERN,
-            PatternTransformationRules.INNER_OR_PATTERN,
-        ])
-        if _has_or_dsl(ast) else None
-    )
- 
-    # 6. Run OpenCEP and collect raw matches.
-    output_items = run_opencep_pattern(pattern, engine_events, preprocessing_params)
- 
-    # 7. Post-filter with any residual constraints and deduplicate.
+
+    # 3. Run each expanded query independently and merge the matches.
     #    split_matches are passed as [] because _extract_split_matches requires
     #    a main.py AST (not available here).  Callers should not rely on
     #    returnSplit when using find_occurrences_dsl.
     candidate_matches = []
-    for match in output_items:
-        idxs = sorted(
-            event.payload[Event.INDEX_ATTRIBUTE_NAME]
-            for event in _flatten_match_events(match.events)
+    for expanded_ast in expanded_asts:
+        builder = _DSLPatternBuilder()
+        pattern_structure = builder.build_root(expanded_ast)
+
+        pattern = Pattern(
+            pattern_structure,
+            TrueCondition(),
+            timedelta(days=3650),
         )
-        if not _check_post_filters(residual_constraints, idxs, constraint_events, []):
-            continue
-        candidate_matches.append(idxs)
+
+        for cond in _build_dsl_attr_conditions(builder.positive_event_names):
+            pattern.condition.add_atomic_condition(cond)
+
+        residual_constraints = _attach_native_conditions(
+            pattern,
+            builder.top_level_parts,
+            constraints or [],
+        )
+
+        preprocessing_params = (
+            PatternPreprocessingParameters([
+                PatternTransformationRules.TOPMOST_OR_PATTERN,
+                PatternTransformationRules.INNER_OR_PATTERN,
+            ])
+            if _has_or_dsl(expanded_ast) else None
+        )
+
+        output_items = run_opencep_pattern(pattern, engine_events, preprocessing_params)
+        for match in output_items:
+            idxs = sorted(
+                event.payload[Event.INDEX_ATTRIBUTE_NAME]
+                for event in _flatten_match_events(match.events)
+            )
+            if not _check_post_filters(residual_constraints, idxs, constraint_events, []):
+                continue
+            candidate_matches.append(idxs)
  
     filtered_matches = _dedupe_and_sort(candidate_matches)
     if not filtered_matches:
