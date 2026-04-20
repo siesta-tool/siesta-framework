@@ -48,9 +48,9 @@ python3 tests/install_dependencies.py
 
 ## Running Siesta
 
-### 1) API mode
+### 1. API mode
 
-Default config:
+Default config (from siesta/model/SystemModel/DEFAULT_SYSTEM_CONFIG):
 
 ```bash
 python3 main.py
@@ -67,7 +67,7 @@ API routes are auto-registered from modules and exposed as:
 - `POST /miner/run`
 - `POST /query/run`
 
-### 2) CLI module mode
+### 2. CLI module mode
 
 General pattern:
 
