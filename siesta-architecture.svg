@@ -1,0 +1,182 @@
+<svg width="100%" viewBox="0 0 680 820" xmlns="http://www.w3.org/2000/svg" role="img">
+<title>Siesta Framework Architecture</title>
+<desc>Layered architecture diagram of the Siesta process mining framework, showing entry points, core layer, modules, storage abstraction, and infrastructure.</desc>
+<defs>
+  <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+  </marker>
+  <style>
+    text { font-family: ui-sans-serif, system-ui, sans-serif; fill: #1a1a1a; }
+    .th  { font-size: 14px; font-weight: 500; }
+    .ts  { font-size: 12px; font-weight: 400; fill: #555; }
+
+    /* Entry / CLI boxes */
+    .box-gray rect  { fill: #f1efe8; stroke: #5f5e5a; }
+    .box-gray text  { fill: #2c2c2a; }
+    .box-gray .ts   { fill: #5f5e5a; }
+
+    /* Core + model rows */
+    .box-purple rect { fill: #eeedfe; stroke: #534ab7; }
+    .box-purple text { fill: #26215c; }
+    .box-purple .ts  { fill: #534ab7; }
+
+    /* Modules */
+    .box-teal rect  { fill: #e1f5ee; stroke: #0f6e56; }
+    .box-teal text  { fill: #04342c; }
+    .box-teal .ts   { fill: #0f6e56; }
+    .box-teal .inner rect { fill: #9fe1cb44; stroke: #0f6e5666; }
+
+    .box-coral rect  { fill: #faece7; stroke: #993c1d; }
+    .box-coral text  { fill: #4a1b0c; }
+    .box-coral .ts   { fill: #993c1d; }
+    .box-coral .inner rect { fill: #f0997b44; stroke: #993c1d66; }
+
+    .box-blue rect  { fill: #e6f1fb; stroke: #185fa5; }
+    .box-blue text  { fill: #042c53; }
+    .box-blue .ts   { fill: #185fa5; }
+    .box-blue .inner rect { fill: #85b7eb44; stroke: #185fa566; }
+
+    /* Storage */
+    .box-amber rect { fill: #faeeda; stroke: #854f0b; }
+    .box-amber text { fill: #412402; }
+    .box-amber .ts  { fill: #854f0b; }
+
+    /* Arrows */
+    line.arr { stroke: #888780; stroke-width: 1.2; fill: none; }
+    line.faint { stroke: #88878066; stroke-width: 0.8; fill: none; }
+  </style>
+</defs>
+
+<!-- ── Label: entry points ── -->
+<text class="ts" x="340" y="22" text-anchor="middle">entry points</text>
+
+<!-- API mode -->
+<g class="box-gray">
+  <rect x="80" y="32" width="200" height="52" rx="8" stroke-width="0.5"/>
+  <text class="th" x="180" y="53" text-anchor="middle" dominant-baseline="central">API mode</text>
+  <text class="ts" x="180" y="70" text-anchor="middle" dominant-baseline="central">FastAPI · auto-routed endpoints</text>
+</g>
+
+<!-- CLI mode -->
+<g class="box-gray">
+  <rect x="400" y="32" width="200" height="52" rx="8" stroke-width="0.5"/>
+  <text class="th" x="500" y="53" text-anchor="middle" dominant-baseline="central">CLI mode</text>
+  <text class="ts" x="500" y="70" text-anchor="middle" dominant-baseline="central">main.py · argparse dispatch</text>
+</g>
+
+<!-- Converge to core -->
+<line x1="180" y1="84" x2="180" y2="120" class="faint"/>
+<line x1="500" y1="84" x2="500" y2="120" class="faint"/>
+<line x1="180" y1="120" x2="340" y2="120" class="faint"/>
+<line x1="500" y1="120" x2="340" y2="120" class="faint"/>
+<line x1="340" y1="120" x2="340" y2="136" class="arr" marker-end="url(#arrow)"/>
+
+<!-- ── Label: core ── -->
+<text class="ts" x="340" y="130" text-anchor="middle">core</text>
+
+<!-- Core box -->
+<g class="box-purple">
+  <rect x="40" y="140" width="600" height="70" rx="10" stroke-width="0.5"/>
+  <text class="th" x="340" y="163" text-anchor="middle" dominant-baseline="central">siesta / core</text>
+  <text class="ts" x="340" y="182" text-anchor="middle" dominant-baseline="central">app.py · config.py · sparkManager · storageFactory · interfaces (SiestaModule, StorageManager)</text>
+</g>
+
+<!-- Core → modules -->
+<line x1="340" y1="210" x2="340" y2="256" class="arr" marker-end="url(#arrow)"/>
+
+<!-- ── Label: feature modules ── -->
+<text class="ts" x="340" y="250" text-anchor="middle">feature modules</text>
+
+<!-- Preprocess -->
+<g class="box-teal">
+  <rect x="40" y="260" width="178" height="160" rx="8" stroke-width="0.5"/>
+  <text class="th" x="129" y="283" text-anchor="middle" dominant-baseline="central">Preprocess</text>
+  <text class="ts" x="129" y="302" text-anchor="middle" dominant-baseline="central">batch · streaming (Kafka)</text>
+  <g class="inner">
+    <rect x="56" y="316" width="146" height="26" rx="5" stroke-width="0.5"/>
+    <text class="ts" x="129" y="329" text-anchor="middle" dominant-baseline="central">parsers · builders</text>
+    <rect x="56" y="348" width="146" height="26" rx="5" stroke-width="0.5"/>
+    <text class="ts" x="129" y="361" text-anchor="middle" dominant-baseline="central">sequence table</text>
+    <rect x="56" y="380" width="146" height="26" rx="5" stroke-width="0.5"/>
+    <text class="ts" x="129" y="393" text-anchor="middle" dominant-baseline="central">pairs / activity index</text>
+  </g>
+</g>
+
+<!-- Mining -->
+<g class="box-coral">
+  <rect x="251" y="260" width="178" height="160" rx="8" stroke-width="0.5"/>
+  <text class="th" x="340" y="283" text-anchor="middle" dominant-baseline="central">Mining</text>
+  <text class="ts" x="340" y="302" text-anchor="middle" dominant-baseline="central">incremental constraint discovery</text>
+  <g class="inner">
+    <rect x="267" y="316" width="146" height="26" rx="5" stroke-width="0.5"/>
+    <text class="ts" x="340" y="329" text-anchor="middle" dominant-baseline="central">existential · positional</text>
+    <rect x="267" y="348" width="146" height="26" rx="5" stroke-width="0.5"/>
+    <text class="ts" x="340" y="361" text-anchor="middle" dominant-baseline="central">ordered · unordered</text>
+    <rect x="267" y="380" width="146" height="26" rx="5" stroke-width="0.5"/>
+    <text class="ts" x="340" y="393" text-anchor="middle" dominant-baseline="central">negations</text>
+  </g>
+</g>
+
+<!-- Query -->
+<g class="box-blue">
+  <rect x="462" y="260" width="178" height="160" rx="8" stroke-width="0.5"/>
+  <text class="th" x="551" y="283" text-anchor="middle" dominant-baseline="central">Query</text>
+  <text class="ts" x="551" y="302" text-anchor="middle" dominant-baseline="central">indexed log querying</text>
+  <g class="inner">
+    <rect x="478" y="316" width="146" height="26" rx="5" stroke-width="0.5"/>
+    <text class="ts" x="551" y="329" text-anchor="middle" dominant-baseline="central">statistics</text>
+    <rect x="478" y="348" width="146" height="26" rx="5" stroke-width="0.5"/>
+    <text class="ts" x="551" y="361" text-anchor="middle" dominant-baseline="central">detection (SEQ/CEP)</text>
+    <rect x="478" y="380" width="146" height="26" rx="5" stroke-width="0.5"/>
+    <text class="ts" x="551" y="393" text-anchor="middle" dominant-baseline="central">exploration</text>
+  </g>
+</g>
+
+<!-- Modules → model -->
+<line x1="129" y1="420" x2="129" y2="480" class="faint"/>
+<line x1="340" y1="420" x2="340" y2="480" class="arr" marker-end="url(#arrow)"/>
+<line x1="551" y1="420" x2="551" y2="480" class="faint"/>
+
+<!-- ── Label: shared model ── -->
+<text class="ts" x="340" y="474" text-anchor="middle">shared model</text>
+
+<!-- Model box -->
+<g class="box-gray">
+  <rect x="40" y="484" width="600" height="52" rx="8" stroke-width="0.5"/>
+  <text class="th" x="340" y="503" text-anchor="middle" dominant-baseline="central">siesta / model</text>
+  <text class="ts" x="340" y="521" text-anchor="middle" dominant-baseline="central">DataModel · StorageModel · MiningModel · SystemModel · MetaData · configs</text>
+</g>
+
+<!-- Model → storage interface -->
+<line x1="340" y1="536" x2="340" y2="580" class="arr" marker-end="url(#arrow)"/>
+<text class="ts" x="340" y="574" text-anchor="middle">storage abstraction</text>
+
+<!-- StorageManager interface -->
+<g class="box-amber">
+  <rect x="40" y="584" width="600" height="52" rx="8" stroke-width="0.5"/>
+  <text class="th" x="340" y="603" text-anchor="middle" dominant-baseline="central">StorageManager (interface)</text>
+  <text class="ts" x="340" y="621" text-anchor="middle" dominant-baseline="central">read/write: SequenceTable · PairsIndex · ActivityIndex · CountTable · Metadata · Constraints</text>
+</g>
+
+<!-- Interface → implementation -->
+<line x1="340" y1="636" x2="340" y2="672" class="arr" marker-end="url(#arrow)"/>
+<text class="ts" x="340" y="666" text-anchor="middle">implementations</text>
+
+<!-- S3Manager -->
+<g class="box-amber">
+  <rect x="40" y="676" width="600" height="44" rx="8" stroke-width="0.5"/>
+  <text class="th" x="340" y="695" text-anchor="middle" dominant-baseline="central">S3Manager (MinIO / AWS S3)</text>
+  <text class="ts" x="340" y="713" text-anchor="middle" dominant-baseline="central">Delta Lake tables via PySpark · pluggable via StorageManagerFactory</text>
+</g>
+
+<!-- S3 → infra -->
+<line x1="340" y1="720" x2="340" y2="758" class="arr" marker-end="url(#arrow)"/>
+<text class="ts" x="340" y="752" text-anchor="middle">infrastructure (docker-compose)</text>
+
+<!-- Infrastructure -->
+<g class="box-gray">
+  <rect x="40" y="762" width="600" height="44" rx="8" stroke-width="0.5"/>
+  <text class="th" x="340" y="781" text-anchor="middle" dominant-baseline="central">Spark cluster · MinIO · Kafka + Zookeeper · FastAPI container</text>
+  <text class="ts" x="340" y="799" text-anchor="middle" dominant-baseline="central">dockerbase/: Spark · Kafka · API images and entrypoints</text>
+</g>
+</svg>
