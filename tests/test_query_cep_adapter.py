@@ -22,7 +22,7 @@ Event dict helpers
   run(pattern, *events)    -> find_occurrences_dsl result (returnAll=False)
 """
 import pytest
-from siesta_framework.modules.Query.CEP_adapter import find_occurrences_dsl
+from siesta.modules.Query.CEP_adapter import find_occurrences_dsl
 
 
 # -- helpers ----------------------------------------------------------

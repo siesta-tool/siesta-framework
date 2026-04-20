@@ -9,7 +9,7 @@ Tested functions
 - extract_info_pairs(pattern)      -> set of (source_label, target_label, branch_id)
 """
 import pytest
-from siesta_framework.modules.Query.parse_seql import (
+from siesta.modules.Query.parse_seql import (
     Quantifier,
     extract_responded_pairs,
     extract_info_pairs,

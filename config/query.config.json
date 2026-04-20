@@ -1,8 +1,8 @@
 {
-  "log_name": "BPI2017",
+  "log_name": "groundtruth",
   "storage_namespace": "siesta",
   "method": "detection",
   "query": {
-    "pattern": "\"O_Created\" \"O_Sent (mail and online)\" \"W_Complete application\""
+    "pattern": "D A* A"
   }
 }

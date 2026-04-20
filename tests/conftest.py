@@ -33,9 +33,9 @@ def _force_clean_tables(log_name: str, namespace: str):
     removes the directories via Hadoop FS, and recreates empty tables
     to guarantee a truly clean starting state.
     """
-    from siesta_framework.core.sparkManager import get_spark_session
-    from siesta_framework.model.StorageModel import MetaData
-    from siesta_framework.model.DataModel import (
+    from siesta.core.sparkManager import get_spark_session
+    from siesta.model.StorageModel import MetaData
+    from siesta.model.DataModel import (
         Event, EventPair, Last_Checked_table_schema,
         Trace_metadata_table_schema, count_table_schema,
     )
@@ -83,7 +83,7 @@ def siesta_app():
     if not _minio_reachable():
         pytest.skip("MinIO is not running at localhost:9000")
 
-    from siesta_framework.core.app import Siesta
+    from siesta.core.app import Siesta
 
     config_path = os.path.join(
         os.path.dirname(__file__), "..", "config", "siesta.config.json"
@@ -94,7 +94,7 @@ def siesta_app():
     app.startup()
 
     # Ensure consistent timestamp handling across environments
-    from siesta_framework.core.sparkManager import get_spark_session
+    from siesta.core.sparkManager import get_spark_session
     get_spark_session().conf.set("spark.sql.session.timeZone", "UTC")
 
     yield app
@@ -130,9 +130,9 @@ def preprocess_config():
 @pytest.fixture(scope="session")
 def preprocessed(siesta_app, preprocess_config):
     """Run the Preprocessor and return storage + metadata for verification."""
-    from siesta_framework.core.storageFactory import get_storage_manager
-    from siesta_framework.model.StorageModel import MetaData
-    from siesta_framework.modules.Preprocess.main import Preprocessor
+    from siesta.core.storageFactory import get_storage_manager
+    from siesta.model.StorageModel import MetaData
+    from siesta.modules.Preprocess.main import Preprocessor
 
     storage = get_storage_manager()
 
@@ -166,9 +166,9 @@ def preprocessed_incremental(siesta_app):
     Batch 2 (test_preprocess_batch2.csv):
       t1: ... -> D -> E  (extend),  t4: C -> A -> B  (new trace)
     """
-    from siesta_framework.core.storageFactory import get_storage_manager
-    from siesta_framework.model.StorageModel import MetaData
-    from siesta_framework.modules.Preprocess.main import Preprocessor
+    from siesta.core.storageFactory import get_storage_manager
+    from siesta.model.StorageModel import MetaData
+    from siesta.modules.Preprocess.main import Preprocessor
 
     storage = get_storage_manager()
     datasets_dir = os.path.join(os.path.dirname(__file__), "..", "datasets")
@@ -237,9 +237,9 @@ def query_preprocessed(siesta_app):
 
     All four attribute columns (resource, role, cost, lifecycle) are indexed.
     """
-    from siesta_framework.core.storageFactory import get_storage_manager
-    from siesta_framework.model.StorageModel import MetaData
-    from siesta_framework.modules.Preprocess.main import Preprocessor
+    from siesta.core.storageFactory import get_storage_manager
+    from siesta.model.StorageModel import MetaData
+    from siesta.modules.Preprocess.main import Preprocessor
 
     csv_path = os.path.join(
         os.path.dirname(__file__), "..", "datasets", "test.csv"

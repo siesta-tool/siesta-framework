@@ -40,7 +40,7 @@ COMBINED_TOTAL_PAIRS = 20  # sum of above
 # --------------- Helpers ---------------
 
 def _read_pairs(ctx):
-    from siesta_framework.core.sparkManager import get_spark_session
+    from siesta.core.sparkManager import get_spark_session
     return get_spark_session().read.format("delta").load(
         ctx["metadata"].pairs_index_path
     )

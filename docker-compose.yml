@@ -1,0 +1,198 @@
+networks:
+  siesta-net:
+
+services:
+
+  siesta-api:
+    container_name: siesta-api
+    image: siesta/api:latest
+    build:
+      context: .
+      dockerfile: siesta/dockerbase/API/API.dockerfile
+    working_dir: /workspace
+    environment:
+      - SIESTA_PROJECT_ROOT=/workspace
+      - SIESTA_VENV_DIR=/tmp/siesta-api-venv
+      - SIESTA_CONFIG=${SIESTA_CONFIG:-/workspace/config/siesta.docker.config.json}
+      - HADOOP_USER_NAME=spark
+      - SPARK_USER=spark
+    volumes:
+      - .:/workspace
+    depends_on:
+      - spark-master
+      - spark-worker
+      - minio
+      - kafka
+    networks:
+      - siesta-net
+    ports:
+      - '8000:8000'
+
+  spark-master:
+    container_name: spark-master
+    image: siesta/spark:4.0.1
+    build:
+      context: siesta/dockerbase/Spark
+      dockerfile: Spark.dockerfile
+    environment:
+      - SPARK_MODE=master
+      - SPARK_MASTER_MEMORY=8G
+      - SPARK_MASTER_CORES=12
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+      - SPARK_USER=spark
+      - LOGS_PATH=/tmp/spark-events
+      - RESULTS_PATH=/tmp/output/
+      - SPARK_MASTER_WEBUI_PORT=8085
+      - SPARK_SUBMIT_OPTS=-Dlog4j.configurationFile=/opt/spark/conf/log4j2.properties
+      - PYSPARK_PYTHON=/opt/bitnami/python/bin/python3
+    networks:
+      - siesta-net
+    ports:
+      - '7077:7077'
+      - '8085:8085'
+      - '4040:4040'
+      - '8081:8081'
+    # Uncomment for docker swarm
+    # deploy:
+    #   replicas: 1
+    #   placement:
+    #     constraints:
+    #       - 'node.labels.host == node-name-1'
+
+  spark-worker:
+    container_name: spark-worker
+    image: siesta/spark:4.0.1
+    build: 
+      context: siesta/dockerbase/Spark
+      dockerfile: Spark.dockerfile
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+        - SPARK_MODE=worker
+        - SPARK_MASTER_URL=spark://spark-master:7077
+        - SPARK_WORKER_MEMORY=8G
+        - SPARK_WORKER_CORES=12
+        - SPARK_RPC_AUTHENTICATION_ENABLED=no
+        - SPARK_RPC_ENCRYPTION_ENABLED=no
+        - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+        - SPARK_SSL_ENABLED=no
+        - SPARK_USER=spark
+        - SPARK_SUBMIT_OPTS=-Dlog4j.configurationFile=/opt/spark/conf/log4j2.properties
+        - PYSPARK_PYTHON=/opt/bitnami/python/bin/python3
+        - SPARK_WORKER_WEBUI_PORT=8082
+    ports:
+      - '8082:8082'
+    networks:
+      - siesta-net
+    # # Uncomment for docker swarm
+    # deploy:
+    #   replicas: 2
+    #   placement:
+    #     constraints:
+    #       - 'node.labels.host == node-name-2'
+  spark-worker2:
+    container_name: spark-worker2
+    image: siesta/spark:4.0.1
+    build: 
+      context: siesta/dockerbase/Spark
+      dockerfile: Spark.dockerfile
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+        - SPARK_MODE=worker
+        - SPARK_MASTER_URL=spark://spark-master:7077
+        - SPARK_WORKER_MEMORY=8G
+        - SPARK_WORKER_CORES=12
+        - SPARK_RPC_AUTHENTICATION_ENABLED=no
+        - SPARK_RPC_ENCRYPTION_ENABLED=no
+        - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+        - SPARK_SSL_ENABLED=no
+        - SPARK_USER=spark
+        - SPARK_SUBMIT_OPTS=-Dlog4j.configurationFile=/opt/spark/conf/log4j2.properties
+        - PYSPARK_PYTHON=/opt/bitnami/python/bin/python3
+        - SPARK_WORKER_WEBUI_PORT=8083
+    ports:
+      - '8083:8083'
+    networks:
+      - siesta-net
+
+  minio:
+    container_name: minio-server
+    image: minio/minio:latest
+    environment:
+      s3_access_key: minioadmin
+      s3_secret_key: minioadmin
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    networks:
+      - siesta-net
+    volumes:
+      - minio-data:/data
+    # Uncomment for docker swarm
+    # deploy:
+    #   replicas: 1
+    #   placement:
+    #     constraints:
+    #       - 'node.labels.host == node-name-3'
+
+  zookeeper:
+    container_name: zookeeper
+    image: wurstmeister/zookeeper:latest
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+    volumes:
+      - zookeeper_data:/opt/zookeeper-3.4.13/data
+    networks:
+      - siesta-net
+    # Uncomment for docker swarm
+    # deploy:
+    #   replicas: 1
+    #   placement:
+    #     constraints:
+    #       - 'node.labels.host == node-name-4'
+
+  kafka:
+    container_name: kafka
+    image: siesta/kafka:latest
+    build:
+      context: siesta/dockerbase/Kafka
+      dockerfile: Kafka.dockerfile
+    ports:
+      - "9092:9092"
+      - "9093:9093"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INSIDE:PLAINTEXT,OUTSIDE:PLAINTEXT
+      # ADVERTISED_HOST_IP is replaced by the container's gateway IP at runtime
+      KAFKA_ADVERTISED_LISTENERS: INSIDE://:9093,OUTSIDE://ADVERTISED_HOST_IP:9092
+      KAFKA_LISTENERS: INSIDE://:9093,OUTSIDE://:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: INSIDE
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      # Auto-create topics: format is "topic_name:partitions:replication_factor"
+      # Multiple topics can be separated by commas
+      KAFKA_CREATE_TOPICS: "log_events:1:1,default_log:1:1"
+    depends_on:
+      - zookeeper
+    networks:
+      - siesta-net
+    volumes:
+      - kafka_data:/kafka
+    # Uncomment for docker swarm
+    # deploy:
+    #   replicas: 1
+    #   placement:
+    #     constraints:
+    #       - 'node.labels.host == node-name-4'
+
+volumes:
+  minio-data: {}
+  kafka_data: {}
+  zookeeper_data: {}
