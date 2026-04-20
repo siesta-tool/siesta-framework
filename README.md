@@ -1,4 +1,4 @@
-# siesta-framework
+# Siesta Framework
 
 Siesta is a Spark-based process mining and querying framework for event logs.
 It can run as:
@@ -16,7 +16,10 @@ Core data assumptions:
 - `mining`: discovers constraints from stored traces.
 - `query`: executes statistics/detection/exploration queries over indexed logs.
 
-## Project layout (high level)
+## Architecture
+![Siesta Framework Architecture](siesta-architecture.svg)
+
+## Project layout
 
 - `main.py`: top-level entrypoint.
 - `siesta/core`: framework bootstrapping (config, Spark, storage factory, interfaces).
