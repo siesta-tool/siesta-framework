@@ -1,7 +1,0 @@
-{
-    "log_name": "example_log",
-    "storage_namespace": "siesta",
-    "storage_type": "s3",
-    "separating_groups": [["fail_1", "fail_2"]],
-    "output_path": "../output/example_log"
-}
