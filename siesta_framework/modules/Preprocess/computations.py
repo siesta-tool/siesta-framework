@@ -296,13 +296,13 @@ def _parse_lookback(lookback: str) -> Tuple[int, LookbackType]:
             unit = match.group(2)
 
             if unit == "d":
-                total_ms += value * 24 * 60 * 60 * 1000
+                total_ms += value * 24 * 60 * 60 
             elif unit == "h":
-                total_ms += value * 60 * 60 * 1000
+                total_ms += value * 60 * 60 
             elif unit == "m":
-                total_ms += value * 60 * 1000
+                total_ms += value * 60 
             elif unit == "s":
-                total_ms += value * 1000
+                total_ms += value 
             else:
                 raise ValueError(f"Unsupported unit: {unit}")
 

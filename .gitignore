@@ -6,6 +6,9 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+__pycache__/
+**/OpenCEP/test/
+wexperimental
 # C extensions
 *.so
 

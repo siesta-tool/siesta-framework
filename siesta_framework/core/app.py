@@ -6,10 +6,11 @@ from siesta_framework.core.interfaces import SiestaModule, StorageManager
 import siesta_framework.modules as modules
 import siesta_framework as siesta_framework_package
 import siesta_framework.core.sparkManager as SparkManager
-from siesta_framework.core.storageFactory import StorageManagerFactory, set_storage_manager
+from siesta_framework.core.storageFactory import StorageManagerFactory, get_storage_manager, set_storage_manager
 from siesta_framework.core.config import initialize_config, load_config
 import argparse
 import logging
+from siesta_framework.model.StorageModel import MetaData
 
 class Siesta:
 

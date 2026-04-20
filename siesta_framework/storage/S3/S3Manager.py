@@ -174,7 +174,7 @@ class S3Manager(StorageManager):
             empty_index_pairs = self.spark.createDataFrame([], schema=EventPair.get_schema())
             empty_index_pairs.write \
                 .format("delta") \
-                .partitionBy("source", "target") \
+                .partitionBy("source") \
                 .mode("overwrite") \
                 .save(metadata.pairs_index_path)
         
@@ -417,7 +417,7 @@ class S3Manager(StorageManager):
             metadata: MetaData object containing the metadata
         """
         try:
-            new_pairs.write.partitionBy("source", "target").format("delta").mode("append").save(metadata.pairs_index_path)
+            new_pairs.write.partitionBy("source").format("delta").mode("append").save(metadata.pairs_index_path)
             
             # Update metadata
             # metadata.pair_count = new_pairs.count()
@@ -429,7 +429,7 @@ class S3Manager(StorageManager):
     ########## MetaData Table Methods #########
     ###########################################
 
-    def read_metadata_table(self, preprocess_config: Dict[str, Any], metadata: MetaData) -> MetaData:
+    def read_metadata_table(self, metadata: MetaData) -> MetaData:
         """
         Construct metadata by loading existing metadata from S3 or creating new.
         
@@ -440,8 +440,8 @@ class S3Manager(StorageManager):
             MetaData object containing the current stored metadata
         """
 
-        log_name = preprocess_config.get("log_name", "default_log")
-        namespace = preprocess_config.get("storage_namespace", "siesta")
+        log_name = metadata.log_name
+        namespace = metadata.storage_namespace
 
         # Initialize MetaData object with defaults
         metadata.trace_count = 0

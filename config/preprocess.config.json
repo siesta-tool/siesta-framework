@@ -1,10 +1,10 @@
 {
-  "log_name": "bpic2017",
-  "log_path": "datasets/BPI Challenge 2017.xes",
+  "log_name": "test_quick",
+  "log_path": "datasets/test_quick.csv",
   "storage_namespace": "siesta",
   "overwrite_data": false,
   "enable_streaming": false,
-  "lookback":"7d",
+  "lookback":"30d",
   "kafka_topic": "example_log",
   "field_mappings": {
     "xes": {

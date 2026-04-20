@@ -1,3 +1,0 @@
-[submodule "siesta_framework/modules/Query/CEP/OpenCEP"]
-	path = siesta_framework/modules/Query/CEP/OpenCEP
-	url = https://github.com/ilya-kolchinsky/OpenCEP.git

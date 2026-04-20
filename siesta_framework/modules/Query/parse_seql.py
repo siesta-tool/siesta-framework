@@ -273,7 +273,7 @@ _RAW_PATTERNS: List[Tuple[TT, str]] = [
     (TT.NOT,    r'[!^]'),
     (TT.STRING, r'"(?:[^"\\]|\\.)*"'),
     (TT.VAR,    r'\$\d+'),
-    (TT.LABEL,  r'[A-Za-z_][A-Za-z0-9_]*'),
+    (TT.LABEL,  r'[A-Za-z_][A-Za-z0-9_:\\]*'),
     (TT.NUMBER, r'\d+'),
     (TT.LPAREN, r'\('),
     (TT.RPAREN, r'\)'),
@@ -816,7 +816,7 @@ def _pairs_from_sequence(
     pos_indices = [k for k, ba in enumerate(seq) if not ba.negated]
     n = len(pos_indices)
     for ii in range(n):
-        if seq[pos_indices[ii]].quantifier in (Quantifier.STAR, Quantifier.PLUS):
+        if seq[pos_indices[ii]].quantifier in (Quantifier.STAR, Quantifier.PLUS) and False:
             dup_pair = seq[pos_indices[ii]]
             pairs.append(
                 RespondedPair(
@@ -988,10 +988,36 @@ def extract_responded_pairs(pattern: str) -> List[RespondedPair]:
     results = [_pairs_from_sequence(seq, branch_id) for branch_id, seq in enumerate(sequences)]
     return results
 
-
-def _expand_symbols(sequence: List[BoundActivity]) -> List[BoundActivity]:
+def extract_info_pairs(pattern):
+    """
+    Adding self pairs for attributes or negation to better inform CEP
+    """
+    ast = parse_pattern(pattern)
+    sequences = _linearise(ast)
+    attribute_pairs = set()
+    for branch_id, seq in enumerate(sequences):
+        for idx, boundActivity in enumerate(seq):
+            if boundActivity.activity.constraints or boundActivity.negated or boundActivity.quantifier in (Quantifier.PLUS, Quantifier.STAR):
+                attribute_pairs.add((boundActivity.activity.label, boundActivity.activity.label, branch_id))
+            if boundActivity.negated:
+                # Find nearest non-negated predecessor
+                prev_positive = next(
+                    (seq[k] for k in range(idx - 1, -1, -1) if not seq[k].negated),
+                    None,
+                )
+                # Find nearest non-negated successor
+                next_positive = next(
+                    (seq[k] for k in range(idx + 1, len(seq)) if not seq[k].negated),
+                    None,
+                )
+                if prev_positive is not None:
+                    attribute_pairs.add((prev_positive.activity.label, boundActivity.activity.label))
+                elif next_positive is not None:
+                    # No positive predecessor — anchor to the next positive event instead
+                    attribute_pairs.add((boundActivity.activity.label, next_positive.activity.label))
     
-    return []
+    return attribute_pairs
+    
 
 def extract_siesta_pairs(pattern: str) -> List[List[BoundActivity]]:
     ast = parse_pattern(pattern)

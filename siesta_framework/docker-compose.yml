@@ -61,12 +61,37 @@ services:
       - '8082:8082'
     networks:
       - siesta-net
-    # Uncomment for docker swarm
+    # # Uncomment for docker swarm
     # deploy:
-    #   replicas: 1
+    #   replicas: 2
     #   placement:
     #     constraints:
     #       - 'node.labels.host == node-name-2'
+  spark-worker2:
+    container_name: spark-worker2
+    image: siesta/spark:4.0.1
+    build: 
+      context: dockerbase/Spark
+      dockerfile: Spark.dockerfile
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+        - SPARK_MODE=worker
+        - SPARK_MASTER_URL=spark://spark-master:7077
+        - SPARK_WORKER_MEMORY=8G
+        - SPARK_WORKER_CORES=12
+        - SPARK_RPC_AUTHENTICATION_ENABLED=no
+        - SPARK_RPC_ENCRYPTION_ENABLED=no
+        - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+        - SPARK_SSL_ENABLED=no
+        - SPARK_USER=spark
+        - SPARK_SUBMIT_OPTS=-Dlog4j.configurationFile=/opt/spark/conf/log4j2.properties
+        - PYSPARK_PYTHON=/opt/bitnami/python/bin/python3
+        - SPARK_WORKER_WEBUI_PORT=8083
+    ports:
+      - '8083:8083'
+    networks:
+      - siesta-net
 
   minio:
     container_name: minio-server
