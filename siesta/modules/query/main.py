@@ -30,7 +30,7 @@ class QueryConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
     log_name: str = Field("example_log", description="Name of the indexed log")
     storage_namespace: str = Field("siesta", description="Storage namespace")
-    method: str = Field("statistics", description="'statistics', 'detection', or 'exploration'")
+    method: str = Field("statistics", description="'statistics', 'detection', or 'exploration'. Ignored by API endpoints — set automatically.")
     query: QueryMethodInput = Field(default_factory=QueryMethodInput, description="Query-specific parameters")
     support_threshold: float = Field(0.0, description="Minimum support fraction [0,1] for results")
 
@@ -55,13 +55,16 @@ class Querying(SiestaModule):
 
     def register_routes(self) -> SiestaModule.ApiRoutes:
         return {
-            "run": ("POST", self.api_run)
+            "statistics":  ("POST", self.api_statistics),
+            "detection":   ("POST", self.api_detection),
+            "exploration": ("POST", self.api_exploration),
         }
 
+    # ------------------------------------------------------------------
+    # CLI entry point
+    # ------------------------------------------------------------------
+
     def cli_run(self, args: Any, **kwargs: Any) -> Any:
-        """
-        Entry point for Query via the command line.
-        """
         logger.info(f"{self.name} is running with args: {args} and kwargs: {kwargs}")
 
         self.siesta_config = get_system_config()
@@ -70,69 +73,135 @@ class Querying(SiestaModule):
         parser = argparse.ArgumentParser(description="Siesta Query module")
         parser.add_argument('--query_config', type=str, help='Path to configuration JSON file', required=False)
 
-        parsed_args, unknown_args = parser.parse_known_args(args)
+        parsed_args, _ = parser.parse_known_args(args)
 
-        if parsed_args.query_config:
-            config_path = parsed_args.query_config
-            if not Path(config_path).exists():
-                raise FileNotFoundError(f"Config file {config_path} not found.")
+        if not parsed_args.query_config:
+            raise RuntimeError("Config not provided. Use --query_config <path>")
 
-            try:
-                with open(config_path, 'r') as f:
-                    user_query_config = json.load(f)
-                    self._load_query_config(user_query_config)
-                    logger.info(f"Configuration loaded from {config_path}")
-            except Exception as e:
-                raise RuntimeError(f"Error loading config from {config_path}: {e}")
+        config_path = parsed_args.query_config
+        if not Path(config_path).exists():
+            raise FileNotFoundError(f"Config file {config_path} not found.")
 
-        else:
-            raise RuntimeError(f"Config not provided")
+        try:
+            with open(config_path, 'r') as f:
+                self._load_query_config(json.load(f))
+                logger.info(f"Configuration loaded from {config_path}")
+        except Exception as e:
+            raise RuntimeError(f"Error loading config from {config_path}: {e}")
 
         result = self._dissect_query(self.query_config)
         if result is not None:
             logger.info(f"Query result: {result}")
         return result
 
+    # ------------------------------------------------------------------
+    # API entry points
+    # ------------------------------------------------------------------
 
-    def api_run(self, query_config: Annotated[QueryConfig, Body(
+    def api_statistics(self, query_config: Annotated[QueryConfig, Body(
         openapi_examples={
-            "statistics": {
-                "summary": "Statistics query",
-                "value": {"log_name": "example_log", "method": "statistics", "query": {"pattern": "A B"}, "support_threshold": 0.0},
+            "pair_support": {
+                "summary": "Support for a directly-follows pair",
+                "value": {"log_name": "example_log", "query": {"pattern": "A B"}, "support_threshold": 0.0},
             },
-            "detection": {
-                "summary": "Detection query",
-                "value": {"log_name": "example_log", "method": "detection", "query": {"pattern": "A B* C"}, "support_threshold": 0.1},
-            },
-            "exploration": {
-                "summary": "Exploration query",
-                "value": {"log_name": "example_log", "method": "exploration", "query": {"pattern": "A B", "explore_mode": "accurate", "explore_k": 10}},
+            "chain_support": {
+                "summary": "Support for a longer chain",
+                "value": {"log_name": "example_log", "query": {"pattern": "A B C"}, "support_threshold": 0.05},
             },
         }
     )]) -> Any | None:
-        """Run a pattern query over an indexed event log.
+        """Compute occurrence counts and support statistics for an activity pattern.
 
-        Three methods selected via the `method` field:
-        - **`statistics`**: Aggregate occurrence counts and support for activity pairs or a given pattern.
-        - **`detection`**: Return traces that satisfy a temporal / positional pattern.
-        - **`exploration`**: Find the most likely continuations for a partial pattern.
+        Splits the pattern into directly-following pairs and retrieves their
+        occurrence counts and support fractions from the pre-built count table.
 
         **Request body (`QueryConfig`):**
         - `log_name` *(str, default: `"example_log"`)* — name of the indexed log.
         - `storage_namespace` *(str, default: `"siesta"`)* — storage namespace.
-        - `method` *(str, default: `"statistics"`)* — `"statistics"`, `"detection"`, or `"exploration"`.
-        - `query.pattern` *(str)* — pattern string, e.g. `"A B* C"` or `"A[pos=?1]+ B[pos=?1+5]"`.
-        - `query.explore_mode` *(str, default: `"accurate"`)* — `"accurate"`, `"fast"`, or `"hybrid"`. Used by `exploration` only.
-        - `query.explore_k` *(int, default: `10`)* — candidates for hybrid exploration (`0` = fast mode).
-        - `support_threshold` *(float [0,1], default: `0.0`)* — minimum support fraction for results.
+        - `query.pattern` *(str)* — pattern string, e.g. `"A B"` or `"A B C"`.
+        - `support_threshold` *(float [0,1], default: `0.0`)* — minimum support fraction to include a pair in results.
         """
-
         self.siesta_config = get_system_config()
         self.storage = get_storage_manager()
 
-        self._load_query_config(query_config.model_dump())
+        config = query_config.model_dump()
+        config["method"] = "statistics"
+        self._load_query_config(config)
+        self._load_metadata()
 
-        return self._dissect_query(self.query_config)
+        return timed(process_stats_query, "Stats Query: ", self.query_config, self.metadata)
+
+    def api_detection(self, query_config: Annotated[QueryConfig, Body(
+        openapi_examples={
+            "simple_sequence": {
+                "summary": "Detect traces containing A directly followed by B",
+                "value": {"log_name": "example_log", "query": {"pattern": "A B"}, "support_threshold": 0.0},
+            },
+            "with_quantifiers": {
+                "summary": "Detect traces with positional constraints",
+                "value": {"log_name": "example_log", "query": {"pattern": "A B* C"}, "support_threshold": 0.1},
+            },
+        }
+    )]) -> Any | None:
+        """Retrieve all traces that satisfy a temporal or positional pattern.
+
+        Evaluates the pattern against the sequence index and returns matching
+        trace IDs together with the matched positions and an overall support fraction.
+
+        **Request body (`QueryConfig`):**
+        - `log_name` *(str, default: `"example_log"`)* — name of the indexed log.
+        - `storage_namespace` *(str, default: `"siesta"`)* — storage namespace.
+        - `query.pattern` *(str)* — pattern to detect, e.g. `"A B* C"` or `"A[pos=?1]+ B[pos=?1+5]"`.
+        - `support_threshold` *(float [0,1], default: `0.0`)* — minimum per-trace support to include a match.
+        """
+        self.siesta_config = get_system_config()
+        self.storage = get_storage_manager()
+
+        config = query_config.model_dump()
+        config["method"] = "detection"
+        self._load_query_config(config)
+        self._load_metadata()
+
+        return timed(process_detection_query, "Detection Query: ", self.query_config, self.metadata)
+
+    def api_exploration(self, query_config: Annotated[QueryConfig, Body(
+        openapi_examples={
+            "accurate": {
+                "summary": "Accurate exploration after a prefix",
+                "value": {"log_name": "example_log", "query": {"pattern": "A B", "explore_mode": "accurate"}},
+            },
+            "hybrid": {
+                "summary": "Hybrid exploration with candidate cap",
+                "value": {"log_name": "example_log", "query": {"pattern": "A", "explore_mode": "hybrid", "explore_k": 5}},
+            },
+        }
+    )]) -> Any | None:
+        """Find the most likely activity continuations after a partial pattern.
+
+        Evaluates which activities most commonly follow the given prefix pattern
+        and ranks them by support. Three modes trade accuracy for speed.
+
+        **Request body (`QueryConfig`):**
+        - `log_name` *(str, default: `"example_log"`)* — name of the indexed log.
+        - `storage_namespace` *(str, default: `"siesta"`)* — storage namespace.
+        - `query.pattern` *(str)* — prefix pattern to continue from, e.g. `"A B"`.
+        - `query.explore_mode` *(str, default: `"accurate"`)* — `"accurate"` (full index scan), `"fast"` (count table only), or `"hybrid"` (fast pre-filter + accurate top-k).
+        - `query.explore_k` *(int, default: `10`)* — number of candidates to evaluate accurately in `"hybrid"` mode (`0` = pure fast mode).
+        - `support_threshold` *(float [0,1], default: `0.0`)* — minimum support fraction to include a continuation.
+        """
+        self.siesta_config = get_system_config()
+        self.storage = get_storage_manager()
+
+        config = query_config.model_dump()
+        config["method"] = "exploration"
+        self._load_query_config(config)
+        self._load_metadata()
+
+        return timed(process_exploration_query, "Exploration Query: ", self.query_config, self.metadata)
+
+    # ------------------------------------------------------------------
+    # Shared helpers
+    # ------------------------------------------------------------------
 
     def _load_query_config(self, config: Dict[str, Any]):
         #TODO: Add schema validation w/ explainability
@@ -140,16 +209,16 @@ class Querying(SiestaModule):
         self.query_config = self.query_config | config
         logger.info(self.query_config)
 
-    def _dissect_query(self, config: Dict[str, Any]):
-
+    def _load_metadata(self):
         self.metadata = MetaData(
             storage_namespace=self.query_config.get("storage_namespace", "siesta"),
             log_name=self.query_config.get("log_name", "default_log"),
-            storage_type=self.query_config.get("storage_type", "s3")
+            storage_type=self.query_config.get("storage_type", "s3"),
         )
-
         self.metadata = self.storage.read_metadata_table(self.metadata)
 
+    def _dissect_query(self, config: Dict[str, Any]):
+        self._load_metadata()
         match config.get("method", "").lower():
             case "statistics":
                 return timed(process_stats_query, "Stats Query: ", config, self.metadata)

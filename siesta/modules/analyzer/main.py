@@ -64,8 +64,7 @@ DEFAULT_ANALYZER_CONFIG: Dict[str, Any] = {
     **DirectlyFollowsConfig().model_dump(),
     **LoopDetectionConfig().model_dump(),
     **DurationsConfig().model_dump(),
-    "method": "directly_follows",
-    "storage_type": "s3",
+    "method": "directly_follows"
 }
 
 

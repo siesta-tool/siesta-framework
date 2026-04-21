@@ -23,7 +23,6 @@ class ComparatorConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
     log_name: str = Field("example_log", description="Name of the indexed log")
     storage_namespace: str = Field("siesta", description="Storage namespace")
-    storage_type: str = Field("s3", description="Storage backend type")
     method: str = Field("ngrams", description="Comparison method: 'ngrams', 'rare_rules', or 'targeted_rules'")
     method_params: dict = Field(default_factory=lambda: {"n": 2}, description="Method-specific params. ngrams: {n}. targeted_rules: {target_label, filtering_support}")
     separating_key: str = Field("activity", description="Column used to label traces into groups")

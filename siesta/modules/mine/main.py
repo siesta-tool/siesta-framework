@@ -26,7 +26,6 @@ class MiningConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
     log_name: str = Field("example_log", description="Name of the indexed log")
     storage_namespace: str = Field("siesta", description="Storage namespace")
-    storage_type: str = Field("s3", description="Storage backend type")
     categories: list[str] = Field(["*"], description="Constraint categories: 'positional', 'existential', 'ordered', 'unordered', 'negation', or '*' for all")
     grouping: str = Field("trace", description="Grouping strategy: 'trace' or 'window'")
     window_size: int = Field(30, description="Position-based window size when grouping='window'")
