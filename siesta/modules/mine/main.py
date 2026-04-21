@@ -70,16 +70,16 @@ class Mining(SiestaModule):
         list of rows.
 
         **Config fields:**
-        - `log_name` *(str, default: `"example_log"`)* — name of the indexed log. **Required.**
-        - `storage_namespace` *(str, default: `"siesta"`)* — storage namespace.
-        - `categories` *(list, default: `["*"]`)* — constraint categories to mine.
+        - `log_name` *(str, default: `"example_log"`)* - name of the indexed log. **Required.**
+        - `storage_namespace` *(str, default: `"siesta"`)* - storage namespace.
+        - `categories` *(list, default: `["*"]`)* - constraint categories to mine.
           `"*"` = all. Options: `"positional"`, `"existential"`, `"ordered"`, `"unordered"`, `"negation"`.
-        - `grouping` *(str, default: `"trace"`)* — grouping strategy: `"trace"` or `"window"`.
-        - `window_size` *(int, default: `30`)* — position-based window size when `grouping="window"`.
-        - `support_threshold` *(float [0,1], default: `0.0`)* — minimum support fraction to retain constraints.
-        - `include_trace_lists` *(bool, default: `false`)* — append a pipe-delimited `trace_ids` column per constraint.
-        - `force_recompute` *(bool, default: `false`)* — remine all traces ignoring previous mining state.
-        - `output_path` *(str, default: `"output/example_log"`)* — local path prefix for the output CSV.
+        - `grouping` *(str, default: `"trace"`)* - grouping strategy: `"trace"` or `"window"`.
+        - `window_size` *(int, default: `30`)* - position-based window size when `grouping="window"`.
+        - `support_threshold` *(float [0,1], default: `0.0`)* - minimum support fraction to retain constraints.
+        - `include_trace_lists` *(bool, default: `false`)* - append a pipe-delimited `trace_ids` column per constraint.
+        - `force_recompute` *(bool, default: `false`)* - remine all traces ignoring previous mining state.
+        - `output_path` *(str, default: `"output/example_log"`)* - local path prefix for the output CSV.
         """
         logger.info(f"{self.name} is running via API request.")
 

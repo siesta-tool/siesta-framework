@@ -86,7 +86,7 @@ class VarExpr:
     Notes
     -----
     The parser does **not** validate whether the arithmetic is semantically
-    applicable — that responsibility belongs to the CEP engine.
+    applicable - that responsibility belongs to the CEP engine.
     """
     var_id: int
     op: Optional[str] = None      # '+' | '-' | None
@@ -189,7 +189,7 @@ class OrNode:
 @dataclass
 class NegatedNode:
     """
-    A negated atom — activity or OR-group — introduced by ``!`` or ``^``.
+    A negated atom - activity or OR-group - introduced by ``!`` or ``^``.
 
     Semantics
     ---------
@@ -250,7 +250,7 @@ PatternNode = Union[ActivityNode, SeqNode, OrNode, NegatedNode]
 class TT(Enum):
     """Token types."""
     OR       = "OR"
-    NOT      = "NOT"      # ! or ^  — negation prefix
+    NOT      = "NOT"      # ! or ^  - negation prefix
     LABEL    = "LABEL"
     LPAREN   = "LPAREN"
     RPAREN   = "RPAREN"
@@ -337,7 +337,7 @@ def tokenize(text: str) -> List[Token]:
 def split_pattern_to_list(pattern: str) -> list:
     """
     Parse *pattern* and return a flat, ordered list of every activity
-    occurrence — positive and negated — as plain dictionaries.
+    occurrence - positive and negated - as plain dictionaries.
 
     This is a read-only inspection utility; it does **not** resolve OR
     branches or perform pair extraction.  Each activity appears in the
@@ -352,7 +352,7 @@ def split_pattern_to_list(pattern: str) -> list:
             'ACT_A[x="1", y=$1]* ACT_B[y="5"] ACT_C[y=$1+2]'
 
         Note: bare numeric literals (``x=1``) are not supported by the
-        parser — wrap them in quotes (``x="1"``) or use a variable
+        parser - wrap them in quotes (``x="1"``) or use a variable
         (``x=$1``).
 
     Returns
@@ -370,9 +370,9 @@ def split_pattern_to_list(pattern: str) -> list:
         ``attributes`` : list[dict]
             One dict per ``name=value`` annotation, each with keys:
 
-            ``name`` : str  — attribute name
+            ``name`` : str  - attribute name
             ``kind`` : ``"literal"`` | ``"variable"``
-            ``value`` : str — the raw literal value (quotes stripped), or
+            ``value`` : str - the raw literal value (quotes stripped), or
                               the variable reference as a string
                               (e.g. ``"$1"``, ``"$2+5"``, ``"$3-10"``).
 
@@ -503,7 +503,7 @@ class Parser:
     # ── grammar rules ─────────────────────────────────────────────────────
 
     def parse(self) -> PatternNode:
-        """Entry point — parse the full pattern."""
+        """Entry point - parse the full pattern."""
         node = self._or_expr()
         self._consume(TT.EOF)
         return node
@@ -602,7 +602,7 @@ class Parser:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 5.  Lineariser — OR resolution via cartesian product
+# 5.  Lineariser - OR resolution via cartesian product
 # ═══════════════════════════════════════════════════════════════════════════
 
 @dataclass(frozen=True)
@@ -935,11 +935,11 @@ def extract_responded_pairs(pattern: str) -> List[RespondedPair]:
 
     OR-alternatives produce separate branches; the pairs from all branches
     are concatenated in branch order.  The same label-pair may appear in
-    multiple branches with different attribute constraint contexts — this is
+    multiple branches with different attribute constraint contexts - this is
     intentional and must not be de-duplicated at this stage.
 
     .. note::
-        **Activity-label parsing** — because this DSL supports multi-character
+        **Activity-label parsing** - because this DSL supports multi-character
         labels (e.g. ``Submit_Application``), consecutive letters are treated
         as a *single* label.  Separate activities must be delimited by
         whitespace or by their ``[…]`` attribute blocks:
@@ -1013,7 +1013,7 @@ def extract_info_pairs(pattern):
                 if prev_positive is not None:
                     attribute_pairs.add((prev_positive.activity.label, boundActivity.activity.label))
                 elif next_positive is not None:
-                    # No positive predecessor — anchor to the next positive event instead
+                    # No positive predecessor - anchor to the next positive event instead
                     attribute_pairs.add((boundActivity.activity.label, next_positive.activity.label))
     
     return attribute_pairs

@@ -68,17 +68,17 @@ class Comparing(SiestaModule):
         Results are written to a local file (CSV for `ngrams`, JSON for rule methods) and returned.
 
         **Config fields:**
-        - `log_name` *(str, default: `"example_log"`)* — name of the indexed log. **Required.**
-        - `storage_namespace` *(str, default: `"siesta"`)* — storage namespace.
-        - `method` *(str, default: `"ngrams"`)* — `"ngrams"`, `"rare_rules"`, or `"targeted_rules"`.
-        - `method_params` *(object, default: `{"n": 2}`)* — method-specific parameters.
+        - `log_name` *(str, default: `"example_log"`)* - name of the indexed log. **Required.**
+        - `storage_namespace` *(str, default: `"siesta"`)* - storage namespace.
+        - `method` *(str, default: `"ngrams"`)* - `"ngrams"`, `"rare_rules"`, or `"targeted_rules"`.
+        - `method_params` *(object, default: `{"n": 2}`)* - method-specific parameters.
           `ngrams`: `n` (int) = gram length.
           `targeted_rules`: `target_label` (int, default: `1`), `filtering_support` (float, default: `1`).
-        - `separating_key` *(str, default: `"activity"`)* — column used to label traces into groups.
-        - `separating_groups` *(list[list[str]])* — group definitions, e.g. `[["fail", "error"]]`
+        - `separating_key` *(str, default: `"activity"`)* - column used to label traces into groups.
+        - `separating_groups` *(list[list[str]])* - group definitions, e.g. `[["fail", "error"]]`
           splits into the listed values vs. all remaining traces.
-        - `support_threshold` *(float [0,1], default: `0.0`)* — minimum support fraction for results.
-        - `output_path` *(str, default: `"../output/example_log"`)* — local path prefix for the output file.
+        - `support_threshold` *(float [0,1], default: `0.0`)* - minimum support fraction for results.
+        - `output_path` *(str, default: `"../output/example_log"`)* - local path prefix for the output file.
         """
         logger.info(f"{self.name} is running via API request.")
 
@@ -164,7 +164,7 @@ class Comparing(SiestaModule):
             storage_type=self.comparator_config.get("storage_type", "s3")
         )
 
-        self.metadata = self.storage.read_metadata_table(self.comparator_config, self.metadata) 
+        self.metadata = self.storage.read_metadata_table(self.metadata) 
         all_events_df = self.storage.read_sequence_table(self.metadata).dropDuplicates(["trace_id", "activity", "start_timestamp"])
         all_events_df.cache()
 

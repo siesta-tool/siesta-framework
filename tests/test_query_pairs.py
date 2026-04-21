@@ -1,7 +1,7 @@
 """
 Pure-Python unit tests for parse_seql pair-extraction helpers.
 
-No Spark, no MinIO, no external fixtures — just import and call.
+No Spark, no MinIO, no external fixtures - just import and call.
 
 Tested functions
 ----------------
@@ -37,7 +37,7 @@ class TestExtractRespondedPairs:
 
     def test_three_event_sequence_gives_all_forward_pairs(self):
         pairs = extract_responded_pairs("A B C")
-        # Expects (A,B), (A,C), (B,C) — all in branch 0
+        # Expects (A,B), (A,C), (B,C) - all in branch 0
         assert len(pairs) == 3
         keys = [(p.source.label, p.target.label) for p in pairs]
         assert ("A", "B") in keys

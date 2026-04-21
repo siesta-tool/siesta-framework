@@ -114,7 +114,7 @@ class TestIncrSequenceTable:
 
 
 # =====================================================
-#  Pairs Index — the main focus of incremental tests
+#  Pairs Index - the main focus of incremental tests
 # =====================================================
 
 class TestIncrPairsIndex:
@@ -211,7 +211,7 @@ class TestIncrPairsIndex:
 
     def test_new_trace_pairs(self, preprocessed_incremental):
         """t4 (C->A->B) must have exactly pairs (C,A), (C,B), (A,B)
-        — sourced from whoever has the lower position."""
+        - sourced from whoever has the lower position."""
         pairs = _read_pairs(preprocessed_incremental)
         seq = preprocessed_incremental["storage"].read_sequence_table(
             preprocessed_incremental["metadata"]
@@ -287,7 +287,7 @@ class TestIncrLastChecked:
 
 
 # =====================================================
-#  Count Table — note: overwritten per batch, reflects
+#  Count Table - note: overwritten per batch, reflects
 #  only pairs generated in the latest batch.
 # =====================================================
 

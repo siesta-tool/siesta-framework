@@ -12,7 +12,7 @@ For plain sequences (no Kleene), ``find_occurrences_dsl`` returns the
 For Kleene patterns (+ or *), OpenCEP assigns its own internal counter
 to every event (and to each AggregatedEvent node it creates internally).
 The returned indices are those **internal OpenCEP counters**, not the
-original positions — so ``A+ B`` on ``[A, B]`` returns ``[0, 2]``
+original positions - so ``A+ B`` on ``[A, B]`` returns ``[0, 2]``
 (A->0, KC-internal-node->1, B->2).  Tests assert the empirically verified
 values to act as regression guards against future adapter changes.
 

@@ -87,7 +87,7 @@ def compute_activity_durations(
             max_duration_sec, occurrence_count.
             Group columns are present only when per_group=True.
     """
-    # Always resolve group columns — needed for per_group breakdown and/or filtering
+    # Always resolve group columns - needed for per_group breakdown and/or filtering
     events_df, group_cols = _resolve_group_cols(events_df, grouping_key)
 
     if grouping_value is not None:
@@ -150,7 +150,7 @@ def compute_group_durations(
         grouping_value: Optional value(s) to restrict the output to specific groups.
 
     Returns:
-        Spark DataFrame with columns: <group_key(s)>, duration_sec —
+        Spark DataFrame with columns: <group_key(s)>, duration_sec -
         one row per group, ordered by the primary group column.
     """
     events_df, group_cols = _resolve_group_cols(events_df, grouping_key)

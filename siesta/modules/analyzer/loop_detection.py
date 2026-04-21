@@ -89,16 +89,16 @@ def compute_loop_detection(
 
     Returns:
         Dict with keys:
-            total_groups   – number of distinct groups evaluated
-            grouping_key   – effective grouping key(s) used
-            self_loops     – list of loop dicts, sorted by support desc
-            non_self_loops – list of loop dicts, sorted by support desc
+            total_groups   - number of distinct groups evaluated
+            grouping_key   - effective grouping key(s) used
+            self_loops     - list of loop dicts, sorted by support desc
+            non_self_loops - list of loop dicts, sorted by support desc
 
         Each loop dict contains:
-            pattern      – activity name (self-loop) or "A -> B -> ... -> A"
-            support      – fraction of groups containing the loop [0, 1]
-            group_count  – absolute count of groups
-            trace_ids    – list of trace IDs (only when trace_based=True and
+            pattern      - activity name (self-loop) or "A -> B -> ... -> A"
+            support      - fraction of groups containing the loop [0, 1]
+            group_count  - absolute count of groups
+            trace_ids    - list of trace IDs (only when trace_based=True and
                            grouping by trace_id)
     """
     # --- 1. Timestamp pre-filter ---

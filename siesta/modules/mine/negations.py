@@ -49,7 +49,7 @@ def discover_negations(evolved_df: DataFrame, metadata: MetaData,
 
     **Support-only** (``include_trace_lists=False``, default):
         Computes support as ``(total_traces - coex_count) / total_traces``
-        per pair with a single aggregation + join — no cross-join, no
+        per pair with a single aggregation + join - no cross-join, no
         per-trace enumeration.  Returns one row per pair with a
         ``_support_count`` column (trace_id is NULL).
 

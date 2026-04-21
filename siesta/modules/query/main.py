@@ -30,7 +30,7 @@ class QueryConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
     log_name: str = Field("example_log", description="Name of the indexed log")
     storage_namespace: str = Field("siesta", description="Storage namespace")
-    method: str = Field("statistics", description="'statistics', 'detection', or 'exploration'. Ignored by API endpoints — set automatically.")
+    method: str = Field("statistics", description="'statistics', 'detection', or 'exploration'. Ignored by API endpoints - set automatically.")
     query: QueryMethodInput = Field(default_factory=QueryMethodInput, description="Query-specific parameters")
     support_threshold: float = Field(0.0, description="Minimum support fraction [0,1] for results")
 
@@ -116,10 +116,10 @@ class Querying(SiestaModule):
         occurrence counts and support fractions from the pre-built count table.
 
         **Request body (`QueryConfig`):**
-        - `log_name` *(str, default: `"example_log"`)* — name of the indexed log.
-        - `storage_namespace` *(str, default: `"siesta"`)* — storage namespace.
-        - `query.pattern` *(str)* — pattern string, e.g. `"A B"` or `"A B C"`.
-        - `support_threshold` *(float [0,1], default: `0.0`)* — minimum support fraction to include a pair in results.
+        - `log_name` *(str, default: `"example_log"`)* - name of the indexed log.
+        - `storage_namespace` *(str, default: `"siesta"`)* - storage namespace.
+        - `query.pattern` *(str)* - pattern string, e.g. `"A B"` or `"A B C"`.
+        - `support_threshold` *(float [0,1], default: `0.0`)* - minimum support fraction to include a pair in results.
         """
         self.siesta_config = get_system_config()
         self.storage = get_storage_manager()
@@ -149,10 +149,10 @@ class Querying(SiestaModule):
         trace IDs together with the matched positions and an overall support fraction.
 
         **Request body (`QueryConfig`):**
-        - `log_name` *(str, default: `"example_log"`)* — name of the indexed log.
-        - `storage_namespace` *(str, default: `"siesta"`)* — storage namespace.
-        - `query.pattern` *(str)* — pattern to detect, e.g. `"A B* C"` or `"A[pos=?1]+ B[pos=?1+5]"`.
-        - `support_threshold` *(float [0,1], default: `0.0`)* — minimum per-trace support to include a match.
+        - `log_name` *(str, default: `"example_log"`)* - name of the indexed log.
+        - `storage_namespace` *(str, default: `"siesta"`)* - storage namespace.
+        - `query.pattern` *(str)* - pattern to detect, e.g. `"A B* C"` or `"A[pos=?1]+ B[pos=?1+5]"`.
+        - `support_threshold` *(float [0,1], default: `0.0`)* - minimum per-trace support to include a match.
         """
         self.siesta_config = get_system_config()
         self.storage = get_storage_manager()
@@ -182,12 +182,12 @@ class Querying(SiestaModule):
         and ranks them by support. Three modes trade accuracy for speed.
 
         **Request body (`QueryConfig`):**
-        - `log_name` *(str, default: `"example_log"`)* — name of the indexed log.
-        - `storage_namespace` *(str, default: `"siesta"`)* — storage namespace.
-        - `query.pattern` *(str)* — prefix pattern to continue from, e.g. `"A B"`.
-        - `query.explore_mode` *(str, default: `"accurate"`)* — `"accurate"` (full index scan), `"fast"` (count table only), or `"hybrid"` (fast pre-filter + accurate top-k).
-        - `query.explore_k` *(int, default: `10`)* — number of candidates to evaluate accurately in `"hybrid"` mode (`0` = pure fast mode).
-        - `support_threshold` *(float [0,1], default: `0.0`)* — minimum support fraction to include a continuation.
+        - `log_name` *(str, default: `"example_log"`)* - name of the indexed log.
+        - `storage_namespace` *(str, default: `"siesta"`)* - storage namespace.
+        - `query.pattern` *(str)* - prefix pattern to continue from, e.g. `"A B"`.
+        - `query.explore_mode` *(str, default: `"accurate"`)* - `"accurate"` (full index scan), `"fast"` (count table only), or `"hybrid"` (fast pre-filter + accurate top-k).
+        - `query.explore_k` *(int, default: `10`)* - number of candidates to evaluate accurately in `"hybrid"` mode (`0` = pure fast mode).
+        - `support_threshold` *(float [0,1], default: `0.0`)* - minimum support fraction to include a continuation.
         """
         self.siesta_config = get_system_config()
         self.storage = get_storage_manager()

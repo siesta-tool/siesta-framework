@@ -129,7 +129,7 @@ class _DSLPatternBuilder:
         self._counter = 0
         self.top_level_parts: List[PatternStructure] = []
         # (ActivityNode, opencep_name) for each positive (non-negated) event,
-        # in left-to-right traversal order — used for $N VarExpr resolution.
+        # in left-to-right traversal order - used for $N VarExpr resolution.
         self.positive_event_names: List[tuple] = []
  
     def _next_name(self) -> str:
@@ -151,7 +151,7 @@ class _DSLPatternBuilder:
             raise NotImplementedError(
                 "OpenCEP DSL adapter does not support the '?' (OPT) quantifier"
             )
-        return built  # Quantifier.ONE — pass through unchanged
+        return built  # Quantifier.ONE - pass through unchanged
  
     def _build_node(self, node, inside_negation: bool) -> PatternStructure:
         if isinstance(node, ActivityNode):
@@ -306,7 +306,7 @@ def _build_dsl_attr_conditions(positive_event_names: list) -> List:
                 # of the $ref_id-th positive event (1-based).
                 ref_id = val.var_id
                 if ref_id < 1 or ref_id > n:
-                    continue  # out-of-range reference — skip
+                    continue  # out-of-range reference - skip
                 _, ref_name = positive_event_names[ref_id - 1]
                 op     = val.op      # '+' | '-' | None
                 offset = val.offset or 0
@@ -699,7 +699,7 @@ def find_occurrences_dsl(
     pattern_str  : parse_seql DSL pattern string
     returnAll    : if True, return all non-overlapping matches; else first only
     returnSplit  : if True, return (idxs, split_matches) tuples
-                   (split_matches are [] for DSL paths — no main.py AST)
+                   (split_matches are [] for DSL paths - no main.py AST)
     constraints  : optional list of TimeConstraint / GapConstraint objects
     events       : optional list of event dicts (must align with sequence)
     """

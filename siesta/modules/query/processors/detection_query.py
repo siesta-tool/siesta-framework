@@ -129,7 +129,7 @@ def build_exact_pair_predicate(pairs_2d: set[tuple[str, str]]):
     """
     Builds a Spark filter predicate that matches EXACT (source, target) pairs.
 
-    Input schema:  pairs_2d  — set of (source: str, target: str)
+    Input schema:  pairs_2d  - set of (source: str, target: str)
     Applied to df schema:  source: str, target: str, trace_id: str, ...
 
     Avoids the cross-product false-positive problem of:

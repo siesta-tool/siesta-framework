@@ -336,7 +336,7 @@ def _resolve_to_local_path(storage_path: str, spark: SparkSession) -> str:
     if os.path.exists(storage_path):
         return storage_path
 
-    # Remote path — use Hadoop FileSystem API to download
+    # Remote path - use Hadoop FileSystem API to download
     logger = logging.getLogger(__name__)("Preprocess.parse_xml")
     logger.info(f"Downloading remote file to local temp: {storage_path}")
 

@@ -33,46 +33,46 @@ def discover_ngrams(events: DataFrame, trace_labels: DataFrame, n: int = 2) -> D
     Returns
     -------
     pyspark.sql.DataFrame with columns:
-        ngram          : str   — human-readable, e.g. "A -> B -> C"
-        count_1        : int   — distinct label-1 traces containing this n-gram
-        count_0        : int   — distinct label-0 traces containing this n-gram
-        balance        : float — in [-1, 1]
+        ngram          : str   - human-readable, e.g. "A -> B -> C"
+        count_1        : int   - distinct label-1 traces containing this n-gram
+        count_0        : int   - distinct label-0 traces containing this n-gram
+        balance        : float - in [-1, 1]
                                  (count_1/total_1) - (count_0/total_0)
                                  +1 → n-gram appears in ALL label-1 and NO label-0 traces
                                  -1 → n-gram appears in ALL label-0 and NO label-1 traces
                                   0 → equal relative coverage in both groups
-        confidence_1   : float — in [0, 1]
+        confidence_1   : float - in [0, 1]
                                  count_1 / (count_1 + count_0)
-                                 P(label_1 | ngram present) — purity toward label-1.
+                                 P(label_1 | ngram present) - purity toward label-1.
                                   1 → every trace containing this n-gram is label-1
                                   0 → every trace containing this n-gram is label-0
                                 0.5 → n-gram is equally split between both groups
-        confidence_0   : float — in [0, 1]
+        confidence_0   : float - in [0, 1]
                                  count_0 / (count_0 + count_1)
-                                 P(label_0 | ngram present) — purity toward label-0.
+                                 P(label_0 | ngram present) - purity toward label-0.
                                   1 → every trace containing this n-gram is label-0
                                   0 → every trace containing this n-gram is label-1
-        support_1      : float — in [0, 1]
+        support_1      : float - in [0, 1]
                                  count_1 / total_1
-                                 P(ngram | label_1) — fraction of label-1 traces
+                                 P(ngram | label_1) - fraction of label-1 traces
                                  that contain this n-gram.
-        support_0      : float — in [0, 1]
+        support_0      : float - in [0, 1]
                                  count_0 / total_0
-                                 P(ngram | label_0) — fraction of label-0 traces
+                                 P(ngram | label_0) - fraction of label-0 traces
                                  that contain this n-gram.
-        support        : float — in [0, 1]
+        support        : float - in [0, 1]
                                  (count_1 + count_0) / (total_1 + total_0)
                                  Global frequency of the n-gram across ALL traces,
                                  regardless of label.  High support = common pattern.
-        direction      : str   — "label_1" if balance > 0,
+        direction      : str   - "label_1" if balance > 0,
                                  "label_0" if balance < 0,
                                  "neutral"  if balance == 0
     """
 
     # ------------------------------------------------------------------ #
-    # Step 1 – count total traces per label
+    # Step 1 - count total traces per label
     # ------------------------------------------------------------------ #
-    # Total traces per label — needed to normalize balance, confidence_0, and support
+    # Total traces per label - needed to normalize balance, confidence_0, and support
     label_counts = (
         trace_labels
         .groupBy("label")
@@ -85,7 +85,7 @@ def discover_ngrams(events: DataFrame, trace_labels: DataFrame, n: int = 2) -> D
     total_all = total_1 + total_0
 
     # ------------------------------------------------------------------ #
-    # Step 2 – collect ordered activity sequences per trace
+    # Step 2 - collect ordered activity sequences per trace
     # ------------------------------------------------------------------ #
     window_spec = Window.partitionBy("trace_id").orderBy("start_timestamp")
 
@@ -120,7 +120,7 @@ def discover_ngrams(events: DataFrame, trace_labels: DataFrame, n: int = 2) -> D
     )
 
     # ------------------------------------------------------------------ #
-    # Step 3 – extract n-grams
+    # Step 3 - extract n-grams
     # ------------------------------------------------------------------ #
     ngram_schema = ArrayType(ArrayType(StringType()))
 
@@ -140,7 +140,7 @@ def discover_ngrams(events: DataFrame, trace_labels: DataFrame, n: int = 2) -> D
     )
 
     # ------------------------------------------------------------------ #
-    # Step 4 – compute balance, confidence_1, confidence_0, and support
+    # Step 4 - compute balance, confidence_1, confidence_0, and support
     # ------------------------------------------------------------------ #
     balance_df = (
         ngrams_df
@@ -157,7 +157,7 @@ def discover_ngrams(events: DataFrame, trace_labels: DataFrame, n: int = 2) -> D
             "balance",
             (F.col("count_1") / F.lit(total_1)) - (F.col("count_0") / F.lit(total_0))
         )
-        # confidence_1: P(label_1 | ngram present) — purity toward label-1
+        # confidence_1: P(label_1 | ngram present) - purity toward label-1
         #   count_1 / (count_1 + count_0)  →  [0, 1]
         #   1.0 = every trace containing this n-gram is label-1
         #   0.0 = every trace containing this n-gram is label-0
@@ -165,7 +165,7 @@ def discover_ngrams(events: DataFrame, trace_labels: DataFrame, n: int = 2) -> D
             "confidence_1",
             F.col("count_1") / (F.col("count_1") + F.col("count_0"))
         )
-        # confidence_0: P(label_0 | ngram present) — purity toward label-0
+        # confidence_0: P(label_0 | ngram present) - purity toward label-0
         #   count_0 / (count_0 + count_1)  →  [0, 1]
         #   1.0 = every trace containing this n-gram is label-0
         #   0.0 = every trace containing this n-gram is label-1
@@ -173,7 +173,7 @@ def discover_ngrams(events: DataFrame, trace_labels: DataFrame, n: int = 2) -> D
             "confidence_0",
             F.col("count_0") / (F.col("count_0") + F.col("count_1"))
         )
-        # support_1: P(ngram | label_1) — fraction of label-1 traces containing this n-gram
+        # support_1: P(ngram | label_1) - fraction of label-1 traces containing this n-gram
         #   count_1 / total_1  →  [0, 1]
         #   1.0 = n-gram appears in every label-1 trace
         #   0.0 = n-gram never appears in any label-1 trace
@@ -181,7 +181,7 @@ def discover_ngrams(events: DataFrame, trace_labels: DataFrame, n: int = 2) -> D
             "support_1",
             F.col("count_1") / F.lit(total_1)
         )
-        # support_0: P(ngram | label_0) — fraction of label-0 traces containing this n-gram
+        # support_0: P(ngram | label_0) - fraction of label-0 traces containing this n-gram
         #   count_0 / total_0  →  [0, 1]
         #   1.0 = n-gram appears in every label-0 trace
         #   0.0 = n-gram never appears in any label-0 trace
@@ -306,7 +306,7 @@ def save_ngram_results(
         raise ValueError(f"Invalid direction '{direction}'. Choose from: 'label_1', 'label_0', 'neutral'.")
 
     # ------------------------------------------------------------------ #
-    # Apply filters — pushed into the DAG, executed on cluster
+    # Apply filters - pushed into the DAG, executed on cluster
     # ------------------------------------------------------------------ #
     fields = ["ngram", "count_1", "count_0", "balance", "confidence_1", "confidence_0", "support_1", "support_0", "support", "direction"]
     write_df = balance_df.select(*fields)
@@ -408,7 +408,7 @@ def create_network(input: str | pd.DataFrame | DataFrame) -> str:
     ]:
         if col not in df.columns:
             df[col] = default
-            print(f"[warn] Column '{col}' not found in CSV — defaulting to NaN. "
+            print(f"[warn] Column '{col}' not found in CSV - defaulting to NaN. "
                     f"Re-run discover_ngrams() to get real values.")
 
     # ── Auto-detect gram length ───────────────────────────────────────────────────
@@ -512,13 +512,13 @@ def create_network(input: str | pd.DataFrame | DataFrame) -> str:
     # ── Build vis-network data ────────────────────────────────────────────────────
 
     # -- Nodes --
-    # Node size →  max support of any connected edge  (mapped to 20–55 px)
+    # Node size →  max support of any connected edge  (mapped to 20-55 px)
     max_supp = max(node_support_max.values()) if node_support_max else 1.0
     max_supp = max_supp if max_supp > 0 else 1.0
 
     def node_size(label: str) -> int:
         raw = node_support_max.get(label, 0.0) / max_supp
-        return int(20 + raw * 35)   # 20 – 55 px
+        return int(20 + raw * 35)   # 20 - 55 px
 
     vis_nodes = []
     for label, nid in nodes_seen.items():
@@ -793,12 +793,12 @@ def create_network(input: str | pd.DataFrame | DataFrame) -> str:
 
     <div class="controls">
         <div class="ctrl-group">
-        <label title="confidence₁ = count_1 / (count_1 + count_0) — P(label_1 | ngram present)">
+        <label title="confidence₁ = count_1 / (count_1 + count_0) - P(label_1 | ngram present)">
             Min conf₁
             <input type="range" id="conf1-slider" min="0" max="100" value="0" step="1">
             <span id="conf1-val">0.00</span>
         </label>
-        <label title="confidence₀ = count_0 / (count_0 + count_1) — P(label_0 | ngram present)">
+        <label title="confidence₀ = count_0 / (count_0 + count_1) - P(label_0 | ngram present)">
             Min conf₀
             <input type="range" id="conf0-slider" min="0" max="100" value="0" step="1">
             <span id="conf0-val">0.00</span>
@@ -806,12 +806,12 @@ def create_network(input: str | pd.DataFrame | DataFrame) -> str:
         </div>
         <div class="sep"></div>
         <div class="ctrl-group">
-        <label title="support₁ = count_1 / total_1 — fraction of label-1 traces containing this ngram">
+        <label title="support₁ = count_1 / total_1 - fraction of label-1 traces containing this ngram">
             Min sup₁
             <input type="range" id="sup1-slider" min="0" max="100" value="0" step="1">
             <span id="sup1-val">0.00</span>
         </label>
-        <label title="support₀ = count_0 / total_0 — fraction of label-0 traces containing this ngram">
+        <label title="support₀ = count_0 / total_0 - fraction of label-0 traces containing this ngram">
             Min sup₀
             <input type="range" id="sup0-slider" min="0" max="100" value="0" step="1">
             <span id="sup0-val">0.00</span>
@@ -819,12 +819,12 @@ def create_network(input: str | pd.DataFrame | DataFrame) -> str:
         </div>
         <div class="sep"></div>
         <div class="ctrl-group">
-        <label title="balance = (count_1/total_1) − (count_0/total_0)  ∈ [−1, 1]">
+        <label title="balance = (count_1/total_1) - (count_0/total_0)  ∈ [-1, 1]">
             Min |balance|
             <input type="range" id="bal-slider" min="0" max="100" value="0" step="1">
             <span id="bal-val">0.00</span>
         </label>
-        <label title="global support = (count_1+count_0)/(total_1+total_0) — fraction of all traces">
+        <label title="global support = (count_1+count_0)/(total_1+total_0) - fraction of all traces">
             Min global sup
             <input type="range" id="sup-slider" min="0" max="{support_max_pct}" value="0" step="1">
             <span id="sup-val">0.00</span>
@@ -860,7 +860,7 @@ def create_network(input: str | pd.DataFrame | DataFrame) -> str:
             <h2>|Balance| → opacity</h2>
             <div class="enc-guide">
             <div class="enc-row"><div class="line-solid"></div>  Strong (≥0.6)</div>
-            <div class="enc-row"><div class="line-medium"></div> Moderate (0.3–0.6)</div>
+            <div class="enc-row"><div class="line-medium"></div> Moderate (0.3-0.6)</div>
             <div class="enc-row"><div class="line-dashed"></div> Weak &lt;0.3 (dashed)</div>
             </div>
         </div>
@@ -869,7 +869,7 @@ def create_network(input: str | pd.DataFrame | DataFrame) -> str:
             <h2>confidence₁ → width</h2>
             <div class="enc-guide">
             <div class="enc-row"><div class="wline" style="height:7px"></div> High (≥0.8)</div>
-            <div class="enc-row"><div class="wline" style="height:4px"></div> Medium (0.4–0.8)</div>
+            <div class="enc-row"><div class="wline" style="height:4px"></div> Medium (0.4-0.8)</div>
             <div class="enc-row"><div class="wline" style="height:1px"></div> Low (&lt;0.4)</div>
             </div>
         </div>

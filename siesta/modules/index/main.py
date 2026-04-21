@@ -82,7 +82,7 @@ class Indexing(SiestaModule):
     def api_run(
         self,
         index_config: Annotated[str, Form(
-            description="JSON configuration object — see endpoint description for all supported fields.",
+            description="JSON configuration object - see endpoint description for all supported fields.",
             openapi_examples={
                 "batch": {
                     "summary": "Batch indexing",
@@ -104,20 +104,20 @@ class Indexing(SiestaModule):
         collector instead.
 
         **Form fields:**
-        - `log_file` *(file, optional)* — log file to index (XES, CSV, or JSON). Omit for streaming mode.
-        - `index_config` *(JSON string)* — configuration; fields below.
+        - `log_file` *(file, optional)* - log file to index (XES, CSV, or JSON). Omit for streaming mode.
+        - `index_config` *(JSON string)* - configuration; fields below.
 
         **Config fields (`index_config`):**
-        - `log_name` *(str, default: `"example_log"`)* — name for the log in storage.
-        - `storage_namespace` *(str, default: `"siesta"`)* — storage namespace / bucket prefix.
-        - `clear_existing` *(bool, default: `false`)* — drop and rebuild the existing index.
-        - `enable_streaming` *(bool, default: `false`)* — start a Kafka streaming collector instead of batch processing.
-        - `kafka_topic` *(str, default: `"example_log"`)* — Kafka topic to consume in streaming mode.
-        - `lookback` *(str, default: `"7d"`)* — lookback window for incremental indexing (e.g. `"7d"`, `"30d"`).
-        - `field_mappings` *(object)* — per-format mapping of Event fields to source column names.
+        - `log_name` *(str, default: `"example_log"`)* - name for the log in storage.
+        - `storage_namespace` *(str, default: `"siesta"`)* - storage namespace / bucket prefix.
+        - `clear_existing` *(bool, default: `false`)* - drop and rebuild the existing index.
+        - `enable_streaming` *(bool, default: `false`)* - start a Kafka streaming collector instead of batch processing.
+        - `kafka_topic` *(str, default: `"example_log"`)* - Kafka topic to consume in streaming mode.
+        - `lookback` *(str, default: `"7d"`)* - lookback window for incremental indexing (e.g. `"7d"`, `"30d"`).
+        - `field_mappings` *(object)* - per-format mapping of Event fields to source column names.
           Formats: `xes`, `csv`, `json`. Use `"*"` in `attributes` list to capture all unmapped fields.
-        - `trace_level_fields` *(list, default: `["trace_id"]`)* — fields extracted at trace level.
-        - `timestamp_fields` *(list, default: `["start_timestamp"]`)* — fields to parse as Unix epoch seconds.
+        - `trace_level_fields` *(list, default: `["trace_id"]`)* - fields extracted at trace level.
+        - `timestamp_fields` *(list, default: `["start_timestamp"]`)* - fields to parse as Unix epoch seconds.
         """
         logger.info(f"{self.name} is running via API request.")
 
