@@ -14,14 +14,16 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 from confluent_kafka import Producer
 
-# Import default config from SystemModel
+# Import default config from SystemModel and index module
 try:
-    from siesta.model.SystemModel import DEFAULT_SYSTEM_CONFIG, DEFAULT_INDEX_CONFIG
+    from siesta.core.config import DEFAULT_SYSTEM_CONFIG
+    from siesta.modules.index.main import DEFAULT_INDEX_CONFIG
     DEFAULT_SYSTEM_CONFIG = DEFAULT_SYSTEM_CONFIG | DEFAULT_INDEX_CONFIG
 except ImportError:
     # Fallback if running from different location
     sys.path.insert(0, str(Path(__file__).parent.parent))
-    from model.SystemModel import DEFAULT_SYSTEM_CONFIG, DEFAULT_PREPROCESS_CONFIG
+    from core.config import DEFAULT_SYSTEM_CONFIG
+    from modules.index.main import DEFAULT_INDEX_CONFIG
     DEFAULT_SYSTEM_CONFIG = DEFAULT_SYSTEM_CONFIG | DEFAULT_INDEX_CONFIG
 
 def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:

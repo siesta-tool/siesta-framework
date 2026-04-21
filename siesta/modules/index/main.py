@@ -4,7 +4,7 @@ from typing import Annotated, Any, Dict
 from fastapi import Form, UploadFile
 from siesta.core.sparkManager import get_spark_session, cleanup as spark_cleanup
 from siesta.model.StorageModel import MetaData
-from siesta.model.SystemModel import DEFAULT_INDEX_CONFIG
+from pydantic import BaseModel, ConfigDict, Field
 from siesta.core.interfaces import SiestaModule, StorageManager
 from siesta.core.config import get_system_config
 from siesta.core.logger import timed
@@ -17,9 +17,47 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+class IndexConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    log_name: str = Field("example_log", description="Name for the log in storage")
+    log_path: str = Field("../datasets/test.xes", description="Path to the local log file (XES, CSV, or JSON)")
+    storage_namespace: str = Field("siesta", description="Storage namespace / bucket prefix")
+    clear_existing: bool = Field(False, description="Drop and rebuild the existing index")
+    enable_streaming: bool = Field(False, description="Start a Kafka streaming collector instead of batch processing")
+    kafka_topic: str = Field("example_log", description="Kafka topic to consume in streaming mode")
+    lookback: str = Field("7d", description="Lookback window for incremental indexing, e.g. '7d', '30d'")
+    field_mappings: dict = Field(default_factory=lambda: {
+        "xes": {
+            "activity": "concept:name",
+            "trace_id": "concept:name",
+            "position": None,
+            "start_timestamp": "time:timestamp",
+            "attributes": ["*"],
+        },
+        "csv": {
+            "activity": "activity",
+            "trace_id": "trace_id",
+            "position": "position",
+            "start_timestamp": "timestamp",
+            "attributes": ["resource", "cost"],
+        },
+        "json": {
+            "activity": "activity",
+            "trace_id": "caseID",
+            "position": "position",
+            "start_timestamp": "Timestamp",
+        },
+    }, description="Per-format mapping of Event fields to source column names")
+    trace_level_fields: list[str] = Field(default_factory=lambda: ["trace_id"], description="Fields extracted at trace level")
+    timestamp_fields: list[str] = Field(default_factory=lambda: ["start_timestamp"], description="Fields to parse as Unix epoch seconds")
+
+
+DEFAULT_INDEX_CONFIG: Dict[str, Any] = IndexConfig().model_dump()
+
+
 class Indexing(SiestaModule):
         
-    name = "indexing"
+    name = "indexer"
     version = "1.2.0"
     spark: SparkSession
     storage: StorageManager
@@ -41,7 +79,46 @@ class Indexing(SiestaModule):
         logger.info("Startup complete.")
 
     
-    def api_run(self, index_config: Annotated[str, Form()], log_file: UploadFile | None = None) -> Any:
+    def api_run(
+        self,
+        index_config: Annotated[str, Form(
+            description="JSON configuration object — see endpoint description for all supported fields.",
+            openapi_examples={
+                "batch": {
+                    "summary": "Batch indexing",
+                    "value": '{"log_name": "example_log", "storage_namespace": "siesta", "clear_existing": false, "field_mappings": {"csv": {"trace_id": "case:concept:name", "activity": "concept:name", "start_timestamp": "time:timestamp"}}}',
+                },
+                "streaming": {
+                    "summary": "Kafka streaming",
+                    "value": '{"log_name": "example_log", "storage_namespace": "siesta", "enable_streaming": true, "kafka_topic": "example_log"}',
+                },
+            },
+        )],
+        log_file: UploadFile | None = None,
+    ) -> Any:
+        """Index an event log from a file upload or start a Kafka streaming collector.
+
+        Parses the uploaded log (XES, CSV, or JSON) and builds the sequence table,
+        activity index, pairs index, and count table in storage. When no file is
+        provided and `enable_streaming` is `true`, starts a Kafka-based streaming
+        collector instead.
+
+        **Form fields:**
+        - `log_file` *(file, optional)* — log file to index (XES, CSV, or JSON). Omit for streaming mode.
+        - `index_config` *(JSON string)* — configuration; fields below.
+
+        **Config fields (`index_config`):**
+        - `log_name` *(str, default: `"example_log"`)* — name for the log in storage.
+        - `storage_namespace` *(str, default: `"siesta"`)* — storage namespace / bucket prefix.
+        - `clear_existing` *(bool, default: `false`)* — drop and rebuild the existing index.
+        - `enable_streaming` *(bool, default: `false`)* — start a Kafka streaming collector instead of batch processing.
+        - `kafka_topic` *(str, default: `"example_log"`)* — Kafka topic to consume in streaming mode.
+        - `lookback` *(str, default: `"7d"`)* — lookback window for incremental indexing (e.g. `"7d"`, `"30d"`).
+        - `field_mappings` *(object)* — per-format mapping of Event fields to source column names.
+          Formats: `xes`, `csv`, `json`. Use `"*"` in `attributes` list to capture all unmapped fields.
+        - `trace_level_fields` *(list, default: `["trace_id"]`)* — fields extracted at trace level.
+        - `timestamp_fields` *(list, default: `["start_timestamp"]`)* — fields to parse as Unix epoch seconds.
+        """
         logger.info(f"{self.name} is running via API request.")
 
         self.siesta_config = get_system_config()

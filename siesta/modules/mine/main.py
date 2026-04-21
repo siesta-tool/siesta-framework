@@ -1,10 +1,9 @@
 import argparse
 import datetime
 from pathlib import Path
-from typing import Annotated, Any, Dict
-from fastapi import Form
+from typing import Any, Dict
+from pydantic import BaseModel, ConfigDict, Field
 from siesta.model.StorageModel import MetaData
-from siesta.model.SystemModel import DEFAULT_MINING_CONFIG
 from siesta.core.interfaces import SiestaModule, StorageManager
 from siesta.core.config import get_system_config
 from siesta.core.logger import timed
@@ -23,9 +22,26 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+class MiningConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    log_name: str = Field("example_log", description="Name of the indexed log")
+    storage_namespace: str = Field("siesta", description="Storage namespace")
+    storage_type: str = Field("s3", description="Storage backend type")
+    categories: list[str] = Field(["*"], description="Constraint categories: 'positional', 'existential', 'ordered', 'unordered', 'negation', or '*' for all")
+    grouping: str = Field("trace", description="Grouping strategy: 'trace' or 'window'")
+    window_size: int = Field(30, description="Position-based window size when grouping='window'")
+    support_threshold: float = Field(0.0, description="Minimum support fraction [0,1] to retain constraints")
+    include_trace_lists: bool = Field(False, description="Append a pipe-delimited trace_ids column per constraint")
+    force_recompute: bool = Field(False, description="Remine all traces ignoring previous mining state")
+    output_path: str = Field("output/example_log", description="Local path prefix for the output CSV")
+
+
+DEFAULT_MINING_CONFIG: Dict[str, Any] = MiningConfig().model_dump()
+
+
 class Mining(SiestaModule):
         
-    name = "mining"
+    name = "miner"
     version = "1.0.0"
     spark: SparkSession
     storage: StorageManager
@@ -46,12 +62,31 @@ class Mining(SiestaModule):
     def startup(self):
         logger.info("Startup complete.")
 
-    def api_run(self, mining_config: Annotated[str, Form()]) -> Any:
+    def api_run(self, mining_config: MiningConfig) -> Any:
+        """Mine declarative constraints from an indexed event log.
+
+        Performs incremental constraint discovery across the selected categories. Only
+        traces that evolved since the last mining run are processed unless
+        `force_recompute` is set. Results are written to a CSV file and returned as a
+        list of rows.
+
+        **Config fields:**
+        - `log_name` *(str, default: `"example_log"`)* — name of the indexed log. **Required.**
+        - `storage_namespace` *(str, default: `"siesta"`)* — storage namespace.
+        - `categories` *(list, default: `["*"]`)* — constraint categories to mine.
+          `"*"` = all. Options: `"positional"`, `"existential"`, `"ordered"`, `"unordered"`, `"negation"`.
+        - `grouping` *(str, default: `"trace"`)* — grouping strategy: `"trace"` or `"window"`.
+        - `window_size` *(int, default: `30`)* — position-based window size when `grouping="window"`.
+        - `support_threshold` *(float [0,1], default: `0.0`)* — minimum support fraction to retain constraints.
+        - `include_trace_lists` *(bool, default: `false`)* — append a pipe-delimited `trace_ids` column per constraint.
+        - `force_recompute` *(bool, default: `false`)* — remine all traces ignoring previous mining state.
+        - `output_path` *(str, default: `"output/example_log"`)* — local path prefix for the output CSV.
+        """
         logger.info(f"{self.name} is running via API request.")
 
         self.siesta_config = get_system_config()
         self.storage = get_storage_manager()
-        self._load_mining_config(json.loads(mining_config))
+        self._load_mining_config(mining_config.model_dump())
 
         logger.info(f"Running mining with args: {mining_config}")
         

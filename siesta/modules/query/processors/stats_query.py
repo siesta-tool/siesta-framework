@@ -1,4 +1,4 @@
-from siesta.model.SystemModel import Query_Config, Pattern
+from typing import Dict, Any
 from siesta.core.sparkManager import get_spark_session
 from siesta.core.storageFactory import get_storage_manager
 from siesta.modules.query.parse_seql import extract_responded_pairs
@@ -6,7 +6,7 @@ from siesta.model.StorageModel import MetaData
 
 
 
-def process_stats_query(config: Query_Config, metadata: MetaData) -> list[any]|None|str:
+def process_stats_query(config: Dict[str, Any], metadata: MetaData) -> list[any]|None|str:
     """
     Splits the query events in pairs and retrieves the statistics for each pair from the count table.
     """

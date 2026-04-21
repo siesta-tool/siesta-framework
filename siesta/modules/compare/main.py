@@ -3,10 +3,9 @@ import datetime
 import csv
 import json
 from pathlib import Path
-from typing import Annotated, Any, Dict
-from fastapi import Form
+from typing import Any, Dict
+from pydantic import BaseModel, ConfigDict, Field
 from siesta.model.StorageModel import MetaData
-from siesta.model.SystemModel import DEFAULT_COMPARATOR_CONFIG
 from siesta.core.interfaces import SiestaModule, StorageManager
 from siesta.core.config import get_system_config
 from siesta.core.logger import timed
@@ -20,7 +19,23 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-class Comparator(SiestaModule):
+class ComparatorConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    log_name: str = Field("example_log", description="Name of the indexed log")
+    storage_namespace: str = Field("siesta", description="Storage namespace")
+    storage_type: str = Field("s3", description="Storage backend type")
+    method: str = Field("ngrams", description="Comparison method: 'ngrams', 'rare_rules', or 'targeted_rules'")
+    method_params: dict = Field(default_factory=lambda: {"n": 2}, description="Method-specific params. ngrams: {n}. targeted_rules: {target_label, filtering_support}")
+    separating_key: str = Field("activity", description="Column used to label traces into groups")
+    separating_groups: list[list[str]] = Field(default_factory=list, description="Group definitions, e.g. [['fail','error']] splits into listed values vs. all others")
+    support_threshold: float = Field(0.0, description="Minimum support fraction [0,1] for results")
+    output_path: str = Field("output/example_log", description="Local path prefix for the output file")
+
+
+DEFAULT_COMPARATOR_CONFIG: Dict[str, Any] = ComparatorConfig().model_dump()
+
+
+class Comparing(SiestaModule):
         
     name = "comparator"
     version = "1.0.0"
@@ -43,12 +58,34 @@ class Comparator(SiestaModule):
     def startup(self):
         logger.info("Startup complete.")
 
-    def api_run(self, comparator_config: Annotated[str, Form()]) -> Any:
+    def api_run(self, comparator_config: ComparatorConfig) -> Any:
+        """Compare groups of traces using statistical or rule-based methods.
+
+        Three methods available via the `method` field:
+        - **`ngrams`**: Compare n-gram frequency distributions between the defined groups.
+        - **`rare_rules`**: Discover directly-following rules that are rare in one group but frequent in another.
+        - **`targeted_rules`**: Discover rules strongly associated with a target group.
+
+        Results are written to a local file (CSV for `ngrams`, JSON for rule methods) and returned.
+
+        **Config fields:**
+        - `log_name` *(str, default: `"example_log"`)* — name of the indexed log. **Required.**
+        - `storage_namespace` *(str, default: `"siesta"`)* — storage namespace.
+        - `method` *(str, default: `"ngrams"`)* — `"ngrams"`, `"rare_rules"`, or `"targeted_rules"`.
+        - `method_params` *(object, default: `{"n": 2}`)* — method-specific parameters.
+          `ngrams`: `n` (int) = gram length.
+          `targeted_rules`: `target_label` (int, default: `1`), `filtering_support` (float, default: `1`).
+        - `separating_key` *(str, default: `"activity"`)* — column used to label traces into groups.
+        - `separating_groups` *(list[list[str]])* — group definitions, e.g. `[["fail", "error"]]`
+          splits into the listed values vs. all remaining traces.
+        - `support_threshold` *(float [0,1], default: `0.0`)* — minimum support fraction for results.
+        - `output_path` *(str, default: `"../output/example_log"`)* — local path prefix for the output file.
+        """
         logger.info(f"{self.name} is running via API request.")
 
         self.siesta_config = get_system_config()
         self.storage = get_storage_manager()
-        self._load_comparator_config(json.loads(comparator_config))
+        self._load_comparator_config(comparator_config.model_dump())
 
         logger.info(f"Running comparator with args: {self.comparator_config}")
         

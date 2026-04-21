@@ -1,0 +1,16 @@
+{
+  "log_name": "groundtruth",
+  "storage_namespace": "siesta",
+  "method": "loop_detection",
+
+  "support_threshold": null,
+  "filter_out": false,
+  "output_path": "output/groundtruth",
+
+  "grouping_key": null,
+  "grouping_value": null,
+  "min_timestamp": null,
+  "top_k": null,
+  "trace_based": false,
+  "duration_mode": "group"
+}

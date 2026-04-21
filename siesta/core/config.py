@@ -8,10 +8,31 @@ multiple layers.
 
 from typing import Dict, Any, Optional
 from pathlib import Path
+from pydantic import BaseModel, ConfigDict, Field
 import json
-from siesta.model.SystemModel import DEFAULT_SYSTEM_CONFIG
 import logging
 logger = logging.getLogger(__name__)
+
+
+class SystemConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    storage_type: str = Field("s3", description="Storage backend type")
+    api: dict = Field(default_factory=lambda: {"host": "0.0.0.0", "port": 8000}, description="API host and port")
+    s3_access_key: str = Field("minioadmin", description="S3/MinIO access key")
+    s3_secret_key: str = Field("minioadmin", description="S3/MinIO secret key")
+    s3_endpoint: str = Field("http://localhost:9000", description="S3/MinIO endpoint URL")
+    s3_region: str = Field("us-east-1", description="S3/MinIO region")
+    empty_namespace: bool = Field(False, description="Clear the storage namespace on startup")
+    enable_streaming: bool = Field(True, description="Enable Kafka streaming support")
+    enable_timing: bool = Field(True, description="Log execution timing for timed operations")
+    spark_master: str = Field("spark://localhost:7077", description="Spark master URL")
+    spark_app_name: str = Field("SiestaFramework", description="Spark application name")
+    kafka_bootstrap_servers: str = Field("localhost:9092", description="Kafka bootstrap servers")
+    raw_events_dir: str = Field("raw_events", description="Directory for raw streaming events")
+    checkpoint_dir: str = Field("checkpoints", description="Directory for Spark streaming checkpoints")
+
+
+DEFAULT_SYSTEM_CONFIG: Dict[str, Any] = SystemConfig().model_dump()
 
 _config: Optional[Dict[str, Any]] = None
 

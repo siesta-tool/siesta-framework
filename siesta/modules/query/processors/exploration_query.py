@@ -1,10 +1,9 @@
 import time
-from typing import Optional
+from typing import Any, Dict, Optional
 from siesta.core.logger import timed
 from siesta.core.sparkManager import get_spark_session
 from siesta.core.storageFactory import get_storage_manager
 from siesta.model.StorageModel import MetaData
-from siesta.model.SystemModel import Query_Config, Pattern
 from pyspark.sql import DataFrame, functions as F
 from pyspark.sql.functions import col
 from siesta.modules.query.parse_seql import split_pattern_to_list
@@ -14,7 +13,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def explore(pattern_suffix: str, config: Query_Config, metadata: MetaData,  candidate_targets: Optional[list] = None) -> DataFrame:
+def explore(pattern_suffix: str, config: Dict[str, Any], metadata: MetaData,  candidate_targets: Optional[list] = None) -> DataFrame:
     """
     Retrieves candidate target activities that follow the given pattern suffix and calculates their support.
     
@@ -58,7 +57,7 @@ def explore(pattern_suffix: str, config: Query_Config, metadata: MetaData,  cand
     return result_df
 
 
-def accurate_exploration(config: Query_Config, metadata: MetaData) -> DataFrame:
+def accurate_exploration(config: Dict[str, Any], metadata: MetaData) -> DataFrame:
     """
     Retrieves candidate target activities based on the last activity in the current pattern 
     and calculates their support using the detection query.
@@ -76,7 +75,7 @@ def accurate_exploration(config: Query_Config, metadata: MetaData) -> DataFrame:
     return explore(pattern_suffix, config, metadata)
 
 
-def fast_exploration(config: Query_Config, metadata: MetaData) -> DataFrame:
+def fast_exploration(config: Dict[str, Any], metadata: MetaData) -> DataFrame:
     """
     Retrieves candidate target activities based on the last activity in the current pattern 
     and estimates their support using pre-aggregated counts.
@@ -116,7 +115,7 @@ def fast_exploration(config: Query_Config, metadata: MetaData) -> DataFrame:
     return propositions_df
 
 
-def hybrid_exploration(config: Query_Config, metadata: MetaData) -> DataFrame:
+def hybrid_exploration(config: Dict[str, Any], metadata: MetaData) -> DataFrame:
     # Extract the current pattern from the config
     pattern_data = split_pattern_to_list(config.get("query", {}).get("pattern", ""))
     activities_pattern = list(map(lambda x: x.get("label"), pattern_data))
@@ -133,7 +132,7 @@ def hybrid_exploration(config: Query_Config, metadata: MetaData) -> DataFrame:
         return explore(pattern_suffix, config, metadata, candidate_targets=top_k)
     
 
-def process_exploration_query(config: Query_Config, metadata: MetaData) -> DataFrame:
+def process_exploration_query(config: Dict[str, Any], metadata: MetaData) -> DataFrame:
     """
     Process an exploration query based on the specified method in the config.
     

@@ -3,7 +3,7 @@ from siesta.core.logger import timed
 from siesta.core.sparkManager import get_spark_session
 from siesta.core.storageFactory import get_storage_manager
 from siesta.model.StorageModel import MetaData
-from siesta.model.SystemModel import Query_Config, Pattern
+from typing import Dict, Any
 from pyspark.sql import functions as F
 from pyspark.sql.functions import col
 from siesta.modules.query.parse_seql import Quantifier as SeqlQuantifier, RespondedPair, extract_info_pairs, parse_pattern, extract_responded_pairs
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 pattern = ""
 
 
-def detect(pattern: str, config: Query_Config, metadata: MetaData):
+def detect(pattern: str, config: Dict[str, Any], metadata: MetaData):
     storage = get_storage_manager()
     support_threshold = config.get("support_threshold", 0.0)
 
@@ -158,7 +158,7 @@ def build_exact_pair_predicate(pairs_2d: set[tuple[str, str]]):
     return reduce(lambda a, b: a | b, clauses)
 
 
-def process_detection_query(config: Query_Config, metadata: MetaData):
+def process_detection_query(config: Dict[str, Any], metadata: MetaData):
     new_pattern = config.get("query", {}).get("pattern", "")
     support_threshold = config.get("support_threshold", 0.0)
 
