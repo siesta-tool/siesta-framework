@@ -6,8 +6,8 @@ from siesta.model.StorageModel import MetaData
 from siesta.model.SystemModel import Query_Config, Pattern
 from pyspark.sql import functions as F
 from pyspark.sql.functions import col
-from siesta.modules.Query.parse_seql import Quantifier as SeqlQuantifier, RespondedPair, extract_info_pairs, parse_pattern, extract_responded_pairs
-from siesta.modules.Query.CEP_adapter import find_occurrences_dsl
+from siesta.modules.query.parse_seql import Quantifier as SeqlQuantifier, RespondedPair, extract_info_pairs, parse_pattern, extract_responded_pairs
+from siesta.modules.query.CEP_adapter import find_occurrences_dsl
 import json
 import logging
 from functools import reduce

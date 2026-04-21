@@ -3,7 +3,7 @@
 Siesta is a Spark-based process mining and querying framework for event logs.
 It can run as:
 - an API server (FastAPI), or
-- module-oriented CLI jobs (preprocess, mining, query).
+- module-oriented CLI jobs (Index, mining, query).
 
 Core data assumptions:
 - `trace_id` is a string
@@ -12,7 +12,7 @@ Core data assumptions:
 
 ## What each module does
 
-- `preprocess`: ingests batch/stream events and builds storage indexes/tables.
+- `Index`: ingests batch/stream events and builds storage indexes/tables.
 - `mining`: discovers constraints from stored traces.
 - `query`: executes statistics/detection/exploration queries over indexed logs.
 
@@ -24,7 +24,7 @@ Core data assumptions:
 - `main.py`: top-level entrypoint.
 - `siesta/core`: framework bootstrapping (config, Spark, storage factory, interfaces).
 - `siesta/model`: shared schemas and typed config/data models (system, storage, mining/event structures).
-- `siesta/modules`: feature modules (`Preprocess`, `Mining`, `Query`).
+- `siesta/modules`: feature modules (`Index`, `Mining`, `Querying`).
 - `siesta/storage`: storage implementations (currently S3/MinIO-based).
 - `config`: sample runtime and module config JSON files.
 - `docker-compose.yml` + `siesta/dockerbase`: API + Spark + MinIO + Kafka stack.
@@ -63,9 +63,9 @@ python3 main.py --config config/siesta.config.json
 ```
 
 API routes are auto-registered from modules and exposed as:
-- `POST /preprocessor/run`
-- `POST /miner/run`
-- `POST /query/run`
+- `POST /indexing/run`
+- `POST /mining/run`
+- `POST /querying/run`
 
 ### 2. CLI module mode
 
@@ -78,13 +78,13 @@ python3 main.py --config <system_config.json> <module> <module_args>
 Examples:
 
 ```bash
-# Preprocess (batch/stream setup)
-python3 main.py --config config/siesta.config.json preprocess --preprocess_config config/preprocess.config.json
+# Index (batch/stream setup)
+python3 main.py --config config/siesta.config.json Index --index_config config/Index.config.json
 
 # Mining
 python3 main.py --config config/siesta.config.json mining --mining_config config/mining.config.json
 
-# Query
+# Querying
 python3 main.py --config config/siesta.config.json query --query_config config/query.config.json
 ```
 
@@ -92,7 +92,7 @@ python3 main.py --config config/siesta.config.json query --query_config config/q
 
 - `config/siesta.config.json`: local host-oriented system config.
 - `config/siesta.docker.config.json`: container-network hostnames (`minio`, `kafka`, `spark-master`).
-- `config/preprocess.config.json`: ingestion and field mappings.
+- `config/Index.config.json`: ingestion and field mappings.
 - `config/mining.config.json`: mining categories, thresholds, output path.
 - `config/query.config.json`: method and query payload.
 
@@ -144,6 +144,6 @@ Module discovery is automatic from `siesta.modules.*.main`.
 
 ## Practical run order
 
-1. Run preprocess on a log.
+1. Run Index on a log.
 2. Run mining/query on the same `log_name` and `storage_namespace`.
 3. Check outputs under `output/` (and persisted data in configured storage).

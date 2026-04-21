@@ -7,8 +7,8 @@ from siesta.model.StorageModel import MetaData
 from siesta.model.SystemModel import Query_Config, Pattern
 from pyspark.sql import DataFrame, functions as F
 from pyspark.sql.functions import col
-from siesta.modules.Query.parse_seql import split_pattern_to_list
-from siesta.modules.Query.processors.detection_query import detect
+from siesta.modules.query.parse_seql import split_pattern_to_list
+from siesta.modules.query.processors.detection_query import detect
 
 import logging
 logger = logging.getLogger(__name__)

@@ -1,7 +1,7 @@
 from siesta.model.SystemModel import Query_Config, Pattern
 from siesta.core.sparkManager import get_spark_session
 from siesta.core.storageFactory import get_storage_manager
-from siesta.modules.Query.parse_seql import extract_responded_pairs
+from siesta.modules.query.parse_seql import extract_responded_pairs
 from siesta.model.StorageModel import MetaData
 
 

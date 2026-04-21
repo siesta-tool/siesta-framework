@@ -132,15 +132,15 @@ def preprocessed(siesta_app, preprocess_config):
     """Run the Preprocessor and return storage + metadata for verification."""
     from siesta.core.storageFactory import get_storage_manager
     from siesta.model.StorageModel import MetaData
-    from siesta.modules.Preprocess.main import Preprocessor
+    from siesta.modules.index.main import Indexing
 
     storage = get_storage_manager()
 
-    preprocessor = Preprocessor()
+    preprocessor = Indexing()
     preprocessor.siesta_config = siesta_app.config
     preprocessor.storage = storage
     preprocessor._load_preprocess_config(preprocess_config)
-    preprocessor.storage.initialize_db(preprocessor.preprocess_config)
+    preprocessor.storage.initialize_db(preprocessor.index_config)
     _force_clean_tables(TEST_LOG_NAME, TEST_NAMESPACE)
     preprocessor.begin_builders(caller="cli")
 
@@ -168,7 +168,7 @@ def preprocessed_incremental(siesta_app):
     """
     from siesta.core.storageFactory import get_storage_manager
     from siesta.model.StorageModel import MetaData
-    from siesta.modules.Preprocess.main import Preprocessor
+    from siesta.modules.index.main import Indexing
 
     storage = get_storage_manager()
     datasets_dir = os.path.join(os.path.dirname(__file__), "..", "datasets")
@@ -194,22 +194,22 @@ def preprocessed_incremental(siesta_app):
     # --- Batch 1 (clean slate) ---
     b1_config = {**base_config, "overwrite_data": True,
                  "log_path": os.path.join(datasets_dir, "test_preprocess.csv")}
-    p1 = Preprocessor()
+    p1 = Indexing()
     p1.siesta_config = siesta_app.config
     p1.storage = storage
     p1._load_preprocess_config(b1_config)
-    p1.storage.initialize_db(p1.preprocess_config)
+    p1.storage.initialize_db(p1.index_config)
     _force_clean_tables(INCR_LOG_NAME, TEST_NAMESPACE)
     p1.begin_builders(caller="cli")
 
     # --- Batch 2 (incremental) ---
     b2_config = {**base_config, "overwrite_data": False,
                  "log_path": os.path.join(datasets_dir, "test_preprocess_batch2.csv")}
-    p2 = Preprocessor()
+    p2 = Indexing()
     p2.siesta_config = siesta_app.config
     p2.storage = storage
     p2._load_preprocess_config(b2_config)
-    p2.storage.initialize_db(p2.preprocess_config)
+    p2.storage.initialize_db(p2.index_config)
     p2.begin_builders(caller="cli")
 
     metadata = MetaData(
@@ -239,7 +239,7 @@ def query_preprocessed(siesta_app):
     """
     from siesta.core.storageFactory import get_storage_manager
     from siesta.model.StorageModel import MetaData
-    from siesta.modules.Preprocess.main import Preprocessor
+    from siesta.modules.index.main import Indexing
 
     csv_path = os.path.join(
         os.path.dirname(__file__), "..", "datasets", "test.csv"
@@ -265,11 +265,11 @@ def query_preprocessed(siesta_app):
     }
 
     storage = get_storage_manager()
-    preprocessor = Preprocessor()
+    preprocessor = Indexing()
     preprocessor.siesta_config = siesta_app.config
     preprocessor.storage = storage
     preprocessor._load_preprocess_config(config)
-    preprocessor.storage.initialize_db(preprocessor.preprocess_config)
+    preprocessor.storage.initialize_db(preprocessor.index_config)
     _force_clean_tables(QUERY_LOG_NAME, TEST_NAMESPACE)
     preprocessor.begin_builders(caller="cli")
 

@@ -29,7 +29,7 @@ import re
 import socket
 import pytest
 
-from siesta.modules.Query.query_types.query_processors_detection import (
+from siesta.modules.query.query_types.query_processors_detection import (
     process_detection_query_local,
 )
 

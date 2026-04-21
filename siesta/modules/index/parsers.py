@@ -303,6 +303,10 @@ def parse_xml(storage_path: str, spark: SparkSession, preprocess_config: dict) -
     # Free memory from lists immediately
     del activities, trace_ids, positions, timestamps, attr_dicts
 
+    # Reassign positions based on timestamp order within each trace
+    pdf = pdf.sort_values(['trace_id', 'start_timestamp'], na_position='last')
+    pdf['position'] = pdf.groupby('trace_id').cumcount()
+
     # Convert to Spark DataFrame (uses Arrow serialization automatically)
     # Use intermediate schema with StringType for timestamp fields so Spark can parse them
     event_schema = Event.get_schema()
@@ -402,28 +406,29 @@ def _parse_rows(config: EventConfig, df: DataFrame) -> DataFrame:
     # Get the source column name for trace_id to use in partitioning
     trace_id_source = config.field_mappings.get('trace_id')
     position_source = config.field_mappings.get('position')
+    timestamp_field = next(iter(config.timestamp_fields), None)
+    timestamp_source = config.field_mappings.get(timestamp_field) if timestamp_field else None
 
-    # Check if a position column exists in the data to use as intra-trace sort key
     has_position_col = position_source is not None and position_source in df.columns
+    has_timestamp_col = timestamp_source is not None and timestamp_source in df.columns
 
-    # Preserve original row order for fallback ordering
+    # Preserve original row order as stable tiebreaker
     df = df.withColumn("_row_idx", monotonically_increasing_id())
 
-    # Assign 0-based intra-trace positions
+    if has_timestamp_col:
+        order_col = F.col(timestamp_source).cast("timestamp")
+    elif has_position_col:
+        order_col = F.col(position_source)
+    else:
+        order_col = F.col("_row_idx")
+
     if trace_id_source and trace_id_source in df.columns:
-        if has_position_col:
-            # Position column indicates intra-trace ordering within the batch
-            order_col = F.col(position_source)
-        else:
-            # No position column: use original row order
-            order_col = F.col("_row_idx")
         df = df.withColumn("position", row_number().over(
-            Window.partitionBy(trace_id_source).orderBy(order_col)
+            Window.partitionBy(trace_id_source).orderBy(order_col, F.col("_row_idx"))
         ) - 1)
     else:
-        # No trace_id column: global row ordering
         df = df.withColumn("position", row_number().over(
-            Window.orderBy("_row_idx")
+            Window.orderBy(order_col, F.col("_row_idx"))
         ) - 1)
 
     df = df.drop("_row_idx")

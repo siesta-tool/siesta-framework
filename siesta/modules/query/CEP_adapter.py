@@ -29,7 +29,7 @@ from stream.Stream import InputStream, OutputStream
 from transformation.PatternPreprocessingParameters import PatternPreprocessingParameters
 from transformation.PatternTransformationRules import PatternTransformationRules
 
-from siesta.modules.Query.parse_seql import (
+from siesta.modules.query.parse_seql import (
     ActivityNode, AttrConstraint, ElementNode, NegatedNode,
     OrNode, Quantifier, SeqNode, StringLiteral, VarExpr, parse_pattern,
 )

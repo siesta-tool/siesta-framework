@@ -10,21 +10,20 @@ from siesta.core.config import get_system_config
 from siesta.core.logger import timed
 from siesta.core.storageFactory import get_storage_manager
 from siesta.core.sparkManager import cleanup as spark_cleanup
-from siesta.modules.Mining.existential import discover_existential
-from siesta.modules.Mining.positional import discover_positional
-from siesta.modules.Mining.ordered import discover_ordered
-from siesta.modules.Mining.unordered import discover_unordered
-from siesta.modules.Mining.negations import discover_negations
+from siesta.modules.mine.existential import discover_existential
+from siesta.modules.mine.positional import discover_positional
+from siesta.modules.mine.ordered import discover_ordered
+from siesta.modules.mine.unordered import discover_unordered
+from siesta.modules.mine.negations import discover_negations
 from pyspark.sql import SparkSession, DataFrame, functions as F
 
 import csv
-import io
 import json
 import logging
 logger = logging.getLogger(__name__)
 
 
-class Miner(SiestaModule):
+class Mining(SiestaModule):
         
     name = "mining"
     version = "1.0.0"

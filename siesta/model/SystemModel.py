@@ -69,7 +69,7 @@ DEFAULT_SYSTEM_CONFIG: Dict[str, Any] = {
 }
 
 
-DEFAULT_PREPROCESS_CONFIG: Dict[str, Any] = {
+DEFAULT_INDEX_CONFIG: Dict[str, Any] = {
   "log_name": "example_log",
   "log_path": "../datasets/test.xes",
   "storage_namespace": "siesta",
@@ -132,4 +132,16 @@ DEFAULT_MINING_CONFIG: Dict[str, Any] = {
   "branching_policy": "and", #TODO
   "support_threshold": 0.0,
   "confidence_threshold": 0.0, #TODO
+}
+
+DEFAULT_COMPARATOR_CONFIG: Dict[str, Any] = {
+  "log_name": "example_log",
+  "storage_namespace": "siesta",
+  "storage_type": "s3",
+  "method": "ngrams", # TODO or "mine, embeddings"
+  "method_params": {"n": 2}, # TODO parameters for the comparison method (e.g. n for n-grams)
+  "separating_key": "activity", # the column to compare on (e.g. activity, resource)
+  "separating_groups": [["fail_1", "fail_2"], ["success_1", "success_2"]], # groups of values to compare (e.g. [["fail", "error"], ["success", "complete"]])
+  "support_threshold": 0.0,
+  "output_path": "../output/example_log", # where to store results
 }

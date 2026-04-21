@@ -10,15 +10,15 @@ from siesta.model.StorageModel import MetaData
 from siesta.model.SystemModel import DEFAULT_QUERY_CONFIG, Query_Config
 import json
 import logging
-from siesta.modules.Query.processors.detection_query import process_detection_query
-from siesta.modules.Query.processors.exploration_query import process_exploration_query
-from siesta.modules.Query.processors.stats_query import process_stats_query
+from siesta.modules.query.processors.detection_query import process_detection_query
+from siesta.modules.query.processors.exploration_query import process_exploration_query
+from siesta.modules.query.processors.stats_query import process_stats_query
 
 
 logger = logging.getLogger(__name__)
 
 
-class Query(SiestaModule):
+class Querying(SiestaModule):
     def __init__(self):
         super().__init__()
 

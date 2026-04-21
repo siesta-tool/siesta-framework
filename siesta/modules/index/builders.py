@@ -6,28 +6,28 @@ from siesta.core.sparkManager import get_spark_session
 from siesta.core.storageFactory import get_storage_manager
 from siesta.model.DataModel import Event, EventConfig
 from siesta.model.StorageModel import MetaData
-from siesta.modules.Preprocess.parsers import process_events_batch, process_event_log
+from siesta.modules.index.parsers import process_events_batch, process_event_log
 from pyspark.sql.functions import col, from_json
 from pyspark.sql.streaming.query import StreamingQuery
-from siesta.modules.Preprocess.computations import extract_last_checked_and_all_pairs, extract_counts
+from siesta.modules.index.computations import extract_last_checked_and_all_pairs, extract_counts
 from pyspark.sql.functions import min
 import logging
 logger = logging.getLogger(__name__)
 
 
 
-def build_sequence_table(preprocess_config: Dict, metadata: MetaData) -> DataFrame | StreamingQuery:
+def build_sequence_table(index_config: Dict, metadata: MetaData) -> DataFrame | StreamingQuery:
     """
     Build the Sequence Table from the log file, supporting both batch and streaming modes.
     
     Returns:
         DataFrame in batch mode, or tuple of (StreamingQuery, FirstBatchListener) in streaming mode
     """
-    logger.info("Preprocess.builders: Building Sequence Table...")
+    logger.info("Building Sequence Table...")
 
-    if preprocess_config.get("enable_streaming", False):
+    if index_config.get("enable_streaming", False):
 
-        schema = EventConfig.from_preprocess_config(preprocess_config, "json").get_source_schema()
+        schema = EventConfig.from_preprocess_config(index_config, "json").get_source_schema()
     
         storage = get_storage_manager()
         spark = get_spark_session()
@@ -37,10 +37,10 @@ def build_sequence_table(preprocess_config: Dict, metadata: MetaData) -> DataFra
         .schema(schema)
         .option("schemaInference", "true")
         .option("columnNameOfCorruptRecord", "_corrupt_record") 
-        .load(storage.get_steaming_collector_path(preprocess_config))) 
+        .load(storage.get_steaming_collector_path(index_config))) 
 
         def process_microbatch(batch_df, batch_id):
-            process_events_batch(preprocess_config, batch_df, batch_id, metadata)
+            process_events_batch(index_config, batch_df, batch_id, metadata)
 
         write_seq_job = (event_stream_agg.writeStream
             .queryName("build_sequence_table")
@@ -51,7 +51,7 @@ def build_sequence_table(preprocess_config: Dict, metadata: MetaData) -> DataFra
         return write_seq_job
     
     else:
-        return process_event_log(preprocess_config, metadata)
+        return process_event_log(index_config, metadata)
 
 
 def build_activity_index(metadata: MetaData, events_df: DataFrame | StreamingQuery) -> DataFrame | StreamingQuery:
@@ -62,7 +62,7 @@ def build_activity_index(metadata: MetaData, events_df: DataFrame | StreamingQue
         metadata: Metadata configuration
         events_df: DataFrame (batch) or StreamingQuery (streaming)
     """
-    logger.info("Preprocess.builders: Building Activity Index Table...")
+    logger.info("Building Activity Index Table...")
     
     storage = get_storage_manager()
     
@@ -93,34 +93,34 @@ def build_activity_index(metadata: MetaData, events_df: DataFrame | StreamingQue
         return events_df
 
 
-def build_pairs_index(preprocess_config: Dict, metadata: MetaData, batch_pairs_index_df: DataFrame | StreamingQuery):
+def build_pairs_index(index_config: Dict, metadata: MetaData, batch_pairs_index_df: DataFrame | StreamingQuery):
     """
     Build the Index Table from the Active pairs table.
     """
-    logger.info("Preprocess.builders: Building Index Table...")
+    logger.info("Building Index Table...")
     # Implementation for building index table goes here
     storage = get_storage_manager()
 
     if isinstance(batch_pairs_index_df, StreamingQuery):
         # Already handled inside build_last_checked_table's foreachBatch
-        logger.info("Preprocess.builders: Pairs index handled by streaming job, skipping.")
+        logger.info("Pairs index handled by streaming job, skipping.")
         return None
     else:
         storage.write_pairs_index(new_pairs=batch_pairs_index_df, metadata=metadata)
         return batch_pairs_index_df
 
 
-def build_count_table(preprocess_config: Dict, metadata: MetaData, batch_pairs_index_df: DataFrame):
+def build_count_table(index_config: Dict, metadata: MetaData, batch_pairs_index_df: DataFrame):
     """
     Build the Count Table from the last checked.
     """
-    logger.info("Preprocess.builders: Building Count Table...")
+    logger.info("Building Count Table...")
     
     storage = get_storage_manager()
 
     if isinstance(batch_pairs_index_df, StreamingQuery):
         # Already handled inside build_last_checked_table's foreachBatch
-        logger.info("Preprocess.builders: Count table handled by streaming job, skipping.")
+        logger.info("Count table handled by streaming job, skipping.")
         return None
     else:
         count_table = extract_counts(batch_pairs_index_df)
@@ -130,14 +130,14 @@ def build_count_table(preprocess_config: Dict, metadata: MetaData, batch_pairs_i
 
 
 
-def build_last_checked_table(preprocess_config: Dict, metadata: MetaData, batch_activity_index_df: DataFrame) -> Tuple[DataFrame, DataFrame]:
+def build_last_checked_table(index_config: Dict, metadata: MetaData, batch_activity_index_df: DataFrame) -> Tuple[DataFrame, DataFrame]:
     """
     Build Last Checked.
     """
-    logger.info("Preprocess.builders: Building Last Checked Table...")
+    logger.info("Building Last Checked Table...")
 
     storage = get_storage_manager()
-    lookback = preprocess_config.get("lookback", "7d")
+    lookback = index_config.get("lookback", "7d")
 
     updated_trace_ids = batch_activity_index_df.select("trace_id").distinct()
     batch_min_ts = batch_activity_index_df.agg(min("start_timestamp")).collect()[0][0]
@@ -168,16 +168,16 @@ def build_last_checked_table(preprocess_config: Dict, metadata: MetaData, batch_
     return pairs_df, last_checked_df
 
 
-def build_last_checked_index_and_count_streamed(preprocess_config: Dict, metadata: MetaData, batch_activity_index_df: StreamingQuery) -> StreamingQuery:
+def build_last_checked_index_and_count_streamed(index_config: Dict, metadata: MetaData, batch_activity_index_df: StreamingQuery) -> StreamingQuery:
     """
     Building the Last Checked, Pairs Index, and Count Tables concurrently.
     In streaming mode, all three are handled here since pairs_df 
     only exists transiently inside foreachBatch.
     """
-    logger.info("Preprocess.builders: Building Last Checked Table...")
+    logger.info("Building Last Checked Table...")
 
     storage = get_storage_manager()
-    lookback = preprocess_config.get("lookback", "7d")
+    lookback = index_config.get("lookback", "7d")
 
     sequence_stream_df = (
             get_spark_session().readStream
