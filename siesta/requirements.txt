@@ -1,1 +1,11 @@
 mypy==1.19.1
+pandas>=3.0.0
+lxml==6.0.2
+pm4py==2.7.19.5
+xxhash>=3.6.0
+numpy
+pyarrow>=11.0.0
+pyspark==4.0.1
+fastapi[standard]==0.128
+uvicorn[standard]==0.40
+python-multipart==0.0.22

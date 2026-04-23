@@ -1,0 +1,48 @@
+[project]
+name = "datalab-siesta"
+version = "4.0.0"
+authors = [
+  { name="Balaktsis Christos", email="balaktsis@csd.auth.gr" },
+  { name="Panagiotopoulos Neron Michail", email="neronmkp@csd.auth.gr" },
+]
+description = "Datalab AUTH's Siesta framework"
+readme = "README.md"
+requires-python = ">=3.12"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = [
+    "mypy==1.19.1",
+    "pandas>=3.0.0",
+    "lxml==6.0.2",
+    "pm4py==2.7.19.5",
+    "xxhash>=3.6.0",
+    "numpy",
+    "pyarrow>=11.0.0",
+    "pyspark==4.0.1",
+    "fastapi[standard]==0.128",
+    "uvicorn[standard]==0.40",
+    "python-multipart==0.0.22",
+    "boto3>=1.26.0",
+    "delta-spark==4.0.1",
+]
+
+[project.scripts]
+siesta = "siesta.siesta:main"
+
+[build-system]
+requires = ["setuptools>=82"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["siesta*"]
+exclude = ["siesta.dockerbase*"]
+
+
+[project.urls]
+Homepage = "https://github.com/siesta-tool/siesta-framework"
+Issues = "https://github.com/siesta-tool/siesta-framework/issues"
