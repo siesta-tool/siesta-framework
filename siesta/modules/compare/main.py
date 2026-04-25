@@ -100,24 +100,15 @@ class Comparing(SiestaModule):
 
     def api_ngrams(self, comparator_config: Annotated[ComparatorConfig, Body(
         openapi_examples={
-            "bigrams": {
-                "summary": "Compare bigram frequencies between groups",
+            "default": {
+                "summary": "Compare n-gram frequencies with default settings",
                 "value": {
                     "log_name": "example_log",
-                    "separating_groups": [["fail", "error"]],
+                    "storage_namespace": "siesta",
                     "method_params": {"n": 2},
+                    "separating_key": "activity",
+                    "separating_groups": [],
                     "support_threshold": 0.0,
-                    "output_path": "output/example_log",
-                },
-            },
-            "trigrams": {
-                "summary": "Compare trigram frequencies between groups",
-                "value": {
-                    "log_name": "example_log",
-                    "separating_groups": [["fail"]],
-                    "method_params": {"n": 3, "vis": True},
-                    "support_threshold": 0.05,
-                    "output_path": "output/example_log",
                 },
             },
         }
@@ -134,7 +125,6 @@ class Comparing(SiestaModule):
         - `separating_key` *(str, default: `"activity"`)* - column used to label traces into groups.
         - `separating_groups` *(list[list[str]])* - group definitions, e.g. `[["fail", "error"]]`.
         - `support_threshold` *(float [0,1], default: `0.0`)* - minimum support fraction for results.
-        - `output_path` *(str)* - local path prefix for the output CSV file.
         """
         self.siesta_config = get_system_config()
         self.storage = get_storage_manager()
@@ -154,13 +144,15 @@ class Comparing(SiestaModule):
 
     def api_rare_rules(self, comparator_config: Annotated[ComparatorConfig, Body(
         openapi_examples={
-            "basic": {
-                "summary": "Discover rules rare in one group but frequent in another",
+            "default": {
+                "summary": "Discover rare rules with default settings",
                 "value": {
                     "log_name": "example_log",
-                    "separating_groups": [["fail", "error"]],
-                    "support_threshold": 0.1,
-                    "output_path": "output/example_log",
+                    "storage_namespace": "siesta",
+                    "method_params": {"n": 2},
+                    "separating_key": "activity",
+                    "separating_groups": [],
+                    "support_threshold": 0.0,
                 },
             },
         }
@@ -176,7 +168,6 @@ class Comparing(SiestaModule):
         - `separating_key` *(str, default: `"activity"`)* - column used to label traces into groups.
         - `separating_groups` *(list[list[str]])* - group definitions, e.g. `[["fail", "error"]]`.
         - `support_threshold` *(float [0,1], default: `0.0`)* - minimum support fraction threshold.
-        - `output_path` *(str)* - local path prefix for the output JSON file.
         """
         self.siesta_config = get_system_config()
         self.storage = get_storage_manager()
@@ -196,14 +187,15 @@ class Comparing(SiestaModule):
 
     def api_targeted_rules(self, comparator_config: Annotated[ComparatorConfig, Body(
         openapi_examples={
-            "basic": {
-                "summary": "Discover rules strongly associated with a target group",
+            "default": {
+                "summary": "Discover targeted rules with default settings",
                 "value": {
                     "log_name": "example_log",
-                    "separating_groups": [["fail", "error"]],
-                    "method_params": {"target_label": 1, "filtering_support": 1.0},
-                    "support_threshold": 0.8,
-                    "output_path": "output/example_log",
+                    "storage_namespace": "siesta",
+                    "method_params": {"n": 2},
+                    "separating_key": "activity",
+                    "separating_groups": [],
+                    "support_threshold": 0.0,
                 },
             },
         }
@@ -220,7 +212,6 @@ class Comparing(SiestaModule):
         - `separating_key` *(str, default: `"activity"`)* - column used to label traces into groups.
         - `separating_groups` *(list[list[str]])* - group definitions, e.g. `[["fail", "error"]]`.
         - `support_threshold` *(float [0,1], default: `0.0`)* - minimum support fraction for results.
-        - `output_path` *(str)* - local path prefix for the output JSON file.
         """
         self.siesta_config = get_system_config()
         self.storage = get_storage_manager()

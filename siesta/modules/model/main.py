@@ -3,8 +3,8 @@ import csv
 import datetime
 import json
 from pathlib import Path
-from typing import Any, Dict
-
+from typing import Annotated, Any, Dict
+from fastapi import Body
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 from pyspark.sql import SparkSession, functions as F
@@ -64,7 +64,17 @@ class Modeling(SiestaModule):
     # API entry points
     # ------------------------------------------------------------------
 
-    def api_directly_follows(self, modeler_config: ModelerConfig) -> Any:
+    def api_directly_follows(self, modeler_config: Annotated[ModelerConfig, Body(openapi_examples={
+        "default": {
+            "summary": "Discover DFG with default settings",
+            "value": {
+                "log_name": "example_log",
+                "storage_namespace": "siesta",
+                "end_time": None,
+                "output_format": "xml",
+            },
+        },
+    })]) -> Any:
         """Discover a Directly-Follows Graph (DFG) from an indexed event log.
 
         Returns the DFG model file. Format and content depend on `output_format`.
@@ -73,15 +83,14 @@ class Modeling(SiestaModule):
         - `log_name` *(str)* - name of the indexed log. **Required.**
         - `storage_namespace` *(str, default: `"siesta"`)* - storage namespace.
         - `end_time` *(str | null, default: `null`)* - event attribute key for the activity end
-          timestamp. If set, average activity duration is computed and shown inside each node.
-          If null, no duration annotation is added.
+            timestamp. If set, average activity duration is computed and shown inside each node.
+            If null, no duration annotation is added.
         - `noise_threshold` *(float, default: `0.0`)* - fraction of infrequent paths to remove
-          (0.0 = keep all, 1.0 = keep only the most frequent path).
+            (0.0 = keep all, 1.0 = keep only the most frequent path).
         - `filter_percentile` *(float, default: `0.0`)* - pre-filter log variants by frequency
-          percentile before discovery (0.0 = keep all variants).
+            percentile before discovery (0.0 = keep all variants).
         - `output_format` *(str, default: `"xml"`)* - file returned by the endpoint:
-          `"xml"` — DFG model as XML, `"png"` — process map image, `"html"` — interactive graph.
-        - `output_path` *(str, default: `"output/<log_name>"`)* - local path prefix for saved files.
+            `"xml"` — DFG model as XML, `"png"` — process map image, `"html"` — interactive graph.
         """
         logger.info(f"{self.name} running directly_follows via API.")
         self.siesta_config = get_system_config()
@@ -93,7 +102,17 @@ class Modeling(SiestaModule):
 
         return self._run_directly_follows(caller="api")
 
-    def api_bpmn(self, modeler_config: ModelerConfig) -> Any:
+    def api_bpmn(self, modeler_config: Annotated[ModelerConfig, Body(openapi_examples={
+        "default": {
+            "summary": "Discover BPMN model with default settings",
+            "value": {
+                "log_name": "example_log",
+                "storage_namespace": "siesta",
+                "end_time": None,
+                "output_format": "xml",
+            },
+        },
+    })]) -> Any:
         """Discover a BPMN process model via the Inductive Miner from an indexed event log.
 
         Returns the BPMN model file. Format and content depend on `output_format`.
@@ -102,15 +121,14 @@ class Modeling(SiestaModule):
         - `log_name` *(str)* - name of the indexed log. **Required.**
         - `storage_namespace` *(str, default: `"siesta"`)* - storage namespace.
         - `end_time` *(str | null, default: `null`)* - event attribute key for the activity end
-          timestamp. If set, average activity duration is computed and shown inside each node.
-          If null, no duration annotation is added.
+            timestamp. If set, average activity duration is computed and shown inside each node.
+            If null, no duration annotation is added.
         - `noise_threshold` *(float, default: `0.0`)* - noise threshold for the Inductive Miner IMf
-          variant (0.0 = standard IM, >0 enables IMf with that threshold).
+            variant (0.0 = standard IM, >0 enables IMf with that threshold).
         - `filter_percentile` *(float, default: `0.0`)* - pre-filter log variants by frequency
-          percentile before discovery (0.0 = keep all variants).
+            percentile before discovery (0.0 = keep all variants).
         - `output_format` *(str, default: `"xml"`)* - file returned by the endpoint:
-          `"xml"` — BPMN 2.0 model as XML, `"png"` — process map image, `"html"` — interactive graph.
-        - `output_path` *(str, default: `"output/<log_name>"`)* - local path prefix for saved files.
+            `"xml"` — BPMN 2.0 model as XML, `"png"` — process map image, `"html"` — interactive graph.
         """
         logger.info(f"{self.name} running bpmn via API.")
         self.siesta_config = get_system_config()

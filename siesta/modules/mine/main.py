@@ -1,7 +1,8 @@
 import argparse
 import datetime
 from pathlib import Path
-from typing import Any, Dict
+from typing import Annotated, Any, Dict
+from fastapi import Body
 from pydantic import BaseModel, ConfigDict, Field
 from siesta.model.StorageModel import MetaData
 from siesta.core.interfaces import SiestaModule, StorageManager
@@ -61,7 +62,21 @@ class Mining(SiestaModule):
     def startup(self):
         logger.info("Startup complete.")
 
-    def api_run(self, mining_config: MiningConfig) -> Any:
+    def api_run(self, mining_config: Annotated[MiningConfig, Body(openapi_examples={
+        "default": {
+            "summary": "Mine all constraint categories with default settings",
+            "value": {
+                "log_name": "example_log",
+                "storage_namespace": "siesta",
+                "categories": ["*"],
+                "grouping": "trace",
+                "window_size": 30,
+                "support_threshold": 0.0,
+                "include_trace_lists": False,
+                "force_recompute": False,
+            },
+        },
+    })]) -> Any:
         """Mine declarative constraints from an indexed event log.
 
         Performs incremental constraint discovery across the selected categories. Only
@@ -73,13 +88,12 @@ class Mining(SiestaModule):
         - `log_name` *(str, default: `"example_log"`)* - name of the indexed log. **Required.**
         - `storage_namespace` *(str, default: `"siesta"`)* - storage namespace.
         - `categories` *(list, default: `["*"]`)* - constraint categories to mine.
-          `"*"` = all. Options: `"positional"`, `"existential"`, `"ordered"`, `"unordered"`, `"negation"`.
+            `"*"` = all. Options: `"positional"`, `"existential"`, `"ordered"`, `"unordered"`, `"negation"`.
         - `grouping` *(str, default: `"trace"`)* - grouping strategy: `"trace"` or `"window"`.
         - `window_size` *(int, default: `30`)* - position-based window size when `grouping="window"`.
         - `support_threshold` *(float [0,1], default: `0.0`)* - minimum support fraction to retain constraints.
         - `include_trace_lists` *(bool, default: `false`)* - append a pipe-delimited `trace_ids` column per constraint.
         - `force_recompute` *(bool, default: `false`)* - remine all traces ignoring previous mining state.
-        - `output_path` *(str, default: `"output/example_log"`)* - local path prefix for the output CSV.
         """
         logger.info(f"{self.name} is running via API request.")
 

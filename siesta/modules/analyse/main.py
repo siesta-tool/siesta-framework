@@ -3,8 +3,8 @@ import csv
 import datetime
 import json
 from pathlib import Path
-from typing import Any, Dict
-
+from typing import Annotated, Any, Dict
+from fastapi import Body
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 from pyspark.sql import SparkSession, functions as F
@@ -156,7 +156,20 @@ class Analysing(SiestaModule):
     # API entry points
     # ------------------------------------------------------------------
 
-    def api_directly_follows(self, analyser_config: DirectlyFollowsConfig) -> Any:
+    def api_directly_follows(self, analyser_config: Annotated[DirectlyFollowsConfig, Body(openapi_examples={
+        "default": {
+            "summary": "Find directly-following pairs with default settings",
+            "value": {
+                "log_name": "example_log",
+                "storage_namespace": "siesta",
+                "end_time": None,
+                "support_threshold": None,
+                "filter_out": False,
+                "include_traces": False,
+                "return_csv": False,
+            },
+        },
+    })]) -> Any:
         """Find directly-following activity pairs in an indexed event log.
 
         Returns pairs of consecutive activities with support (fraction of traces where A
@@ -166,14 +179,13 @@ class Analysing(SiestaModule):
         - `log_name` *(str)* - name of the indexed log. **Required.**
         - `storage_namespace` *(str, default: `"siesta"`)* - storage namespace.
         - `end_time` *(str | null, default: `null`)* - attribute key for event end timestamp.
-          If set, duration = `end_time - start_timestamp` (activity duration).
-          If null, duration = `next_start - start_timestamp` (transition time).
+            If set, duration = `end_time - start_timestamp` (activity duration).
+            If null, duration = `next_start - start_timestamp` (transition time).
         - `support_threshold` *(float [0,1] | null, default: `null`)* - keep pairs with support ≥ threshold. `null` = no filtering.
         - `filter_out` *(bool, default: `false`)* - when `true`, keeps pairs with support ≤ threshold instead.
         - `include_traces` *(bool, default: `false`)* - append a `trace_ids` column to the output.
         - `return_csv` *(bool, default: `false`)* - return a CSV file download instead of a JSON list.
-        - `output_path` *(str, default: `"output/<log_name>"`)* - local path prefix for the output file.
-        """
+            """
         logger.info(f"{self.name} running directly_follows via API.")
         self.siesta_config = get_system_config()
         self.storage = get_storage_manager()
@@ -184,7 +196,21 @@ class Analysing(SiestaModule):
 
         return self._run_directly_follows(caller="api")
 
-    def api_durations(self, analyser_config: DurationsConfig) -> Any:
+    def api_durations(self, analyser_config: Annotated[DurationsConfig, Body(openapi_examples={
+        "default": {
+            "summary": "Compute duration statistics with default settings",
+            "value": {
+                "log_name": "example_log",
+                "storage_namespace": "siesta",
+                "duration_mode": "activity",
+                "end_time": None,
+                "grouping_key": None,
+                "grouping_value": None,
+                "per_group": False,
+                "return_csv": False,
+            },
+        },
+    })]) -> Any:
         """Compute duration statistics for activities or groups in an indexed event log.
 
         Two modes controlled by `duration_mode`:
@@ -196,13 +222,12 @@ class Analysing(SiestaModule):
         - `storage_namespace` *(str, default: `"siesta"`)* - storage namespace.
         - `duration_mode` *(str, default: `"activity"`)* - `"activity"` or `"group"`.
         - `end_time` *(str | null, default: `null`)* - attribute key for event end timestamp.
-          Activity mode: `end_time - start_timestamp`; group mode: sum of per-event durations.
-          If null - activity mode uses transition time; group mode uses `last_start - first_start`.
+            Activity mode: `end_time - start_timestamp`; group mode: sum of per-event durations.
+            If null - activity mode uses transition time; group mode uses `last_start - first_start`.
         - `grouping_key` *(str | list | null, default: `null`)* - attribute key(s) defining groups. `null` = `trace_id`.
         - `grouping_value` *(str | list | null, default: `null`)* - restrict to groups with matching key value(s).
         - `per_group` *(bool, default: `false`)* - `activity` mode only: produce one row per (group, activity).
         - `return_csv` *(bool, default: `false`)* - return a CSV file download instead of a JSON list.
-        - `output_path` *(str, default: `"output/<log_name>"`)* - local path prefix for the output file.
         """
         logger.info(f"{self.name} running durations via API.")
         self.siesta_config = get_system_config()
@@ -214,7 +239,22 @@ class Analysing(SiestaModule):
 
         return self._run_durations(caller="api")
 
-    def api_loop_detection(self, analyser_config: LoopDetectionConfig) -> Any:
+    def api_loop_detection(self, analyser_config: Annotated[LoopDetectionConfig, Body(openapi_examples={
+        "default": {
+            "summary": "Detect loops with default settings",
+            "value": {
+                "log_name": "example_log",
+                "storage_namespace": "siesta",
+                "grouping_key": None,
+                "grouping_value": None,
+                "min_timestamp": None,
+                "support_threshold": None,
+                "filter_out": False,
+                "top_k": None,
+                "trace_based": False,
+            },
+        },
+    })]) -> Any:
         """Detect self-loops and non-self-loops in an indexed event log.
 
         A **self-loop** is an activity immediately followed by itself.
@@ -233,7 +273,6 @@ class Analysing(SiestaModule):
         - `filter_out` *(bool, default: `false`)* - when `true`, keeps loops with support ≤ threshold (rare loops).
         - `top_k` *(int | null, default: `null`)* - keep only the k most-supported loops. `null` = all.
         - `trace_based` *(bool, default: `false`)* - add a `trace_ids` list to each loop entry (only when grouping by `trace_id`).
-        - `output_path` *(str, default: `"output/<log_name>"`)* - local path prefix for the output file.
         """
         logger.info(f"{self.name} running loop_detection via API.")
         self.siesta_config = get_system_config()
@@ -245,20 +284,39 @@ class Analysing(SiestaModule):
 
         return self._run_loop_detection(caller="api")
 
-    def api_attribute_deviations(self, analyser_config: AttributeDeviationsConfig) -> Any:
+    def api_attribute_deviations(self, analyser_config: Annotated[AttributeDeviationsConfig, Body(openapi_examples={
+        "default": {
+            "summary": "Detect attribute deviations with default settings",
+            "value": {
+                "log_name": "example_log",
+                "storage_namespace": "siesta",
+                "steps": [0, 1, 2, 3, 4],
+                "excluded_attributes": None,
+                "surprise_threshold": 4.0,
+                "zscore_threshold": 3.5,
+                "ngram_n": 2,
+                "min_group_size": 5,
+                "n_buckets": 5,
+                "support_threshold": None,
+                "filter_out": False,
+                "on_rare": None,
+                "output_format": "json",
+            },
+        },
+    })]) -> Any:
         """Detect anomalous attribute values in an indexed event log using a multi-step pipeline.
 
         Five steps (all on by default; select via `steps`):
         - **Step 0** - Value frequency: flags values that are globally rare across traces
-          (`value_freq_inter`) or appear unusually often within a single trace (`value_freq_intra`).
+            (`value_freq_inter`) or appear unusually often within a single trace (`value_freq_intra`).
         - **Step 1** - Activity × Attribute: flags values whose distribution within an activity type
-          is anomalous (Laplace surprise for categorical, MAD z-score for numeric).
+            is anomalous (Laplace surprise for categorical, MAD z-score for numeric).
         - **Step 2** - Position-conditioned: same as step 1 but conditioned on relative position
-          within the trace (bucketed).
+            within the trace (bucketed).
         - **Step 3** - N-gram context: same as step 1 but conditioned on the n-gram of activities
-          ending at this event.
+            ending at this event.
         - **Step 4** - Value transitions: flags rare (prev_value → curr_value) transitions
-          within a trace (categorical attributes only).
+            within a trace (categorical attributes only).
 
         **Config fields:**
         - `log_name` *(str)* - name of the indexed log. **Required.**
@@ -271,12 +329,11 @@ class Analysing(SiestaModule):
         - `min_group_size` *(int, default: `5`)* - minimum group size for steps 3 and 4.
         - `n_buckets` *(int, default: `5`)* - position buckets for step 2.
         - `support_threshold` *(float | null)* - filter output by inter-trace support [0,1].
-                - `filter_out` *(bool, default: `false`)* - when true, keep deviations with support ≤ threshold.
-                - `on_rare` *(float [0,1] | null, default: `null`)* - rare-mode threshold.
-                    When set, run analysis only on traces violating at least one ordered constraint
-                    whose support is ≥ `on_rare`.
+        - `filter_out` *(bool, default: `false`)* - when true, keep deviations with support ≤ threshold.
+        - `on_rare` *(float [0,1] | null, default: `null`)* - rare-mode threshold.
+                When set, run analysis only on traces violating at least one ordered constraint
+                whose support is ≥ `on_rare`.
         - `output_format` *(str, default: `"json"`)* - `"json"`, `"csv"`, or `"html"`.
-        - `output_path` *(str)* - path prefix for csv/html file output.
         """
         logger.info(f"{self.name} running attribute_deviations via API.")
         self.siesta_config = get_system_config()
@@ -297,9 +354,9 @@ class Analysing(SiestaModule):
         self.siesta_config = get_system_config()
         self.storage = get_storage_manager()
 
-        parser = argparse.ArgumentParser(description="Siesta Analyzer module")
+        parser = argparse.ArgumentParser(description="Siesta Analyser module")
         parser.add_argument("--analyser_config", type=str, required=False,
-                            help="Path to analyzer configuration JSON file")
+                            help="Path to analyser configuration JSON file")
         parsed_args, _ = parser.parse_known_args(args)
 
         if not parsed_args.analyser_config:
@@ -326,7 +383,7 @@ class Analysing(SiestaModule):
             case "attribute_deviations":
                 return self._run_attribute_deviations(caller="cli")
             case _:
-                raise ValueError(f"Unknown analyzer method: '{method}'")
+                raise ValueError(f"Unknown analyser method: '{method}'")
 
     # ------------------------------------------------------------------
     # Shared helpers
@@ -345,7 +402,7 @@ class Analysing(SiestaModule):
 
         given_output = config.get(
             "output_path",
-            "output/" + config.get("log_name", "analyzer_results"),
+            "output/" + config.get("log_name", "analyser_results"),
         )
         Path(given_output).parent.mkdir(parents=True, exist_ok=True)
         self.analyser_config["output_path"] = (
