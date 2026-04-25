@@ -180,7 +180,7 @@ def parse_xml(storage_path: str, spark: SparkSession, preprocess_config: dict) -
     Returns:
         DataFrame matching Event.get_schema()
     """
-    logger = logging.getLogger(__name__)("Preprocess.parse_xml")
+    
     eventConfig = EventConfig.from_preprocess_config(preprocess_config, "xes")
 
     # --- Resolve file to a local path (lxml needs a local file or file-like object) ---
@@ -337,7 +337,6 @@ def _resolve_to_local_path(storage_path: str, spark: SparkSession) -> str:
         return storage_path
 
     # Remote path - use Hadoop FileSystem API to download
-    logger = logging.getLogger(__name__)("Preprocess.parse_xml")
     logger.info(f"Downloading remote file to local temp: {storage_path}")
 
     jvm = spark.sparkContext._jvm

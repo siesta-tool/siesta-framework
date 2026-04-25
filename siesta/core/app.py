@@ -38,7 +38,7 @@ class Siesta:
         parsed_args, unknown_args = parser.parse_known_args(args)
         
         app = cls(config_path=parsed_args.config if parsed_args.config else None)
-        app.startup(cli_mode=True)
+        app.startup()
 
         # Reuse the already-initialized module instance
         if parsed_args.module in app.module_instances:
