@@ -177,7 +177,7 @@ class Mining(SiestaModule):
             storage_type=self.mining_config.get("storage_type", "s3")
         )
 
-        self.metadata = self.storage.read_metadata_table(self.mining_config, self.metadata) 
+        self.metadata = self.storage.read_metadata_table(self.metadata) 
         evolved_df = self.storage.read_sequence_table(self.metadata, filter_out="mined" if not self.mining_config.get("force_recompute", False) else None)
         evolved_df.cache()  # Cache evolved traces as they will be used multiple times during mining
 

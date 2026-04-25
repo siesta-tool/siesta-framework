@@ -22,7 +22,7 @@ class ModelerConfig(BaseModel):
     log_name: str = Field("example_log", description="Name of the indexed log")
     storage_namespace: str = Field("siesta", description="Storage namespace")
     end_time: str | None = Field(None, description="Attribute key for event end timestamp. null = transition time (next_start - start)")
-    output_format: str = Field("xml", description="Output format: 'xml' (default), 'png'")
+    output_format: str = Field("xml", description="Output format: 'xml' (default), 'png', 'html'")
     output_path: str = Field("output/example_log", description="Local path prefix for the output file")
 
 
@@ -52,7 +52,7 @@ class Modeling(SiestaModule):
         self.metadata = None
 
     def startup(self):
-        logger.info("Analyzer startup complete.")
+        logger.info("Modeler startup complete.")
 
     def register_routes(self) -> SiestaModule.ApiRoutes | None:
         return {
@@ -65,19 +65,23 @@ class Modeling(SiestaModule):
     # ------------------------------------------------------------------
 
     def api_directly_follows(self, modeler_config: ModelerConfig) -> Any:
-        """Find directly-following activity pairs in an indexed event log.
+        """Discover a Directly-Follows Graph (DFG) from an indexed event log.
 
-        Returns pairs of consecutive activities with support (fraction of traces where A
-        is directly followed by B) and duration statistics in seconds.
+        Returns the DFG model file. Format and content depend on `output_format`.
 
         **Config fields:**
         - `log_name` *(str)* - name of the indexed log. **Required.**
         - `storage_namespace` *(str, default: `"siesta"`)* - storage namespace.
-        - `end_time` *(str | null, default: `null`)* - attribute key for event end timestamp.
-          If set, duration = `end_time - start_timestamp` (activity duration).
-          If null, duration = `next_start - start_timestamp` (transition time).
-        - `output_format` *(str, default: `"xml"`)* - output format: `"xml"` (default) or `"json"`.
-        - `output_path` *(str, default: `"output/<log_name>"`)* - local path prefix for the output file.
+        - `end_time` *(str | null, default: `null`)* - event attribute key for the activity end
+          timestamp. If set, average activity duration is computed and shown inside each node.
+          If null, no duration annotation is added.
+        - `noise_threshold` *(float, default: `0.0`)* - fraction of infrequent paths to remove
+          (0.0 = keep all, 1.0 = keep only the most frequent path).
+        - `filter_percentile` *(float, default: `0.0`)* - pre-filter log variants by frequency
+          percentile before discovery (0.0 = keep all variants).
+        - `output_format` *(str, default: `"xml"`)* - file returned by the endpoint:
+          `"xml"` — DFG model as XML, `"png"` — process map image, `"html"` — interactive graph.
+        - `output_path` *(str, default: `"output/<log_name>"`)* - local path prefix for saved files.
         """
         logger.info(f"{self.name} running directly_follows via API.")
         self.siesta_config = get_system_config()
@@ -90,19 +94,23 @@ class Modeling(SiestaModule):
         return self._run_directly_follows(caller="api")
 
     def api_bpmn(self, modeler_config: ModelerConfig) -> Any:
-        """Find directly-following activity pairs in an indexed event log.
+        """Discover a BPMN process model via the Inductive Miner from an indexed event log.
 
-        Returns pairs of consecutive activities with support (fraction of traces where A
-        is directly followed by B) and duration statistics in seconds.
+        Returns the BPMN model file. Format and content depend on `output_format`.
 
         **Config fields:**
         - `log_name` *(str)* - name of the indexed log. **Required.**
         - `storage_namespace` *(str, default: `"siesta"`)* - storage namespace.
-        - `end_time` *(str | null, default: `null`)* - attribute key for event end timestamp.
-          If set, duration = `end_time - start_timestamp` (activity duration).
-          If null, duration = `next_start - start_timestamp` (transition time).
-        - `output_format` *(str, default: `"xml"`)* - output format: `"xml"` (default) or `"json"`.
-        - `output_path` *(str, default: `"output/<log_name>"`)* - local path prefix for the output file.
+        - `end_time` *(str | null, default: `null`)* - event attribute key for the activity end
+          timestamp. If set, average activity duration is computed and shown inside each node.
+          If null, no duration annotation is added.
+        - `noise_threshold` *(float, default: `0.0`)* - noise threshold for the Inductive Miner IMf
+          variant (0.0 = standard IM, >0 enables IMf with that threshold).
+        - `filter_percentile` *(float, default: `0.0`)* - pre-filter log variants by frequency
+          percentile before discovery (0.0 = keep all variants).
+        - `output_format` *(str, default: `"xml"`)* - file returned by the endpoint:
+          `"xml"` — BPMN 2.0 model as XML, `"png"` — process map image, `"html"` — interactive graph.
+        - `output_path` *(str, default: `"output/<log_name>"`)* - local path prefix for saved files.
         """
         logger.info(f"{self.name} running bpmn via API.")
         self.siesta_config = get_system_config()
@@ -187,43 +195,62 @@ class Modeling(SiestaModule):
     # Method implementations
     # ------------------------------------------------------------------
 
+    def _compute_activity_durations(self, events_df) -> dict | None:
+        end_time = self.modeler_config.get("end_time")
+        if not end_time:
+            return None
+        try:
+            end_raw = F.col("attributes").getItem(end_time)
+            end_ts_expr = F.when(end_raw.isNull(), None).when(
+                end_raw.rlike('^[0-9]+$'), end_raw.cast('long')
+            ).otherwise(F.unix_timestamp(F.to_timestamp(end_raw)))
+            dur_pd = (
+                events_df
+                .withColumn("_end", end_ts_expr)
+                .withColumn("_dur", F.col("_end") - F.col("start_timestamp"))
+                .filter(F.col("_dur").isNotNull())
+                .groupBy("activity")
+                .agg(F.avg("_dur").alias("avg_duration"))
+                .toPandas()
+            )
+            return {
+                row["activity"]: float(row["avg_duration"])
+                for _, row in dur_pd.dropna(subset=["avg_duration"]).iterrows()
+            }
+        except Exception:
+            logger.exception("Failed to compute activity durations; continuing without.")
+            return None
+
+    def _copy_outputs(self, model_path, fmt, png_path, html_path):
+        base = self.modeler_config["output_path"]
+        model_out = base + "." + fmt
+        png_out   = base + ".png"
+        html_out  = base + ".html"
+        try:
+            for src, dst in [(model_path, model_out), (png_path, png_out), (html_path, html_out)]:
+                if src and os.path.exists(src):
+                    shutil.copy(src, dst)
+        except Exception:
+            logger.exception("Failed to copy model files to output location.")
+        return model_out, png_out, html_out
+
+    def _api_response(self, model_out, png_out, html_out):
+        fmt = self.modeler_config.get("output_format", "xml")
+        if fmt == "png" and os.path.exists(png_out):
+            return FileResponse(png_out, media_type="image/png", filename=Path(png_out).name)
+        if fmt == "html" and os.path.exists(html_out):
+            return FileResponse(html_out, media_type="text/html", filename=Path(html_out).name)
+        return FileResponse(model_out, media_type="application/octet-stream",
+                            filename=Path(model_out).name)
+
     def _run_directly_follows(self, caller: str) -> Any:
         logger.info(f"Running model discovery (dfg) initiated by {caller}.")
         self._load_metadata()
 
         events_df = self.storage.read_sequence_table(self.metadata)
         events_df.cache()
+        activity_durations = self._compute_activity_durations(events_df)
 
-        end_time = self.modeler_config.get("end_time")
-        activity_durations = None
-
-        # If an end_time attribute is provided, try to parse it defensively and
-        # compute average durations per activity for visualization.
-        if end_time:
-            try:
-                end_raw = F.col("attributes").getItem(end_time)
-                # If numeric (epoch seconds) use as-is, otherwise try to parse timestamp
-                end_ts_expr = F.when(end_raw.isNull(), None).when(
-                    end_raw.rlike('^[0-9]+$'), end_raw.cast('long')
-                ).otherwise(F.unix_timestamp(F.to_timestamp(end_raw)))
-
-                dur_df = (
-                    events_df
-                    .withColumn("end_ts_parsed", end_ts_expr)
-                    .withColumn("duration", F.col("end_ts_parsed") - F.col("start_timestamp"))
-                    .filter(F.col("duration").isNotNull())
-                )
-
-                dur_agg = dur_df.groupBy("activity").agg(F.avg(F.col("duration")).alias("avg_duration"))
-                dur_pd = dur_agg.toPandas()
-                activity_durations = {
-                    row["activity"]: float(row["avg_duration"]) for _, row in dur_pd.dropna(subset=["avg_duration"]).iterrows()
-                }
-            except Exception:
-                logger.exception("Failed to compute activity durations from attributes; continuing without durations.")
-                activity_durations = None
-
-        # Prepare DataFrame for PM4Py: rename columns to expected names
         pm_df = (
             events_df
             .withColumnRenamed("trace_id", "case:concept:name")
@@ -231,12 +258,10 @@ class Modeling(SiestaModule):
             .withColumnRenamed("start_timestamp", "time:timestamp")
         )
 
-        # Discover model using DFG
         try:
-            model_path, fmt, vis_path = discover_process_model(
+            model_path, fmt, png_path, html_path = discover_process_model(
                 pm_df,
                 algo="dfg",
-                output_type="petrinet",
                 noise_threshold=self.modeler_config.get("noise_threshold", 0.0),
                 filter_percentile=self.modeler_config.get("filter_percentile", 0.0),
                 activity_durations=activity_durations,
@@ -246,29 +271,14 @@ class Modeling(SiestaModule):
             logger.exception("Model discovery (dfg) failed.")
             raise
 
-        # Copy returned files to configured output path prefix
-        model_output = self.modeler_config["output_path"] + "." + fmt
-        vis_output = self.modeler_config["output_path"] + ".png"
-        try:
-            if os.path.exists(model_path):
-                shutil.copy(model_path, model_output)
-            if vis_path and os.path.exists(vis_path):
-                shutil.copy(vis_path, vis_output)
-        except Exception:
-            logger.exception("Failed to copy discovered model files to output location.")
-
+        model_out, png_out, html_out = self._copy_outputs(model_path, fmt, png_path, html_path)
         events_df.unpersist()
-        logger.info(f"Completed. Model written to {model_output} (visualization: {vis_output}).")
-
-        self.modeler_config["output_path"] = model_output
+        logger.info(f"DFG model → {model_out}  PNG → {png_out}  HTML → {html_out}")
+        self.modeler_config["output_path"] = model_out
 
         if caller == "api":
-            # Prefer returning visualization PNG when available
-            if os.path.exists(vis_output):
-                return FileResponse(vis_output, media_type="image/png", filename=Path(vis_output).name)
-            return FileResponse(model_output, media_type="application/octet-stream", filename=Path(model_output).name)
-
-        return model_output
+            return self._api_response(model_out, png_out, html_out)
+        return model_out
 
     def _run_bpmn(self, caller: str) -> Any:
         logger.info(f"Running model discovery (bpmn) initiated by {caller}.")
@@ -276,32 +286,7 @@ class Modeling(SiestaModule):
 
         events_df = self.storage.read_sequence_table(self.metadata)
         events_df.cache()
-
-        end_time = self.modeler_config.get("end_time")
-        activity_durations = None
-
-        if end_time:
-            try:
-                end_raw = F.col("attributes").getItem(end_time)
-                end_ts_expr = F.when(end_raw.isNull(), None).when(
-                    end_raw.rlike('^[0-9]+$'), end_raw.cast('long')
-                ).otherwise(F.unix_timestamp(F.to_timestamp(end_raw)))
-
-                dur_df = (
-                    events_df
-                    .withColumn("end_ts_parsed", end_ts_expr)
-                    .withColumn("duration", F.col("end_ts_parsed") - F.col("start_timestamp"))
-                    .filter(F.col("duration").isNotNull())
-                )
-
-                dur_agg = dur_df.groupBy("activity").agg(F.avg(F.col("duration")).alias("avg_duration"))
-                dur_pd = dur_agg.toPandas()
-                activity_durations = {
-                    row["activity"]: float(row["avg_duration"]) for _, row in dur_pd.dropna(subset=["avg_duration"]).iterrows()
-                }
-            except Exception:
-                logger.exception("Failed to compute activity durations from attributes; continuing without durations.")
-                activity_durations = None
+        activity_durations = self._compute_activity_durations(events_df)
 
         pm_df = (
             events_df
@@ -311,10 +296,9 @@ class Modeling(SiestaModule):
         )
 
         try:
-            model_path, fmt, vis_path = discover_process_model(
+            model_path, fmt, png_path, html_path = discover_process_model(
                 pm_df,
                 algo="inductive",
-                output_type="bpmn",
                 noise_threshold=self.modeler_config.get("noise_threshold", 0.0),
                 filter_percentile=self.modeler_config.get("filter_percentile", 0.0),
                 activity_durations=activity_durations,
@@ -324,24 +308,11 @@ class Modeling(SiestaModule):
             logger.exception("Model discovery (bpmn) failed.")
             raise
 
-        model_output = self.modeler_config["output_path"] + "." + fmt
-        vis_output = self.modeler_config["output_path"] + ".png"
-        try:
-            if os.path.exists(model_path):
-                shutil.copy(model_path, model_output)
-            if vis_path and os.path.exists(vis_path):
-                shutil.copy(vis_path, vis_output)
-        except Exception:
-            logger.exception("Failed to copy discovered model files to output location.")
-
+        model_out, png_out, html_out = self._copy_outputs(model_path, fmt, png_path, html_path)
         events_df.unpersist()
-        logger.info(f"Completed. BPMN model written to {model_output} (visualization: {vis_output}).")
-
-        self.modeler_config["output_path"] = model_output
+        logger.info(f"BPMN model → {model_out}  PNG → {png_out}  HTML → {html_out}")
+        self.modeler_config["output_path"] = model_out
 
         if caller == "api":
-            if os.path.exists(vis_output):
-                return FileResponse(vis_output, media_type="image/png", filename=Path(vis_output).name)
-            return FileResponse(model_output, media_type="application/xml", filename=Path(model_output).name)
-
-        return model_output
+            return self._api_response(model_out, png_out, html_out)
+        return model_out
