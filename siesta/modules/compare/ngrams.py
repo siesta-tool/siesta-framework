@@ -38,20 +38,20 @@ def discover_ngrams(events: DataFrame, trace_labels: DataFrame, n: int = 2) -> D
         count_0        : int   - distinct label-0 traces containing this n-gram
         balance        : float - in [-1, 1]
                                  (count_1/total_1) - (count_0/total_0)
-                                 +1 → n-gram appears in ALL label-1 and NO label-0 traces
-                                 -1 → n-gram appears in ALL label-0 and NO label-1 traces
-                                  0 → equal relative coverage in both groups
+                                 +1 -> n-gram appears in ALL label-1 and NO label-0 traces
+                                 -1 -> n-gram appears in ALL label-0 and NO label-1 traces
+                                  0 -> equal relative coverage in both groups
         confidence_1   : float - in [0, 1]
                                  count_1 / (count_1 + count_0)
                                  P(label_1 | ngram present) - purity toward label-1.
-                                  1 → every trace containing this n-gram is label-1
-                                  0 → every trace containing this n-gram is label-0
-                                0.5 → n-gram is equally split between both groups
+                                  1 -> every trace containing this n-gram is label-1
+                                  0 -> every trace containing this n-gram is label-0
+                                0.5 -> n-gram is equally split between both groups
         confidence_0   : float - in [0, 1]
                                  count_0 / (count_0 + count_1)
                                  P(label_0 | ngram present) - purity toward label-0.
-                                  1 → every trace containing this n-gram is label-0
-                                  0 → every trace containing this n-gram is label-1
+                                  1 -> every trace containing this n-gram is label-0
+                                  0 -> every trace containing this n-gram is label-1
         support_1      : float - in [0, 1]
                                  count_1 / total_1
                                  P(ngram | label_1) - fraction of label-1 traces
@@ -150,7 +150,7 @@ def discover_ngrams(events: DataFrame, trace_labels: DataFrame, n: int = 2) -> D
             F.sum(F.when(F.col("label") == 0, 1).otherwise(0)).alias("count_0"),
         )
         # balance: normalised coverage difference
-        #   (count_1 / total_1) - (count_0 / total_0)  →  [-1, 1]
+        #   (count_1 / total_1) - (count_0 / total_0)  ->  [-1, 1]
         #   +1 = in ALL label-1 traces  and  NO  label-0 traces
         #   -1 = in ALL label-0 traces  and  NO  label-1 traces
         .withColumn(
@@ -158,7 +158,7 @@ def discover_ngrams(events: DataFrame, trace_labels: DataFrame, n: int = 2) -> D
             (F.col("count_1") / F.lit(total_1)) - (F.col("count_0") / F.lit(total_0))
         )
         # confidence_1: P(label_1 | ngram present) - purity toward label-1
-        #   count_1 / (count_1 + count_0)  →  [0, 1]
+        #   count_1 / (count_1 + count_0)  ->  [0, 1]
         #   1.0 = every trace containing this n-gram is label-1
         #   0.0 = every trace containing this n-gram is label-0
         .withColumn(
@@ -166,7 +166,7 @@ def discover_ngrams(events: DataFrame, trace_labels: DataFrame, n: int = 2) -> D
             F.col("count_1") / (F.col("count_1") + F.col("count_0"))
         )
         # confidence_0: P(label_0 | ngram present) - purity toward label-0
-        #   count_0 / (count_0 + count_1)  →  [0, 1]
+        #   count_0 / (count_0 + count_1)  ->  [0, 1]
         #   1.0 = every trace containing this n-gram is label-0
         #   0.0 = every trace containing this n-gram is label-1
         .withColumn(
@@ -174,7 +174,7 @@ def discover_ngrams(events: DataFrame, trace_labels: DataFrame, n: int = 2) -> D
             F.col("count_0") / (F.col("count_0") + F.col("count_1"))
         )
         # support_1: P(ngram | label_1) - fraction of label-1 traces containing this n-gram
-        #   count_1 / total_1  →  [0, 1]
+        #   count_1 / total_1  ->  [0, 1]
         #   1.0 = n-gram appears in every label-1 trace
         #   0.0 = n-gram never appears in any label-1 trace
         .withColumn(
@@ -182,7 +182,7 @@ def discover_ngrams(events: DataFrame, trace_labels: DataFrame, n: int = 2) -> D
             F.col("count_1") / F.lit(total_1)
         )
         # support_0: P(ngram | label_0) - fraction of label-0 traces containing this n-gram
-        #   count_0 / total_0  →  [0, 1]
+        #   count_0 / total_0  ->  [0, 1]
         #   1.0 = n-gram appears in every label-0 trace
         #   0.0 = n-gram never appears in any label-0 trace
         .withColumn(
@@ -190,7 +190,7 @@ def discover_ngrams(events: DataFrame, trace_labels: DataFrame, n: int = 2) -> D
             F.col("count_0") / F.lit(total_0)
         )
         # support: global frequency across ALL traces, regardless of label
-        #   (count_1 + count_0) / (total_1 + total_0)  →  [0, 1]
+        #   (count_1 + count_0) / (total_1 + total_0)  ->  [0, 1]
         #   1.0 = n-gram appears in every trace
         #   0.0 = n-gram appears in no trace
         .withColumn(
@@ -247,33 +247,33 @@ def save_ngram_results(
         Value to filter balance against. Required if balance_filter is set.
     balance_filter : str, optional
         Comparison operator for balance filtering. One of:
-            "gt"     → balance >  threshold
-            "lt"     → balance <  threshold
-            "gte"    → balance >= threshold
-            "lte"    → balance <= threshold
-            "abs_gt" → |balance| >  threshold
-            "abs_lt" → |balance| <  threshold
+            "gt"     -> balance >  threshold
+            "lt"     -> balance <  threshold
+            "gte"    -> balance >= threshold
+            "lte"    -> balance <= threshold
+            "abs_gt" -> |balance| >  threshold
+            "abs_lt" -> |balance| <  threshold
     confidence_1_threshold : float, optional
         Value to filter confidence_1 (label-1 purity) against.
         Required if confidence_1_filter is set.
     confidence_1_filter : str, optional
         Comparison operator for confidence_1 filtering. One of: "gt", "lt", "gte", "lte".
         Example: confidence_1_threshold=0.8, confidence_1_filter="gt"
-            → only n-grams where 80%+ of containing traces are label-1.
+            -> only n-grams where 80%+ of containing traces are label-1.
     confidence_0_threshold : float, optional
         Value to filter confidence_0 (label-0 recall) against.
         Required if confidence_0_filter is set.
     confidence_0_filter : str, optional
         Comparison operator for confidence_0 filtering. One of: "gt", "lt", "gte", "lte".
         Example: confidence_0_threshold=0.5, confidence_0_filter="gt"
-            → only n-grams present in more than 50% of label-0 traces.
+            -> only n-grams present in more than 50% of label-0 traces.
     support_threshold : float, optional
         Value to filter support (overall frequency) against.
         Required if support_filter is set.
     support_filter : str, optional
         Comparison operator for support filtering. One of: "gt", "lt", "gte", "lte".
         Example: support_threshold=0.1, support_filter="gt"
-            → only n-grams that appear in more than 10% of all traces.
+            -> only n-grams that appear in more than 10% of all traces.
     """
     fmt = fmt.lower()
     if fmt not in ("csv", "json"):
@@ -433,7 +433,7 @@ def create_network(input: str | pd.DataFrame | DataFrame) -> str:
             c = FALLBACK_COLORS[i % len(FALLBACK_COLORS)]
             DIRECTION_PALETTE[d] = {"edge": c, "highlight": c, "name": d}
 
-    # ── Parse ngrams → edges ──────────────────────────────────────────────────────
+    # ── Parse ngrams -> edges ──────────────────────────────────────────────────────
     # Each row:  A -> B -> C  produces edges  (A,B) and (B,C)
     # Stats are accumulated per (from_node, to_node, direction).
 
@@ -448,8 +448,8 @@ def create_network(input: str | pd.DataFrame | DataFrame) -> str:
         "rows": 0,
     })
 
-    nodes_seen: dict       = {}    # full_label → node_id
-    node_support_max: dict = {}    # full_label → max support seen on any incident edge
+    nodes_seen: dict       = {}    # full_label -> node_id
+    node_support_max: dict = {}    # full_label -> max support seen on any incident edge
 
     def get_node_id(label: str) -> int:
         if label not in nodes_seen:
@@ -512,7 +512,7 @@ def create_network(input: str | pd.DataFrame | DataFrame) -> str:
     # ── Build vis-network data ────────────────────────────────────────────────────
 
     # -- Nodes --
-    # Node size →  max support of any connected edge  (mapped to 20-55 px)
+    # Node size ->  max support of any connected edge  (mapped to 20-55 px)
     max_supp = max(node_support_max.values()) if node_support_max else 1.0
     max_supp = max_supp if max_supp > 0 else 1.0
 
@@ -569,7 +569,7 @@ def create_network(input: str | pd.DataFrame | DataFrame) -> str:
 
         palette  = DIRECTION_PALETTE[direction]
 
-        # Width: 1 px (conf=0) → 8 px (conf=1)
+        # Width: 1 px (conf=0) -> 8 px (conf=1)
         width = max(1, round(avg_confidence_1 * 8))
 
         # Curve offset for bidirectional edges
@@ -586,7 +586,7 @@ def create_network(input: str | pd.DataFrame | DataFrame) -> str:
         dashes = abs_balance < 0.3
 
         title = (
-            f"<b>{src}</b> → <b>{tgt}</b><br>"
+            f"<b>{src}</b> -> <b>{tgt}</b><br>"
             f"Direction: <b>{palette['name']}</b><br>"
             f"Avg confidence\u2081: {avg_confidence_1:.3f}<br>"
             f"Avg confidence\u2080: {avg_confidence_0:.3f}<br>"
@@ -852,12 +852,12 @@ def create_network(input: str | pd.DataFrame | DataFrame) -> str:
         <aside>
 
         <div>
-            <h2>Direction → colour</h2>
+            <h2>Direction -> colour</h2>
             <div id="legend-dir"></div>
         </div>
 
         <div>
-            <h2>|Balance| → opacity</h2>
+            <h2>|Balance| -> opacity</h2>
             <div class="enc-guide">
             <div class="enc-row"><div class="line-solid"></div>  Strong (≥0.6)</div>
             <div class="enc-row"><div class="line-medium"></div> Moderate (0.3-0.6)</div>
@@ -866,7 +866,7 @@ def create_network(input: str | pd.DataFrame | DataFrame) -> str:
         </div>
 
         <div>
-            <h2>confidence₁ → width</h2>
+            <h2>confidence₁ -> width</h2>
             <div class="enc-guide">
             <div class="enc-row"><div class="wline" style="height:7px"></div> High (≥0.8)</div>
             <div class="enc-row"><div class="wline" style="height:4px"></div> Medium (0.4-0.8)</div>
@@ -875,7 +875,7 @@ def create_network(input: str | pd.DataFrame | DataFrame) -> str:
         </div>
 
         <div>
-            <h2>Support → node size</h2>
+            <h2>Support -> node size</h2>
             <div class="node-guide">
             <div class="node-row"><div class="nbox" style="width:48px;height:22px">high</div> High support</div>
             <div class="node-row"><div class="nbox" style="width:34px;height:16px">mid</div>  Medium</div>

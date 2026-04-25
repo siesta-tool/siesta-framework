@@ -7,7 +7,7 @@ Steps (configurable via the `steps` list parameter):
   1  activity_attribute   - per-(activity, attribute) distribution: surprise / z-score
   2  position_conditioned - per-(activity, position-bucket, attribute): surprise / z-score
   3  ngram_context        - per-(n-gram ending at event, attribute): surprise / z-score
-  4  value_transition     - (prev→curr) value transition rarity, categorical only
+  4  value_transition     - (prev->curr) value transition rarity, categorical only
 
 Attribute keys matching a timestamp pattern are excluded automatically.
 Attribute values are stored as strings; numeric keys are detected via cast-success fraction.
@@ -458,7 +458,7 @@ _STEP_TIPS = {
     STEP_ACTIVITY_ATTR: "Laplace-surprise (categorical) or MAD z-score (numeric) per (activity, attribute) pair.",
     STEP_POSITION:      "Same as Step 1 but conditioned on the relative position bucket within the trace.",
     STEP_NGRAM:         "Same as Step 1 but conditioned on the n-gram of activities ending at this event.",
-    STEP_TRANSITION:    "Surprise of the (prev_value→curr_value) transition for categorical attributes.",
+    STEP_TRANSITION:    "Surprise of the (prev_value->curr_value) transition for categorical attributes.",
 }
 
 

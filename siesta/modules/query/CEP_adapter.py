@@ -256,8 +256,8 @@ def _build_dsl_attr_conditions(positive_event_names: list) -> List:
     """
     Convert DSL attribute constraints into native OpenCEP conditions.
  
-    StringLiteral constraints  →  SimpleCondition (unary, per-event check).
-    VarExpr constraints        →  BinaryCondition (cross-event equality /
+    StringLiteral constraints  ->  SimpleCondition (unary, per-event check).
+    VarExpr constraints        ->  BinaryCondition (cross-event equality /
                                   arithmetic), where $N refers to the Nth
                                   positive event in left-to-right pattern order
                                   (1-based).

@@ -81,7 +81,7 @@
   <text class="ts" x="340" y="182" text-anchor="middle" dominant-baseline="central">app.py · config.py · sparkManager · storageFactory · interfaces (SiestaModule, StorageManager)</text>
 </g>
 
-<!-- Core → modules -->
+<!-- Core -> modules -->
 <line x1="340" y1="210" x2="340" y2="256" class="arr" marker-end="url(#arrow)"/>
 
 <!-- ── Label: feature modules ── -->
@@ -132,7 +132,7 @@
   </g>
 </g>
 
-<!-- Modules → model -->
+<!-- Modules -> model -->
 <line x1="129" y1="420" x2="129" y2="480" class="faint"/>
 <line x1="340" y1="420" x2="340" y2="480" class="arr" marker-end="url(#arrow)"/>
 <line x1="551" y1="420" x2="551" y2="480" class="faint"/>
@@ -147,7 +147,7 @@
   <text class="ts" x="340" y="521" text-anchor="middle" dominant-baseline="central">DataModel · StorageModel · MiningModel · SystemModel · MetaData · configs</text>
 </g>
 
-<!-- Model → storage interface -->
+<!-- Model -> storage interface -->
 <line x1="340" y1="536" x2="340" y2="580" class="arr" marker-end="url(#arrow)"/>
 <text class="ts" x="340" y="574" text-anchor="middle">storage abstraction</text>
 
@@ -158,7 +158,7 @@
   <text class="ts" x="340" y="621" text-anchor="middle" dominant-baseline="central">read/write: SequenceTable · PairsIndex · ActivityIndex · CountTable · Metadata · Constraints</text>
 </g>
 
-<!-- Interface → implementation -->
+<!-- Interface -> implementation -->
 <line x1="340" y1="636" x2="340" y2="672" class="arr" marker-end="url(#arrow)"/>
 <text class="ts" x="340" y="666" text-anchor="middle">implementations</text>
 
@@ -169,7 +169,7 @@
   <text class="ts" x="340" y="713" text-anchor="middle" dominant-baseline="central">Delta Lake tables via PySpark · pluggable via StorageManagerFactory</text>
 </g>
 
-<!-- S3 → infra -->
+<!-- S3 -> infra -->
 <line x1="340" y1="720" x2="340" y2="758" class="arr" marker-end="url(#arrow)"/>
 <text class="ts" x="340" y="752" text-anchor="middle">infrastructure (docker-compose)</text>
 

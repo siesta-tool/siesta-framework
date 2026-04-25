@@ -258,7 +258,7 @@ class Analysing(SiestaModule):
         """Detect self-loops and non-self-loops in an indexed event log.
 
         A **self-loop** is an activity immediately followed by itself.
-        A **non-self-loop** is a minimal cycle A → … → A where A does not appear in the body.
+        A **non-self-loop** is a minimal cycle A -> … -> A where A does not appear in the body.
 
         Returns JSON with `self_loops` and `non_self_loops` arrays. Each entry contains the
         activity pattern and its support fraction across groups.
@@ -315,7 +315,7 @@ class Analysing(SiestaModule):
             within the trace (bucketed).
         - **Step 3** - N-gram context: same as step 1 but conditioned on the n-gram of activities
             ending at this event.
-        - **Step 4** - Value transitions: flags rare (prev_value → curr_value) transitions
+        - **Step 4** - Value transitions: flags rare (prev_value -> curr_value) transitions
             within a trace (categorical attributes only).
 
         **Config fields:**

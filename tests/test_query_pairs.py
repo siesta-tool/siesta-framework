@@ -75,8 +75,8 @@ class TestExtractRespondedPairs:
         assert b1[0].target.label == "C"
 
     def test_or_in_sequence_each_branch_has_three_pairs(self):
-        # A (B||C) D → branch 0: ABD → (A,B),(A,D),(B,D)
-        #              branch 1: ACD → (A,C),(A,D),(C,D)
+        # A (B||C) D -> branch 0: ABD -> (A,B),(A,D),(B,D)
+        #              branch 1: ACD -> (A,C),(A,D),(C,D)
         pairs = extract_responded_pairs("A (B||C) D")
         b0 = [(p.source.label, p.target.label) for p in pairs if p.branch_id == 0]
         b1 = [(p.source.label, p.target.label) for p in pairs if p.branch_id == 1]
@@ -103,7 +103,7 @@ class TestExtractRespondedPairs:
         assert pairs[0].target_quantifier == Quantifier.PLUS
 
     def test_star_and_plus_together(self):
-        # A* B+ C → pairs: (A*,B+,?), (A*,C), (B+,C)
+        # A* B+ C -> pairs: (A*,B+,?), (A*,C), (B+,C)
         pairs = extract_responded_pairs("A* B+ C")
         keys = [(p.source.label, p.target.label) for p in pairs]
         assert ("A", "B") in keys
@@ -179,7 +179,7 @@ class TestExtractInfoPairs:
 
     def test_literal_attr_only_constrained_activity(self):
         info = extract_info_pairs('A[resource="r1"] B')
-        # B has no constraints → no (B,B) pair
+        # B has no constraints -> no (B,B) pair
         assert ("B", "B", 0) not in info
 
     def test_two_constrained_activities(self):
@@ -233,5 +233,5 @@ class TestExtractInfoPairs:
 
     def test_plus_and_attr_same_activity(self):
         info = extract_info_pairs('A[resource="r1"]+ B')
-        # A is PLUS with a constraint → still just one (A,A,0) self-pair
+        # A is PLUS with a constraint -> still just one (A,A,0) self-pair
         assert ("A", "A", 0) in info

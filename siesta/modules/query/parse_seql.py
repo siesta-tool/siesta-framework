@@ -79,9 +79,9 @@ class VarExpr:
 
     Examples::
 
-        $1          →  VarExpr(var_id=1)
-        $2+5        →  VarExpr(var_id=2, op='+', offset=5)
-        $3-10       →  VarExpr(var_id=3, op='-', offset=10)
+        $1          ->  VarExpr(var_id=1)
+        $2+5        ->  VarExpr(var_id=2, op='+', offset=5)
+        $3-10       ->  VarExpr(var_id=3, op='-', offset=10)
 
     Notes
     -----
@@ -326,7 +326,7 @@ def tokenize(text: str) -> List[Token]:
             raise SyntaxError(
                 f"Unexpected character {text[pos]!r} at position {pos}"
             )
-        idx = int(m.lastgroup[1:])   # "G3" → 3
+        idx = int(m.lastgroup[1:])   # "G3" -> 3
         tok_type = _RAW_PATTERNS[idx][0]
         tokens.append(Token(tok_type, m.group(), pos))
         pos = m.end()
@@ -471,7 +471,7 @@ class Parser:
     """
     Recursive-descent parser for the DSL grammar.
 
-    Operator precedence (high → low)
+    Operator precedence (high -> low)
     ---------------------------------
     1. Quantifier  (* + ?)
     2. Sequence    (concatenation)
@@ -614,7 +614,7 @@ class BoundActivity:
     """
     activity: ActivityNode
     quantifier: Quantifier
-    negated: bool = False          # True  → forbidden-between marker
+    negated: bool = False          # True  -> forbidden-between marker
 
     def __repr__(self) -> str:
         prefix = "!" if self.negated else ""
@@ -1075,7 +1075,7 @@ def query_index(
     pairs : List[RespondedPair]
         Output of :func:`extract_responded_pairs`.
     index : ActivityPairsIndex
-        Maps ``(label_a, label_b)`` →
+        Maps ``(label_a, label_b)`` ->
         ``[(trace_id, pos_a, pos_b, attrs_a, attrs_b), …]``.
 
     Returns

@@ -1,8 +1,8 @@
 """
 Process model discovery — no graphviz required.
 
-Model formats:  DFG → XML (.xml),  BPMN (inductive) → BPMN 2.0 (.bpmn)
-PNG:            matplotlib, layered L→R layout, orthogonal edge routing
+Model formats:  DFG -> XML (.xml),  BPMN (inductive) -> BPMN 2.0 (.bpmn)
+PNG:            matplotlib, layered L->R layout, orthogonal edge routing
 HTML:           pyvis (interactive physics simulation) if installed,
                 else static matplotlib SVG fallback
 """
@@ -188,7 +188,7 @@ def _draw_edge(ax, p1, k1: str, p2, k2: str, label: str = ''):
         return
 
     if x2 > x1 + 0.5:
-        # Forward edge: orthogonal H-V-H routing (exit right → drop/rise → enter left).
+        # Forward edge: orthogonal H-V-H routing (exit right -> drop/rise -> enter left).
         sx = x1 + _margin(k1, 1, 0)
         tx = x2 - _margin(k2, 1, 0)
         mid_x = (sx + tx) / 2
@@ -236,7 +236,7 @@ def _build_figure(G: nx.DiGraph, pos: dict, node_info: dict, edge_labels: dict) 
     xlim = (min(xs) - x_pad, max(xs) + x_pad)
     ylim = (min(ys) - y_pad, max(ys) + y_pad)
 
-    # Figure size in inches ≈ data range in units → 1 unit ≈ 1 inch in both axes,
+    # Figure size in inches ≈ data range in units -> 1 unit ≈ 1 inch in both axes,
     # keeping patch shapes undistorted without needing set_aspect('equal').
     fig_w = max(8.0, xlim[1] - xlim[0])
     fig_h = max(4.0, ylim[1] - ylim[0])
@@ -484,12 +484,12 @@ def _discover_dfg(event_log, noise_threshold: float = 0.0, activity_durations: d
         pos = _layered_layout(G)
         mpl_fig = None
 
-        # PNG: PM4Py/graphviz (best quality) → matplotlib fallback
+        # PNG: PM4Py/graphviz (best quality) -> matplotlib fallback
         if not _pm4py_png_dfg(dfg, start_acts, end_acts, png_path, activity_durations):
             mpl_fig = _build_figure(G, pos, node_info, edge_labels)
             _save_png(mpl_fig, png_path)
 
-        # HTML: pyvis (interactive) → matplotlib SVG fallback
+        # HTML: pyvis (interactive) -> matplotlib SVG fallback
         if not _save_html_pyvis(G, node_info, edge_labels, html_path, 'Directly-Follows Graph'):
             if mpl_fig is None:
                 mpl_fig = _build_figure(G, pos, node_info, edge_labels)
@@ -551,12 +551,12 @@ def _export_bpmn_model(bpmn_model, activity_durations: dict = None):
         pos = _layered_layout(G)
         mpl_fig = None
 
-        # PNG: PM4Py/graphviz (classical BPMN rendering) → matplotlib fallback
+        # PNG: PM4Py/graphviz (classical BPMN rendering) -> matplotlib fallback
         if not _pm4py_png_bpmn(bpmn_model, png_path, activity_durations):
             mpl_fig = _build_figure(G, pos, node_info, {})
             _save_png(mpl_fig, png_path)
 
-        # HTML: pyvis (interactive) → matplotlib SVG fallback
+        # HTML: pyvis (interactive) -> matplotlib SVG fallback
         if not _save_html_pyvis(G, node_info, {}, html_path, 'BPMN Process Model'):
             if mpl_fig is None:
                 mpl_fig = _build_figure(G, pos, node_info, {})
@@ -578,8 +578,8 @@ def discover_process_model(df: SparkDataFrame, algo: str = "inductive",
     Args:
         df: Spark DataFrame — columns 'case:concept:name', 'concept:name', 'time:timestamp'
             (legacy 'trace_id', 'event_type', 'timestamp' are renamed automatically).
-        algo: 'dfg' → Directly-Follows Graph (exported as XML);
-              'inductive' → BPMN via Inductive Miner (exported as BPMN 2.0 XML).
+        algo: 'dfg' -> Directly-Follows Graph (exported as XML);
+              'inductive' -> BPMN via Inductive Miner (exported as BPMN 2.0 XML).
         noise_threshold: 0.0–1.0, higher = simpler model.
         filter_percentile: Pre-filter log variants by frequency percentile (0.0–1.0).
         activity_durations: Optional {activity: avg_seconds} shown in visualisations.
@@ -613,7 +613,7 @@ def discover_process_model(df: SparkDataFrame, algo: str = "inductive",
     if algo == 'dfg':
         return _discover_dfg(event_log, noise_threshold, activity_durations)
 
-    # inductive → BPMN
+    # inductive -> BPMN
     if noise_threshold > 0.0:
         from pm4py.algo.discovery.inductive.variants.imf import IMFParameters
         process_tree = inductive_miner.apply(

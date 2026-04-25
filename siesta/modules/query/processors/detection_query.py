@@ -64,7 +64,7 @@ def detect(pattern: str, config: Dict[str, Any], metadata: MetaData):
         branch_pruned_dfs.append(branch_pruned)
 
     if not branch_pruned_dfs:
-        # No required pairs (e.g. all STAR) → every trace with matching data qualifies
+        # No required pairs (e.g. all STAR) -> every trace with matching data qualifies
         pruned_trace_ids = tagged_df.select("trace_id").distinct()
     elif len(branch_pruned_dfs) == 1:
         pruned_trace_ids = branch_pruned_dfs[0].distinct()
