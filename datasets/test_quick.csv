@@ -1,4 +1,0 @@
-trace_id,position,activity,timestamp,resource,role,cost,lifecycle
-trace_1,0,A,2025-01-01T09:00:00,r1,clerk,5.0,complete
-trace_1,1,B,2025-01-01T09:05:00,r2,analyst,7.5,complete
-trace_1,2,B,2025-01-01T09:10:00,r3,system,2.0,complete
