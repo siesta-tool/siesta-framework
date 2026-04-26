@@ -18,6 +18,7 @@ services:
       - SPARK_USER=spark
     volumes:
       - .:/workspace
+      - siesta-output:/workspace/output
     depends_on:
       - spark-master
       - spark-worker
@@ -196,3 +197,4 @@ volumes:
   minio-data: {}
   kafka_data: {}
   zookeeper_data: {}
+  siesta-output: {}

@@ -323,9 +323,9 @@ class S3Manager(StorageManager):
             The S3A URI to access the uploaded file
         """
         
-        key = destination_path + f"_{int(datetime.now().timestamp())}"
-        if key.startswith("/"):
-            key = key[1:]
+        key = destination_path
+        if key.contains("/"):
+            key = key.split("/")[-1]
         key = f"{preprocess_config.get('log_name', 'default_log')}/batches/{key}"
             
         logger.info(f"Uploading '{local_path}' to bucket '{preprocess_config.get('storage_namespace', 'siesta')}' with key '{key}'...")

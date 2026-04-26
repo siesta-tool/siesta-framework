@@ -10,12 +10,11 @@ from pyspark.sql.types import StringType, IntegerType, MapType, StructType, Stru
 from pyspark.sql.functions import monotonically_increasing_id, lit
 from datetime import datetime, timezone
 import os
-import logging
 from pyspark.sql.window import Window
+from pyspark.sql.functions import row_number, col
+import logging
 
 logger = logging.getLogger(__name__)
-from pyspark.sql.functions import row_number, col
-from delta.tables import DeltaTable
 
 from siesta.model.StorageModel import MetaData
 
@@ -130,7 +129,7 @@ def process_event_log(preprocess_config: dict, metadata: MetaData) -> DataFrame:
     log_path = preprocess_config.get("log_path")
     if not log_path:
         raise ValueError("Log path not specified in configuration")
-    filename = os.path.basename(log_path)
+    filename = f"{int(datetime.now().timestamp())}_" + os.path.basename(log_path)
     spark = get_spark_session()
     if spark is None:
         raise RuntimeError("Spark session is not initialized.")
@@ -494,10 +493,9 @@ def upload_log_file_object(preprocess_config: dict, file: Any, destination_path:
     storage = get_storage_manager()
     if not storage:
         raise RuntimeError("Storage manager is not initialized.")
-
+    destination_path = f"{int(datetime.now().timestamp())}_" + destination_path
     logger.info(f"Uploading file object to storage as {destination_path}...")
     s3_path = storage.upload_file_object(preprocess_config, file, destination_path)
     logger.info(f"File uploaded to: {s3_path}")
-    #TODO: handle s3 path
     return s3_path
 

@@ -1,4 +1,5 @@
 import argparse
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Dict
 from fastapi import Form, UploadFile
@@ -137,7 +138,7 @@ class Indexing(SiestaModule):
                 return "Indexing: Uploaded log file has no filename. Aborting."
             # Ensure batch mode in case of file upload
             self.index_config["enable_streaming"] = False          
-            logger.info(f"Indexing: Running indexing with args: {log_file.filename}")
+            logger.info(f"Indexing: Running indexing with args: {self.index_config}")
             self.index_config["log_path"] = upload_log_file_object(self.index_config, log_file, log_file.filename)
             self.begin_builders(caller="api")
             return "Indexing: Batch processing completed."

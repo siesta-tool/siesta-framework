@@ -33,9 +33,10 @@ RUN /opt/bitnami/python/bin/python3 -m pip install --prefer-binary \
 COPY siesta/dockerbase/API/entrypoint.sh /usr/local/bin/siesta-api-entrypoint.sh
 RUN chmod 0755 /usr/local/bin/siesta-api-entrypoint.sh
 
-# Pre-create the Ivy cache dir owned by the runtime user so the named volume
-# inherits the correct ownership on first mount.
-RUN mkdir -p /tmp/.ivy2 && chown -R 1001:0 /tmp/.ivy2
+# Pre-create dirs owned by the runtime user so named volumes inherit the
+# correct ownership on first mount.
+RUN mkdir -p /tmp/.ivy2 /workspace/output && chown -R 1001:0 /tmp/.ivy2 /workspace/output
+
 
 USER 1001
 
