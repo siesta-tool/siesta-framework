@@ -1,3 +1,4 @@
+import datetime
 from typing import Any, Dict
 import boto3
 from botocore.exceptions import ClientError
@@ -322,7 +323,7 @@ class S3Manager(StorageManager):
             The S3A URI to access the uploaded file
         """
         
-        key = destination_path
+        key = destination_path + f"_{int(datetime.now().timestamp())}"
         if key.startswith("/"):
             key = key[1:]
         key = f"{preprocess_config.get('log_name', 'default_log')}/batches/{key}"
