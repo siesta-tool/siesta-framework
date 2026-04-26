@@ -405,6 +405,7 @@ def _parse_rows(config: EventConfig, df: DataFrame) -> DataFrame:
     # Get the source column name for trace_id to use in partitioning
     trace_id_source = config.field_mappings.get('trace_id')
     position_source = config.field_mappings.get('position')
+    activity_source = config.field_mappings.get('activity')
     timestamp_field = next(iter(config.timestamp_fields), None)
     timestamp_source = config.field_mappings.get(timestamp_field) if timestamp_field else None
 
@@ -412,7 +413,7 @@ def _parse_rows(config: EventConfig, df: DataFrame) -> DataFrame:
     has_timestamp_col = timestamp_source is not None and timestamp_source in df.columns
 
     # Preserve original row order as stable tiebreaker
-    df = df.withColumn("_row_idx", monotonically_increasing_id())
+    df = df.dropDuplicates([trace_id_source, activity_source, timestamp_source]).withColumn("_row_idx", monotonically_increasing_id())
 
     if has_timestamp_col:
         order_col = F.col(timestamp_source).cast("timestamp")

@@ -255,7 +255,7 @@ class Comparing(SiestaModule):
         )
 
         self.metadata = self.storage.read_metadata_table(self.metadata)
-        all_events_df = self.storage.read_sequence_table(self.metadata).dropDuplicates(["trace_id", "activity", "start_timestamp"])
+        all_events_df = self.storage.read_sequence_table(self.metadata)
         all_events_df.cache()
 
         method = self.comparator_config.get("method", "ngrams")
