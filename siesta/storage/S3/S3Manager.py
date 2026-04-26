@@ -13,6 +13,7 @@ from siesta.model.DataModel import Event, EventConfig, Last_Checked_table_schema
 from siesta.core.config import get_system_config
 import siesta.core.sparkManager as SparkManager
 from delta.tables import DeltaTable
+from datetime import datetime
 
 import logging
 logger = logging.getLogger(__name__)
@@ -323,8 +324,9 @@ class S3Manager(StorageManager):
         """
         
         key = destination_path
-        if key.startswith("/"):
-            key = key[1:]
+        if key.contains("/"):
+            key = key.split("/")[-1]
+        key += f".{int(datetime.now().timestamp())}"
         key = f"{preprocess_config.get('log_name', 'default_log')}/batches/{key}"
             
         logger.info(f"Uploading '{local_path}' to bucket '{preprocess_config.get('storage_namespace', 'siesta')}' with key '{key}'...")
