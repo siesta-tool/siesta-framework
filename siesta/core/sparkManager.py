@@ -98,9 +98,11 @@ def startup(config: Dict[str, Any] = {}) -> None:
             .config("spark.hadoop.fs.s3a.multipart.size", "104857600") \
             .config("spark.jars.packages", packages) \
             .config("spark.sql.adaptive.enabled", "true") \
-            .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
-            # .config("spark.jars.ivy", "/tmp/.ivy2")
-        
+            .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
+
+        if os.getenv("SPARK_IVY_DIR"):
+            builder = builder.config("spark.jars.ivy", os.getenv("SPARK_IVY_DIR"))
+
         # Configure S3 credentials if provided
         if config and config.get("s3_access_key") and config.get("s3_secret_key"):
             builder = builder \

@@ -9,15 +9,19 @@ services:
     build:
       context: .
       dockerfile: siesta/dockerbase/API/API.dockerfile
+    init: true
     working_dir: /workspace
     environment:
       - SIESTA_PROJECT_ROOT=/workspace
-      - SIESTA_VENV_DIR=/tmp/siesta-api-venv
       - SIESTA_CONFIG=${SIESTA_CONFIG:-/workspace/config/siesta.docker.config.json}
       - HADOOP_USER_NAME=spark
       - SPARK_USER=spark
+      - MPLCONFIGDIR=/tmp/matplotlib
+      - SPARK_IVY_DIR=/tmp/.ivy2
     volumes:
       - .:/workspace
+      - spark-ivy-cache:/tmp/.ivy2
+      - siesta-output:/workspace/output
     depends_on:
       - spark-master
       - spark-worker
@@ -196,3 +200,5 @@ volumes:
   minio-data: {}
   kafka_data: {}
   zookeeper_data: {}
+  siesta-output: {}
+  spark-ivy-cache: {}
