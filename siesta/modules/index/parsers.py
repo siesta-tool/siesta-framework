@@ -130,7 +130,7 @@ def process_event_log(preprocess_config: dict, metadata: MetaData) -> DataFrame:
     log_path = preprocess_config.get("log_path")
     if not log_path:
         raise ValueError("Log path not specified in configuration")
-    filename = os.path.basename(log_path) + f"_{int(datetime.now().timestamp())}"
+    filename = os.path.basename(log_path)
     spark = get_spark_session()
     if spark is None:
         raise RuntimeError("Spark session is not initialized.")
