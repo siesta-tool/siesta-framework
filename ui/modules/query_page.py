@@ -24,6 +24,13 @@ def render_query_response(response: dict, method: str) -> None:
 
     if method == "detection" and isinstance(response.get("detected"), list):
         st.subheader("Detection results")
+        if response.get("time") is not None:
+            try:
+                elapsed = float(response["time"])
+                st.metric("Elapsed time", f"{elapsed:.2f}s")
+            except (TypeError, ValueError):
+                st.caption(f"Processed in {response['time']} seconds")
+
         total = response.get("total", len(response.get("detected", [])))
         st.metric("Detected traces", total)
 
@@ -42,17 +49,17 @@ def render_query_response(response: dict, method: str) -> None:
             support_chart = {row["trace_id"]: row["support"] for row in rows if row["trace_id"] is not None}
             if support_chart:
                 st.bar_chart(support_chart)
+        return
 
+    if method == "exploration" and isinstance(response.get("explored"), list):
+        st.subheader("Exploration results")
         if response.get("time") is not None:
             try:
                 elapsed = float(response["time"])
                 st.metric("Elapsed time", f"{elapsed:.2f}s")
             except (TypeError, ValueError):
                 st.caption(f"Processed in {response['time']} seconds")
-        return
-
-    if method == "exploration" and isinstance(response.get("explored"), list):
-        st.subheader("Exploration results")
+                
         explored = response["explored"]
         rows = []
         for item in explored:
@@ -68,12 +75,7 @@ def render_query_response(response: dict, method: str) -> None:
             if support_chart:
                 st.bar_chart(support_chart)
 
-        if response.get("time") is not None:
-            try:
-                elapsed = float(response["time"])
-                st.metric("Elapsed time", f"{elapsed:.2f}s")
-            except (TypeError, ValueError):
-                st.caption(f"Processed in {response['time']} seconds")
+
         return
 
     if method == "statistics" and isinstance(response, dict):
@@ -87,6 +89,13 @@ def render_query_response(response: dict, method: str) -> None:
                 stats_rows.append(row)
         if stats_rows:
             st.subheader("Statistics summary")
+            if response.get("time") is not None:
+                try:
+                    elapsed = float(response["time"])
+                    st.metric("Elapsed time", f"{elapsed:.2f}s")
+                except (TypeError, ValueError):
+                    st.caption(f"Processed in {response['time']} seconds")
+
             st.table(stats_rows)
             durations = {
                 row["pattern"]: row["total_duration"]
@@ -102,13 +111,6 @@ def render_query_response(response: dict, method: str) -> None:
                 st.bar_chart(durations)
             if completions:
                 st.line_chart(completions)
-
-            if response.get("time") is not None:
-                try:
-                    elapsed = float(response["time"])
-                    st.metric("Elapsed time", f"{elapsed:.2f}s")
-                except (TypeError, ValueError):
-                    st.caption(f"Processed in {response['time']} seconds")
             return
 
     format_response(response)
@@ -125,6 +127,10 @@ def render(base_url: str) -> None:
 
     method = st.selectbox("Query method", ["statistics", "detection", "exploration"])
 
+    explore_mode = "accurate"
+    if method == "exploration":
+        explore_mode = st.selectbox("Explore mode", ["accurate", "fast", "hybrid"], index=0)
+
     with st.form("query_form"):
         log_name = st.text_input("Log name", "example_log")
         storage_namespace = st.text_input("Storage namespace", "siesta")
@@ -136,19 +142,17 @@ def render(base_url: str) -> None:
             max_value=1.0,
             format="%.2f",
         )
-        explore_mode = "accurate"
-        explore_k = 10
+        explore_k = 0
 
         if method == "exploration":
-            explore_mode = st.selectbox("Explore mode", ["accurate", "fast", "hybrid"], index=0)
             explore_k = st.number_input(
                 "Explore K",
                 value=10,
                 min_value=2,
-                disabled=explore_mode != "accurate",
-                help="Only used when Explore mode is accurate.",
+                disabled=explore_mode == "accurate",
+                help="Number of candidates to explore (not used in accurate mode).",
             )
-            if explore_mode != "accurate":
+            if explore_mode == "accurate":
                 explore_k = 0
 
         submit = st.form_submit_button("Run query", disabled=st.session_state.query_running, key="run_query_button")

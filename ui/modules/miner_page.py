@@ -3,6 +3,7 @@
 import json
 
 import streamlit as st
+from streamlit.components.v1 import html as components_html
 
 from common import api_post, format_response
 
@@ -48,6 +49,41 @@ def _build_rule_graph(mined: list[dict]) -> str:
         lines.append("empty [label=\"No rules to visualize\", shape=plaintext]")
     lines.append("}")
     return "\n".join(lines)
+
+
+def _build_pyvis_html(mined: list[dict]) -> str | None:
+    try:
+        from pyvis.network import Network
+    except ImportError:
+        return None
+
+    net = Network(height="650px", width="100%", directed=True)
+    net.toggle_physics(True)
+    net.barnes_hut()
+
+    for item in mined:
+        category = item.get("category", "")
+        source = item.get("source", "") or "?"
+        target = item.get("target", "")
+        template = item.get("template", "")
+        support = item.get("support", "")
+        color = _rule_color(category)
+
+        title_text = (
+            f"Category: {category} Template: {template} Support: {support} Source: {source}"
+        )
+        net.add_node(source, label=source, title=title_text, color=color)
+
+        if target:
+            target_title = (
+                f"Category: {category} Template: {template} Support: {support} Target: {target}"
+            )
+            net.add_node(target, label=target, title=target_title, color=color)
+            edge_label = f"{template} ({support})"
+            net.add_edge(source, target, label=edge_label, title=edge_label, color=color)
+
+    html = net.generate_html()
+    return html
 
 
 def render_miner_response(response: dict) -> None:
@@ -101,27 +137,30 @@ def render_miner_response(response: dict) -> None:
             max_value=1.0,
             value=0.0,
             step=0.05,
+            key="miner_support_filter",
             help="Only show rules with support equal to or larger than this threshold.",
         )
 
-        if rows:
-            st.table(rows)
-            counts = {}
+        filtered_rows = []
+        for row in rows:
+            try:
+                support_val = float(row["support"])
+            except (TypeError, ValueError):
+                support_val = 0.0
+            if support_val >= min_support:
+                filtered_rows.append(row)
+
+        if filtered_rows:
+            st.table(filtered_rows)
             supports = {}
-            for row in rows:
-                category = row["category"]
-                support_val = None
-                try:
-                    support_val = float(row["support"])
-                except (TypeError, ValueError):
-                    continue
-                counts[category] = counts.get(category, 0) + 1
+            for row in filtered_rows:
+                support_val = float(row["support"])
                 supports[f"{row['source']}→{row['target']} ({row['template']})"] = support_val
 
-            if counts:
-                st.bar_chart(counts)
             if supports:
                 st.bar_chart(supports)
+        elif rows:
+            st.info(f"No rules match support threshold >= {min_support:.2f}.")
 
         filtered_mined = []
         for item in mined:
@@ -132,7 +171,7 @@ def render_miner_response(response: dict) -> None:
             if support_val >= min_support:
                 filtered_mined.append(item)
 
-        graph_code = _build_rule_graph(filtered_mined)
+        graph_html = _build_pyvis_html(filtered_mined)
         with st.expander("Rule visualization"):
             st.markdown(
                 "Each node represents an activity value. "
@@ -140,7 +179,11 @@ def render_miner_response(response: dict) -> None:
                 "If a rule has no target, the node itself shows the template and support for that activity. "
                 "Edge color indicates the rule category."
             )
-            st.graphviz_chart(graph_code)
+            if graph_html:
+                components_html(graph_html, height=700, scrolling=True)
+            else:
+                graph_code = _build_rule_graph(filtered_mined)
+                st.graphviz_chart(graph_code)
 
         with st.expander("Raw response"):
             st.json(response)
@@ -170,10 +213,24 @@ def render(base_url: str) -> None:
                 ["*", "positional", "existential", "ordered", "unordered", "negation"],
                 default=["*"],
             )
-            grouping = st.selectbox("Grouping", ["trace", "window"], index=0)
+            use_window_grouping = st.checkbox(
+                "Enable window grouping",
+                value=False,
+                help="Activate window grouping and enable the window size field."
+            )
+            grouping_options = ["trace"]
+            if use_window_grouping:
+                grouping_options.append("window")
+            grouping = st.selectbox("Grouping", grouping_options, index=0)
 
         with col2:
-            window_size = st.number_input("Window size", value=30, min_value=1)
+            window_size = st.number_input(
+                "Window size",
+                value=30,
+                min_value=1,
+                disabled=not use_window_grouping,
+                help="Only active when window grouping is enabled.",
+            )
             support_threshold = st.number_input(
                 "Support threshold",
                 value=0.0,

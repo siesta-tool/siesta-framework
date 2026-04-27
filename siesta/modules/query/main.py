@@ -126,9 +126,13 @@ class Querying(SiestaModule):
 
         config = query_config.model_dump()
         config["method"] = "statistics"
-        self._load_query_config(config)
-        self._load_metadata()
-
+        try:
+            self._load_query_config(config)
+            self._load_metadata()
+        except Exception as e:
+            logger.exception(f"Error processing query config: {e}")
+            return {"code": 400, "error": f"Invalid query configuration: {e}"}
+        
         return timed(process_stats_query, "Stats Query: ", self.query_config, self.metadata)
 
     def api_detection(self, query_config: Annotated[QueryConfig, Body(
@@ -159,8 +163,12 @@ class Querying(SiestaModule):
 
         config = query_config.model_dump()
         config["method"] = "detection"
-        self._load_query_config(config)
-        self._load_metadata()
+        try:
+            self._load_query_config(config)
+            self._load_metadata()
+        except Exception as e:
+            logger.exception(f"Error processing query config: {e}")
+            return {"code": 400, "error": f"Invalid query configuration: {e}"}
 
         return timed(process_detection_query, "Detection Query: ", self.query_config, self.metadata)
 
@@ -194,9 +202,13 @@ class Querying(SiestaModule):
 
         config = query_config.model_dump()
         config["method"] = "exploration"
-        self._load_query_config(config)
-        self._load_metadata()
-
+        try:
+            self._load_query_config(config)
+            self._load_metadata()
+        except Exception as e:
+            logger.exception(f"Error processing query config: {e}")
+            return {"code": 400, "error": f"Invalid query configuration: {e}"}
+        
         return timed(process_exploration_query, "Exploration Query: ", self.query_config, self.metadata)
 
     # ------------------------------------------------------------------
