@@ -83,14 +83,10 @@ def _render_analyser_response(response: Any, method: str) -> None:
     if isinstance(response, dict) and response.get("code") is not None:
         code = response["code"]
         message = response.get("message")
-        if code == 200:
-            st.success(f"Success ({code})")
-            if message:
-                st.markdown(f"**{message}**")
-        else:
-            st.error(f"Response code: {code}")
-            if message:
-                st.markdown(f"**{message}**")
+        if code != 200:
+            st.error(f"Error (code {code})" + (f": {message}" if message else ""))
+            return
+        st.success(f"Success ({code})")
 
     if method == "loop_detection" and isinstance(response, dict):
         total_groups = response.get("total_groups")
@@ -139,19 +135,20 @@ def _render_analyser_response(response: Any, method: str) -> None:
             st.json(response)
         return
 
-    if isinstance(response, list):
+    if isinstance(response, dict) and "data" in response:
+        data = response["data"]
         st.subheader(f"{method.replace('_', ' ').title()} results")
-        st.table(response)
+        st.table(data)
 
         if method == "durations":
             support_chart = {
                 item.get("activity", "?"): float(item.get("avg_duration_sec", 0) or 0)
-                for item in response
+                for item in data
                 if item.get("activity") is not None
             }
             count_chart = {
                 item.get("activity", "?"): int(item.get("occurrence_count", 0) or 0)
-                for item in response
+                for item in data
                 if item.get("activity") is not None
             }
             if support_chart:
@@ -164,11 +161,11 @@ def _render_analyser_response(response: Any, method: str) -> None:
         if method == "directly_follows":
             support_chart = {
                 f"{item.get('source','?')}→{item.get('target','?')}": float(item.get("support", 0) or 0)
-                for item in response
+                for item in data
             }
             duration_chart = {
                 f"{item.get('source','?')}→{item.get('target','?')}": float(item.get("avg_duration_sec", 0) or 0)
-                for item in response
+                for item in data
             }
             if support_chart:
                 st.markdown("### Support by direct follow edge")
@@ -322,10 +319,12 @@ def render(base_url: str) -> None:
     if st.session_state.analyser_submit_requested and not st.session_state.analyser_running:
         st.session_state.analyser_running = True
         st.session_state.analyser_submit_requested = False
-        with st.spinner("Running analyser..."):
-            response = api_post(f"analysing/{method}", base_url, payload=analyser_config)
-            _render_analyser_response(response, method)
-        st.session_state.analyser_running = False
+        try:
+            with st.spinner("Running analyser..."):
+                response = api_post(f"analysing/{method}", base_url, payload=analyser_config)
+                _render_analyser_response(response, method)
+        finally:
+            st.session_state.analyser_running = False
 
     with st.expander("Need help?"):
         st.markdown(

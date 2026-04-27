@@ -206,8 +206,12 @@ class Analysing(SiestaModule):
 
         config = analyser_config.model_dump()
         config["method"] = "directly_follows"
-        self._load_analyser_config(config)
-
+        try:
+            self._load_analyser_config(config)
+        except Exception as e:
+            logger.exception(f"Error loading analyser config: {e}")
+            return {"code": 400, "message": f"Invalid config: {e}"}
+        
         return self._run_directly_follows(caller="api")
 
     def api_durations(self, analyser_config: Annotated[DurationsConfig, Body(openapi_examples={
@@ -251,8 +255,12 @@ class Analysing(SiestaModule):
 
         config = analyser_config.model_dump()
         config["method"] = "durations"
-        self._load_analyser_config(config)
-
+        try:
+            self._load_analyser_config(config)
+        except Exception as e:
+            logger.exception(f"Error loading analyser config: {e}")
+            return {"code": 400, "message": f"Invalid config: {e}"}
+        
         return self._run_durations(caller="api")
 
     def api_loop_detection(self, analyser_config: Annotated[LoopDetectionConfig, Body(openapi_examples={
@@ -296,7 +304,12 @@ class Analysing(SiestaModule):
 
         config = analyser_config.model_dump()
         config["method"] = "loop_detection"
-        self._load_analyser_config(config)
+        try:
+            self._load_analyser_config(config)
+        except Exception as e:
+            logger.exception(f"Error loading analyser config: {e}")
+            return {"code": 400, "message": f"Invalid config: {e}"}
+        
 
         return self._run_loop_detection(caller="api")
 
@@ -359,8 +372,12 @@ class Analysing(SiestaModule):
 
         config = analyser_config.model_dump()
         config["method"] = "attribute_deviations"
-        self._load_analyser_config(config)
-
+        try:
+            self._load_analyser_config(config)
+        except Exception as e:
+            logger.exception(f"Error loading analyser config: {e}")
+            return {"code": 400, "message": f"Invalid config: {e}"}
+        
         return self._run_attribute_deviations(caller="api")
 
     # ------------------------------------------------------------------
@@ -387,7 +404,11 @@ class Analysing(SiestaModule):
         with open(config_path, "r") as f:
             user_config = json.load(f)
 
-        self._load_analyser_config(user_config)
+        try:
+            self._load_analyser_config(user_config)
+        except Exception as e:
+            raise ValueError(f"Error loading analyser config: {e}")
+
         self.storage.initialize_db(self.analyser_config)
 
         method = self.analyser_config.get("method", "directly_follows")
@@ -413,7 +434,7 @@ class Analysing(SiestaModule):
             logger.error(
                 f"Log '{log_name}' does not exist in storage. Run indexing first."
             )
-            return f"Log '{log_name}' does not exist in storage. Run indexing first."
+            raise ValueError(f"Log '{log_name}' not found in storage.")
 
         self.analyser_config = DEFAULT_ANALYSER_CONFIG.copy()
         self.analyser_config.update(config)
@@ -449,7 +470,7 @@ class Analysing(SiestaModule):
             events_df = events_df.filter(F.col("start_timestamp") >= min_ts)
         events_df.cache()
 
-        result_df = compute_directly_follows(
+        result_df =compute_directly_follows(
             events_df=events_df,
             trace_count=self.metadata.trace_count,
             end_time=self.analyser_config.get("end_time"),
@@ -480,10 +501,10 @@ class Analysing(SiestaModule):
                 )
             with open(output_path, "r", newline="") as f:
                 try:
-                    return list(csv.DictReader(f))
+                    return {"code": 200, "data": list(csv.DictReader(f))}
                 except Exception:
                     logger.error(f"Failed to parse results from {output_path}.")
-                    return f"Results written to {output_path}. Check logs for details."
+                    return {"code": 500, "message": f"Failed to parse results from {output_path}."}
 
         return output_path
 
@@ -522,7 +543,7 @@ class Analysing(SiestaModule):
             logger.info(f"Results written to {output_path}.")
             return output_path
 
-        return result
+        return {"code": 200, **result}
 
     def _run_durations(self, caller: str) -> Any:
         logger.info(f"Running durations initiated by {caller}.")
@@ -572,10 +593,10 @@ class Analysing(SiestaModule):
                 )
             with open(output_path, "r", newline="") as f:
                 try:
-                    return list(csv.DictReader(f))
+                    return {"code": 200, "data": list(csv.DictReader(f))}
                 except Exception:
                     logger.error(f"Failed to parse results from {output_path}.")
-                    return f"Results written to {output_path}. Check logs for details."
+                    return {"code": 500, "message": f"Failed to parse results from {output_path}."}
 
         return output_path
 
@@ -702,6 +723,7 @@ class Analysing(SiestaModule):
 
         # Default: JSON
         result = {
+            "code": 200,
             "log_name": log_name,
             "total_deviations": len(records),
             "deviations": records,
