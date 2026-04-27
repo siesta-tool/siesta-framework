@@ -13,7 +13,31 @@ def parse_attribute_list(raw: str) -> list[str] | None:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+def _display_response(response) -> None:
+    if isinstance(response, dict) and response.get("error"):
+        st.error(response["error"])
+        return
+    if isinstance(response, dict) and response.get("status_code", 0) >= 400:
+        st.error(f"HTTP {response['status_code']}")
+        st.code(response.get("text", ""))
+        return
+
+    elapsed = response.get("time") if isinstance(response, dict) else None
+    if elapsed is not None:
+        st.success(f"Indexing completed in {float(elapsed):.2f} s")
+        rest = {k: v for k, v in response.items() if k != "time"}
+        if rest:
+            st.json(rest)
+    else:
+        format_response(response)
+
+
 def render(base_url: str) -> None:
+    if "indexer_running" not in st.session_state:
+        st.session_state.indexer_running = False
+    if "indexer_submit_requested" not in st.session_state:
+        st.session_state.indexer_submit_requested = False
+
     st.title("🧩 Indexer")
     st.markdown(
         "Upload logs and build index configurations for batch or streaming ingestion. "
@@ -51,13 +75,21 @@ def render(base_url: str) -> None:
             storage_namespace = st.text_input("Storage namespace", "siesta")
             clear_existing = st.checkbox("Clear existing index", value=False)
             enable_streaming = st.checkbox("Enable streaming", value=False)
-            kafka_topic = st.text_input("Kafka topic", "example_log")
+            kafka_topic = st.text_input(
+                "Kafka topic",
+                value="example_log" if enable_streaming else "",
+                disabled=not enable_streaming,
+                help="Enable streaming to configure the Kafka topic.",
+                key="kafka_topic",
+            )
+            if not enable_streaming:
+                kafka_topic = ""
             lookback = st.text_input("Lookback window", "7d")
 
         with col2:
             trace_level_fields = st.text_input("Trace level fields", "trace_id")
             timestamp_fields = st.text_input("Timestamp fields", "start_timestamp")
-            with st.expander("Field mappings", expanded=True):
+            with st.expander("Field mappings", expanded=False):
                 st.write("Configure the mapping fields for each supported log format.")
                 st.markdown("**XES mapping**")
                 xes_activity = st.text_input("XES activity field", default_field_mappings["xes"]["activity"])
@@ -106,9 +138,17 @@ def render(base_url: str) -> None:
 
             log_file = st.file_uploader("Upload log file (XES, CSV, JSON)", type=["xes", "csv", "json"])
 
-        submit = st.form_submit_button("Run indexer")
+        submit = st.form_submit_button(
+            "Run indexer",
+            disabled=st.session_state.indexer_running,
+        )
+        if submit:
+            st.session_state.indexer_submit_requested = True
 
-    if submit:
+    if st.session_state.indexer_submit_requested and not st.session_state.indexer_running:
+        st.session_state.indexer_running = True
+        st.session_state.indexer_submit_requested = False
+
         field_mappings = {
             "xes": {
                 "activity": xes_activity,
@@ -132,7 +172,6 @@ def render(base_url: str) -> None:
                 "attributes": parse_attribute_list(json_attributes),
             },
         }
-
         index_config = {
             "log_name": log_name,
             "storage_namespace": storage_namespace,
@@ -144,13 +183,15 @@ def render(base_url: str) -> None:
             "trace_level_fields": [item.strip() for item in trace_level_fields.split(",") if item.strip()],
             "timestamp_fields": [item.strip() for item in timestamp_fields.split(",") if item.strip()],
         }
-
         files = None
         if log_file is not None:
             files = {"log_file": (log_file.name, log_file.getvalue())}
 
-        response = api_post("indexer/run", base_url, payload={"index_config": json.dumps(index_config)}, files=files)
-        format_response(response)
+        with st.spinner("Running indexer..."):
+            response = api_post("indexing/run", base_url, payload={"index_config": json.dumps(index_config)}, files=files)
+
+        st.session_state.indexer_running = False
+        _display_response(response)
 
     with st.expander("Need help?"):
         st.markdown(

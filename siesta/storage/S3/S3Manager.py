@@ -85,8 +85,8 @@ class S3Manager(StorageManager):
             self.s3_client.head_bucket(Bucket=preprocess_config.get("storage_namespace", "siesta"))
             logger.info(f"Using existing bucket '{preprocess_config.get('storage_namespace', 'siesta')}'")
 
-            # If overwrite_data is True, delete all objects of the specified log
-            if preprocess_config.get("overwrite_data", False):
+            # If clear_existing is True, delete all objects of the specified log
+            if preprocess_config.get("clear_existing", False):
                 prefix = f"{preprocess_config.get('log_name', 'default_log')}/"
                 try:
                     paginator = self.s3_client.get_paginator('list_objects_v2')

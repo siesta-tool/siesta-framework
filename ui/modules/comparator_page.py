@@ -11,6 +11,11 @@ def render(base_url: str) -> None:
 
     method = st.selectbox("Comparison method", ["ngrams", "rare_rules", "targeted_rules"])
 
+    if "comparator_running" not in st.session_state:
+        st.session_state.comparator_running = False
+    if "comparator_submit_requested" not in st.session_state:
+        st.session_state.comparator_submit_requested = False
+
     with st.form("comparator_form"):
         log_name = st.text_input("Log name", "example_log")
         storage_namespace = st.text_input("Storage namespace", "siesta")
@@ -44,25 +49,31 @@ def render(base_url: str) -> None:
                 format="%.2f",
             )
 
-        submit = st.form_submit_button("Run comparator")
+        submit = st.form_submit_button("Run comparator", disabled=st.session_state.comparator_running, key="run_comparator_button")
+        if submit:
+            st.session_state.comparator_submit_requested = True
 
-    if submit:
-        comparator_config = {
-            "log_name": log_name,
-            "storage_namespace": storage_namespace,
-            "method_params": {"n": n},
-            "separating_key": separating_key,
-            "separating_groups": parse_group_definitions(separating_groups_text),
-            "support_threshold": support_threshold,
-        }
-        if method == "ngrams" and vis:
-            comparator_config["method_params"]["vis"] = True
-        if method == "targeted_rules":
-            comparator_config["method_params"]["target_label"] = target_label
-            comparator_config["method_params"]["filtering_support"] = filtering_support
+    if st.session_state.comparator_submit_requested and not st.session_state.comparator_running:
+        st.session_state.comparator_running = True
+        st.session_state.comparator_submit_requested = False
+        with st.spinner("Running comparator..."):
+            comparator_config = {
+                "log_name": log_name,
+                "storage_namespace": storage_namespace,
+                "method_params": {"n": n},
+                "separating_key": separating_key,
+                "separating_groups": parse_group_definitions(separating_groups_text),
+                "support_threshold": support_threshold,
+            }
+            if method == "ngrams" and vis:
+                comparator_config["method_params"]["vis"] = True
+            if method == "targeted_rules":
+                comparator_config["method_params"]["target_label"] = target_label
+                comparator_config["method_params"]["filtering_support"] = filtering_support
 
-        response = api_post(f"comparator/{method}", base_url, payload=comparator_config)
-        format_response(response)
+            response = api_post(f"comparing/{method}", base_url, payload=comparator_config)
+            format_response(response)
+        st.session_state.comparator_running = False
 
     with st.expander("Need help?"):
         st.markdown(

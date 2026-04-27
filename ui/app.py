@@ -113,10 +113,10 @@ def main() -> None:
     page_options = ["Home"] + [module["title"] for module in MODULES]
     if "current_page" not in st.session_state:
         st.session_state.current_page = "Home"
-    st.sidebar.markdown("---")
+    # st.sidebar.markdown("---")
 
     st.sidebar.radio(
-        "Navigate",
+        " ",
         page_options,
         key="current_page",
     )
@@ -135,6 +135,7 @@ def main() -> None:
             st.sidebar.error(f"Health check error: {result.get('error')}")
 
     st.sidebar.markdown("---")
+    st.sidebar.image("datalab-logo.png", width="content")
     st.sidebar.markdown(
         "MIT License 2025 | [GitHub Repo](https://github.com/siesta-tool/siesta-framework)"
     )

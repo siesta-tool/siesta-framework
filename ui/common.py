@@ -111,13 +111,45 @@ def parse_group_definitions(value: str) -> list[list[str]]:
     return groups
 
 
+def _display_response_time(response: dict) -> None:
+    if response.get("time") is not None:
+        try:
+            elapsed = float(response["time"])
+            st.metric("Elapsed time", f"{elapsed:.2f}s")
+        except (TypeError, ValueError):
+            st.caption(f"Elapsed time: {response['time']}")
+
+
 def format_response(response: Any) -> None:
     if isinstance(response, dict) and response.get("error"):
         st.error(response["error"])
         return
+
     if isinstance(response, dict) and response.get("status_code") and response["status_code"] >= 400:
         st.error(f"HTTP {response['status_code']}")
         st.code(response.get("text", ""))
         return
-    st.success("Request completed")
+
+    if isinstance(response, dict) and "code" in response:
+        code = response.get("code")
+        message = response.get("message")
+        details = {k: v for k, v in response.items() if k not in {"code", "message"}}
+
+        if code == 200:
+            st.success(f"Success ({code})")
+            if message:
+                st.markdown(f"**{message}**")
+        else:
+            st.error(f"Response code: {code}")
+            if message:
+                st.markdown(f"**{message}**")
+
+        _display_response_time(response)
+        if details:
+            with st.expander("Response details"):
+                st.json(details)
+        return
+
+    st.info("Response received")
+    _display_response_time(response if isinstance(response, dict) else {})
     st.json(response)

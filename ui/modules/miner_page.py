@@ -1,11 +1,162 @@
 """Miner module page."""
 
+import json
+
 import streamlit as st
 
 from common import api_post, format_response
 
 
+CATEGORY_COLORS = {
+    "positional": "blue",
+    "existential": "green",
+    "ordered": "orange",
+    "unordered": "purple",
+    "negation": "red",
+}
+
+
+def _rule_color(category: str) -> str:
+    return CATEGORY_COLORS.get(category, "black")
+
+
+def _build_rule_graph(mined: list[dict]) -> str:
+    lines = ["digraph mined_rules {", "rankdir=LR;", "node [shape=circle, style=filled, fillcolor=lightgray];"]
+    node_names = set()
+
+    for item in mined:
+        category = item.get("category", "")
+        source = item.get("source", "") or "?"
+        target = item.get("target", "")
+        template = item.get("template", "")
+        support = item.get("support", "")
+        color = _rule_color(category)
+
+        node_names.add(source)
+        if target:
+            node_names.add(target)
+            label = f"{template} ({support})"
+            lines.append(
+                f'"{source}" -> "{target}" [label="{label}", color="{color}", fontcolor="{color}"]'
+            )
+        else:
+            lines.append(
+                f'"{source}" [label="{source}\n{template} ({support})", fillcolor="{color}", fontcolor="white"]'
+            )
+
+    if not node_names:
+        lines.append("empty [label=\"No rules to visualize\", shape=plaintext]")
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def render_miner_response(response: dict) -> None:
+    if response.get("error") or (response.get("status_code") and response["status_code"] >= 400):
+        format_response(response)
+        return
+
+    code = response.get("code")
+    if code is not None:
+        if code == 200:
+            st.success(f"Success ({code})")
+            if response.get("message"):
+                st.markdown(f"**{response['message']}**")
+        else:
+            st.error(f"Response code: {code}")
+            if response.get("message"):
+                st.markdown(f"**{response['message']}**")
+
+    if response.get("time") is not None:
+        try:
+            elapsed = float(response["time"])
+            st.metric("Elapsed time", f"{elapsed:.2f}s")
+        except (TypeError, ValueError):
+            st.caption(f"Elapsed time: {response['time']}")
+
+    mined = response.get("mined")
+    if code is not None and code != 200 and not isinstance(mined, list):
+        st.json(response)
+        return
+
+    if isinstance(mined, list):
+        st.subheader("Mined rules")
+        st.metric("Total rules", len(mined))
+
+        rows = []
+        for item in mined:
+            rows.append(
+                {
+                    "category": item.get("category", ""),
+                    "template": item.get("template", ""),
+                    "source": item.get("source", ""),
+                    "target": item.get("target", ""),
+                    "support": item.get("support", ""),
+                    "occurrences": item.get("occurrences", ""),
+                }
+            )
+
+        min_support = st.slider(
+            "Filter rules by minimum support",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.0,
+            step=0.05,
+            help="Only show rules with support equal to or larger than this threshold.",
+        )
+
+        if rows:
+            st.table(rows)
+            counts = {}
+            supports = {}
+            for row in rows:
+                category = row["category"]
+                support_val = None
+                try:
+                    support_val = float(row["support"])
+                except (TypeError, ValueError):
+                    continue
+                counts[category] = counts.get(category, 0) + 1
+                supports[f"{row['source']}→{row['target']} ({row['template']})"] = support_val
+
+            if counts:
+                st.bar_chart(counts)
+            if supports:
+                st.bar_chart(supports)
+
+        filtered_mined = []
+        for item in mined:
+            try:
+                support_val = float(item.get("support", 0))
+            except (TypeError, ValueError):
+                support_val = 0.0
+            if support_val >= min_support:
+                filtered_mined.append(item)
+
+        graph_code = _build_rule_graph(filtered_mined)
+        with st.expander("Rule visualization"):
+            st.markdown(
+                "Each node represents an activity value. "
+                "Edges represent rules between a source and target activity, labelled with the rule template and support. "
+                "If a rule has no target, the node itself shows the template and support for that activity. "
+                "Edge color indicates the rule category."
+            )
+            st.graphviz_chart(graph_code)
+
+        with st.expander("Raw response"):
+            st.json(response)
+        return
+
+    format_response(response)
+
+
 def render(base_url: str) -> None:
+    if "miner_running" not in st.session_state:
+        st.session_state.miner_running = False
+    if "miner_submit_requested" not in st.session_state:
+        st.session_state.miner_submit_requested = False
+    if "miner_response" not in st.session_state:
+        st.session_state.miner_response = None
+
     st.title("⛏️ Miner")
     st.markdown("Mine declarative constraints from an indexed log and inspect the configuration before sending it.")
 
@@ -33,9 +184,13 @@ def render(base_url: str) -> None:
             include_trace_lists = st.checkbox("Include trace lists", value=False)
             force_recompute = st.checkbox("Force recompute", value=False)
 
-        submit = st.form_submit_button("Run miner")
+        submit = st.form_submit_button("Run miner", disabled=st.session_state.miner_running, key="run_miner_button")
+        if submit:
+            st.session_state.miner_submit_requested = True
 
-    if submit:
+    if st.session_state.miner_submit_requested and not st.session_state.miner_running:
+        st.session_state.miner_running = True
+        st.session_state.miner_submit_requested = False
         mining_config = {
             "log_name": log_name,
             "storage_namespace": storage_namespace,
@@ -46,8 +201,13 @@ def render(base_url: str) -> None:
             "include_trace_lists": include_trace_lists,
             "force_recompute": force_recompute,
         }
-        response = api_post("miner/run", base_url, payload=mining_config)
-        format_response(response)
+        with st.spinner("Running miner..."):
+            response = api_post("mining/run", base_url, payload=mining_config)
+            st.session_state.miner_response = response if isinstance(response, dict) else {"error": "Unexpected non-json response"}
+        st.session_state.miner_running = False
+
+    if st.session_state.miner_response is not None:
+        render_miner_response(st.session_state.miner_response)
 
     with st.expander("Need help?"):
         st.markdown(

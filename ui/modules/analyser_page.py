@@ -6,6 +6,11 @@ from common import api_post, format_response, parse_comma_list, parse_optional, 
 
 
 def render(base_url: str) -> None:
+    if "analyser_running" not in st.session_state:
+        st.session_state.analyser_running = False
+    if "analyser_submit_requested" not in st.session_state:
+        st.session_state.analyser_submit_requested = False
+
     st.title("🧠 Analyser")
     st.markdown("Run analysis methods on indexed logs, such as directly-follow, durations, loop detection, and attribute deviations.")
 
@@ -104,11 +109,17 @@ def render(base_url: str) -> None:
                 "output_format": output_format,
             }
 
-        submit = st.form_submit_button("Run analyser")
+        submit = st.form_submit_button("Run analyser", disabled=st.session_state.analyser_running, key="run_analyser_button")
+        if submit:
+            st.session_state.analyser_submit_requested = True
 
-    if submit:
-        response = api_post(f"analyser/{method}", base_url, payload=analyser_config)
-        format_response(response)
+    if st.session_state.analyser_submit_requested and not st.session_state.analyser_running:
+        st.session_state.analyser_running = True
+        st.session_state.analyser_submit_requested = False
+        with st.spinner("Running analyser..."):
+            response = api_post(f"analysing/{method}", base_url, payload=analyser_config)
+            format_response(response)
+        st.session_state.analyser_running = False
 
     with st.expander("Need help?"):
         st.markdown(

@@ -22,4 +22,4 @@ def process_stats_query(config: Dict[str, Any], metadata: MetaData) -> list[any]
     return {
         f"{row['source']},{row['target']}": {k: v for k, v in row.asDict().items() if k not in ("source", "target")}
         for row in df.collect()
-    }
+    }.push({"code": 200})
