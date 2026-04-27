@@ -26,6 +26,7 @@ class DirectlyFollowsConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
     log_name: str = Field("example_log", description="Name of the indexed log")
     storage_namespace: str = Field("siesta", description="Storage namespace")
+    min_timestamp: str | None = Field(None, description="Lower bound on start_timestamp as ISO 8601 datetime with millisecond precision (e.g. '2024-01-15T10:30:45.123Z')")
     end_time: str | None = Field(None, description="Attribute key for event end timestamp. null = transition time (next_start - start)")
     support_threshold: float | None = Field(None, description="Min support fraction [0,1]; null = no filtering")
     filter_out: bool = Field(False, description="When true, keeps pairs with support ≤ threshold instead")
@@ -40,7 +41,7 @@ class LoopDetectionConfig(BaseModel):
     storage_namespace: str = Field("siesta", description="Storage namespace")
     grouping_key: str | list[str] | None = Field(None, description="Attribute key(s) to group by; null = trace_id")
     grouping_value: str | list[str] | dict | None = Field(None, description="Restrict to groups with matching key value(s)")
-    min_timestamp: int | None = Field(None, description="Lower bound on start_timestamp (epoch seconds)")
+    min_timestamp: str | None = Field(None, description="Lower bound on start_timestamp as ISO 8601 datetime with millisecond precision (e.g. '2024-01-15T10:30:45.123Z')")
     support_threshold: float | None = Field(None, description="Min support fraction [0,1]; null = no filtering")
     filter_out: bool = Field(False, description="When true, keeps rare loops (support ≤ threshold)")
     top_k: int | None = Field(None, description="Keep only the k most-supported loops; null = all")
@@ -52,6 +53,7 @@ class DurationsConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
     log_name: str = Field("example_log", description="Name of the indexed log")
     storage_namespace: str = Field("siesta", description="Storage namespace")
+    min_timestamp: str | None = Field(None, description="Lower bound on start_timestamp as ISO 8601 datetime with millisecond precision (e.g. '2024-01-15T10:30:45.123Z')")
     duration_mode: str = Field("activity", description="'activity' (per activity type) or 'group' (per group instance)")
     end_time: str | None = Field(None, description="Attribute key for event end timestamp. null = transition / span time")
     grouping_key: str | list[str] | None = Field(None, description="Attribute key(s) defining groups; null = trace_id")
@@ -65,6 +67,7 @@ class AttributeDeviationsConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
     log_name: str = Field("example_log", description="Name of the indexed log. **Required.**")
     storage_namespace: str = Field("siesta", description="Storage namespace.")
+    min_timestamp: str | None = Field(None, description="Lower bound on start_timestamp as ISO 8601 datetime with millisecond precision (e.g. '2024-01-15T10:30:45.123Z')")
     steps: list[int] = Field(
         list(ALL_STEPS),
         description=(
@@ -117,6 +120,15 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
+def _parse_min_timestamp(iso_str: str | None) -> int | None:
+    """Parse an ISO 8601 datetime string to epoch milliseconds, or return None."""
+    if iso_str is None:
+        return None
+    parsed = datetime.datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+    return int(parsed.timestamp() * 1000)
+
+
 DEFAULT_ANALYSER_CONFIG: Dict[str, Any] = {
     **DirectlyFollowsConfig().model_dump(),
     **LoopDetectionConfig().model_dump(),
@@ -162,6 +174,7 @@ class Analysing(SiestaModule):
             "value": {
                 "log_name": "example_log",
                 "storage_namespace": "siesta",
+                "min_timestamp": None,
                 "end_time": None,
                 "support_threshold": None,
                 "filter_out": False,
@@ -178,6 +191,7 @@ class Analysing(SiestaModule):
         **Config fields:**
         - `log_name` *(str)* - name of the indexed log. **Required.**
         - `storage_namespace` *(str, default: `"siesta"`)* - storage namespace.
+        - `min_timestamp` *(str | null, default: `null`)* - lower bound on `start_timestamp` as ISO 8601 with millisecond precision (e.g. `"2024-01-15T10:30:45.123Z"`). Events before this datetime are excluded.
         - `end_time` *(str | null, default: `null`)* - attribute key for event end timestamp.
             If set, duration = `end_time - start_timestamp` (activity duration).
             If null, duration = `next_start - start_timestamp` (transition time).
@@ -202,6 +216,7 @@ class Analysing(SiestaModule):
             "value": {
                 "log_name": "example_log",
                 "storage_namespace": "siesta",
+                "min_timestamp": None,
                 "duration_mode": "activity",
                 "end_time": None,
                 "grouping_key": None,
@@ -220,6 +235,7 @@ class Analysing(SiestaModule):
         **Config fields:**
         - `log_name` *(str)* - name of the indexed log. **Required.**
         - `storage_namespace` *(str, default: `"siesta"`)* - storage namespace.
+        - `min_timestamp` *(str | null, default: `null`)* - lower bound on `start_timestamp` as ISO 8601 with millisecond precision (e.g. `"2024-01-15T10:30:45.123Z"`). Events before this datetime are excluded.
         - `duration_mode` *(str, default: `"activity"`)* - `"activity"` or `"group"`.
         - `end_time` *(str | null, default: `null`)* - attribute key for event end timestamp.
             Activity mode: `end_time - start_timestamp`; group mode: sum of per-event durations.
@@ -268,7 +284,7 @@ class Analysing(SiestaModule):
         - `storage_namespace` *(str, default: `"siesta"`)* - storage namespace.
         - `grouping_key` *(str | list | null, default: `null`)* - attribute key(s) to group by. `null` = `trace_id`.
         - `grouping_value` *(str | list | dict | null, default: `null`)* - restrict to specific group values.
-        - `min_timestamp` *(int | null, default: `null`)* - lower bound on `start_timestamp` (epoch seconds).
+        - `min_timestamp` *(str | null, default: `null`)* - lower bound on `start_timestamp` as ISO 8601 with millisecond precision (e.g. `"2024-01-15T10:30:45.123Z"`). Events before this datetime are excluded.
         - `support_threshold` *(float [0,1] | null, default: `null`)* - keep loops with support ≥ threshold. `null` = no filtering.
         - `filter_out` *(bool, default: `false`)* - when `true`, keeps loops with support ≤ threshold (rare loops).
         - `top_k` *(int | null, default: `null`)* - keep only the k most-supported loops. `null` = all.
@@ -290,6 +306,7 @@ class Analysing(SiestaModule):
             "value": {
                 "log_name": "example_log",
                 "storage_namespace": "siesta",
+                "min_timestamp": None,
                 "steps": [0, 1, 2, 3, 4],
                 "excluded_attributes": None,
                 "surprise_threshold": 4.0,
@@ -321,6 +338,7 @@ class Analysing(SiestaModule):
         **Config fields:**
         - `log_name` *(str)* - name of the indexed log. **Required.**
         - `storage_namespace` *(str, default: `"siesta"`)* - storage namespace.
+        - `min_timestamp` *(str | null, default: `null`)* - lower bound on `start_timestamp` as ISO 8601 with millisecond precision (e.g. `"2024-01-15T10:30:45.123Z"`). Events before this datetime are excluded.
         - `steps` *(list[int], default: `[0,1,2,3,4]`)* - which steps to run.
         - `excluded_attributes` *(list[str] | null)* - attribute keys to skip (auto-excludes timestamp keys).
         - `surprise_threshold` *(float, default: `4.0`)* - categorical anomaly threshold (−log₂ score).
@@ -426,6 +444,9 @@ class Analysing(SiestaModule):
         self._load_metadata()
 
         events_df = self.storage.read_sequence_table(self.metadata)
+        min_ts = _parse_min_timestamp(self.analyser_config.get("min_timestamp"))
+        if min_ts is not None:
+            events_df = events_df.filter(F.col("start_timestamp") >= min_ts)
         events_df.cache()
 
         result_df = compute_directly_follows(
@@ -473,11 +494,14 @@ class Analysing(SiestaModule):
         events_df = self.storage.read_sequence_table(self.metadata)
         events_df.cache()
 
+        min_ts = _parse_min_timestamp(self.analyser_config.get("min_timestamp"))
+        if min_ts is not None:
+            events_df = events_df.filter(F.col("start_timestamp") >= min_ts)
+
         result = compute_loop_detection(
             events_df=events_df,
             grouping_key=self.analyser_config.get("grouping_key"),
             grouping_value=self.analyser_config.get("grouping_value"),
-            min_timestamp=self.analyser_config.get("min_timestamp"),
             support_threshold=self.analyser_config.get("support_threshold"),
             filter_out=self.analyser_config.get("filter_out", False),
             top_k=self.analyser_config.get("top_k"),
@@ -505,6 +529,9 @@ class Analysing(SiestaModule):
         self._load_metadata()
 
         events_df = self.storage.read_sequence_table(self.metadata)
+        min_ts = _parse_min_timestamp(self.analyser_config.get("min_timestamp"))
+        if min_ts is not None:
+            events_df = events_df.filter(F.col("start_timestamp") >= min_ts)
         events_df.cache()
 
         mode         = self.analyser_config.get("duration_mode", "activity")
@@ -557,6 +584,9 @@ class Analysing(SiestaModule):
         self._load_metadata()
 
         events_df = self.storage.read_sequence_table(self.metadata)
+        min_ts = _parse_min_timestamp(self.analyser_config.get("min_timestamp"))
+        if min_ts is not None:
+            events_df = events_df.filter(F.col("start_timestamp") >= min_ts)
         events_df.cache()
         total_traces = self.metadata.trace_count
 
