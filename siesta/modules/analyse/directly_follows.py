@@ -49,12 +49,12 @@ def compute_directly_follows(
         .withColumnRenamed("activity", "source")
     )
 
-    # Timestamps are stored as epoch seconds (integer); duration differences are
-    # therefore already in seconds and require no further conversion.
     if end_time is not None:
+        # end_time attribute is stored as a datetime string (e.g. '2026-01-30 14:27:37');
+        # cast through timestamp to epoch seconds before subtracting.
         pairs_df = pairs_df.withColumn(
             "duration_sec",
-            F.col("attributes").getItem(end_time).cast("double") - F.col("start_timestamp").cast("double")
+            F.col("attributes").getItem(end_time).cast("timestamp").cast("double") - F.col("start_timestamp").cast("double")
         )
     else:
         pairs_df = pairs_df.withColumn(

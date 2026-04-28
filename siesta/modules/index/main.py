@@ -1,5 +1,5 @@
 import argparse
-from datetime import datetime
+import time
 from pathlib import Path
 from typing import Annotated, Any, Dict
 from fastapi import Form, UploadFile
@@ -129,19 +129,24 @@ class Indexing(SiestaModule):
 
         if log_file is None:
             if not self.index_config.get("enable_streaming", False):
-                return "Indexing: No log file uploaded for batch processing and streaming not enabled. Aborting."    
+                return {"code": 400, "message": "Indexing: No log file uploaded for batch processing and streaming not enabled. Aborting."}
             self.storage.initialize_streaming_collector(self.index_config)
             self.begin_builders(caller="api")
-            return "Indexing: Streaming collector initialized."
+            logger.info("Indexing: Streaming collector initialized.")
+            return {"code": 200, "message": "Indexing: Streaming collector initialized."}
         else:
             if not log_file.filename:
-                return "Indexing: Uploaded log file has no filename. Aborting."
+                logger.error("Indexing: Uploaded log file has no filename. Aborting.")
+                return {"code": 400, "message": "Indexing: Uploaded log file has no filename. Aborting."}
             # Ensure batch mode in case of file upload
             self.index_config["enable_streaming"] = False          
             logger.info(f"Indexing: Running indexing with args: {self.index_config}")
             self.index_config["log_path"] = upload_log_file_object(self.index_config, log_file, log_file.filename)
+            start_time = time.time()
             self.begin_builders(caller="api")
-            return "Indexing: Batch processing completed."
+            end_time = time.time()
+            logger.info("Indexing: Batch processing completed in " + str(end_time - start_time))
+            return {"code": 200, "message": "Indexing: Batch processing completed.", "time": str(end_time - start_time)}
 
 
     def cli_run(self, args: Any, **kwargs: Any) -> Any:
@@ -154,7 +159,7 @@ class Indexing(SiestaModule):
         self.storage = get_storage_manager()
 
         parser = argparse.ArgumentParser(description="Siesta Indexing module")
-        parser.add_argument('--indexer_config', type=str, help='Path to configuration JSON file', required=False)
+        parser.add_argument('--index_config', type=str, help='Path to configuration JSON file', required=False)
         # Add optional arguments ...
 
         parsed_args, unknown_args = parser.parse_known_args(args)

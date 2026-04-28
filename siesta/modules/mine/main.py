@@ -1,5 +1,6 @@
 import argparse
 import datetime
+import time
 from pathlib import Path
 from typing import Annotated, Any, Dict
 from fastapi import Body
@@ -99,20 +100,27 @@ class Mining(SiestaModule):
 
         self.siesta_config = get_system_config()
         self.storage = get_storage_manager()
-        self._load_mining_config(mining_config.model_dump())
+        
+        try:
+            self._load_mining_config(mining_config.model_dump())
+        except ValueError as e:
+            logger.error(f"Invalid mining config: {e}")
+            return {"code": 400, "message": str(e)}
 
         logger.info(f"Running mining with args: {mining_config}")
         
+        start_time = time.time()
         self.mine(caller="api")
+        end_time = time.time()
 
-        logger.info(f"Completed. Results available at {self.mining_config['output_path']}.")
+        logger.info(f"Completed in {end_time - start_time} seconds. Results available at {self.mining_config['output_path']}.")
         
         with open(self.mining_config["output_path"], 'r', newline="") as f:
             try:
-                return list(csv.DictReader(f))
+                return {"code": 200, "mined": list(csv.DictReader(f)), "time": end_time - start_time}
             except Exception:
                 logger.error(f"Failed to parse mining results from {self.mining_config['output_path']}. Check if the file is a valid CSV and inspect logs for details.")
-                return f"Cannot parse mining results. Check logs and {self.mining_config['output_path']} for details."
+                return {"code": 500, "message": f"Cannot parse mining results. Check logs and {self.mining_config['output_path']} for details."}
 
 
     def cli_run(self, args: Any, **kwargs: Any) -> Any:
@@ -146,20 +154,26 @@ class Mining(SiestaModule):
 
                     logger.info(f"Loaded config from {config_path}: {user_mining_config}")
             except Exception as e:
-                raise RuntimeError(f"Error loading config from {config_path}: {e}")
+                logger.error(f"Failed to load mining config from {config_path}: {e}")
+                raise ValueError(f"Invalid config file: {e}")
 
+        start_time = time.time()
         self.mine(caller="cli")
-
-        logger.info(f"Completed. Results available at {self.mining_config['output_path']}.")
+        end_time = time.time()
+        logger.info(f"Completed in {end_time - start_time:.2f} seconds. Results available at {self.mining_config['output_path']}.")
         
         return self.mining_config["output_path"]
 
     def _load_mining_config(self, config: Dict[str, Any]):
         # Validate that the specified log exists in storage before proceeding with mining. 
         if not self.storage.log_exists(config):
-            log_name = config.get("log_name", "default_log")
+            log_name = config.get("log_name")
+            logger.exception(f"Log '{log_name}' does not exist in storage. Run preprocessing first.")
             raise ValueError(f"Log '{log_name}' does not exist in storage. Run preprocessing first.")
-
+        
+        if config.get("log_name") is None:
+            raise ValueError("Log name not specified in config.")
+    
         self.mining_config = DEFAULT_MINING_CONFIG.copy()
         self.mining_config.update(config)
 
@@ -222,6 +236,10 @@ class Mining(SiestaModule):
         constraints_df = constraints_df_list[0]
         for constaint_df in constraints_df_list[1:]:
             constraints_df = constraints_df.unionByName(constaint_df, allowMissingColumns=True)
+
+        for col_name in ["target", "occurrences"]:
+            if col_name not in constraints_df.columns:
+                constraints_df = constraints_df.withColumn(col_name, F.lit(None).cast("string"))
 
         # Update metadata with new last mining timestamp based on the max timestamp of the evolved traces
         self.metadata.last_mined_timestamp = evolved_df.agg({"start_timestamp": "max"}).collect()[0][0] if not evolved_df.rdd.isEmpty() else self.metadata.last_mined_timestamp
