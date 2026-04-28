@@ -257,6 +257,7 @@ def render(base_url: str) -> None:
             "support_threshold": support_threshold,
             "include_trace_lists": include_trace_lists,
             "force_recompute": force_recompute,
+            "output_path": f"output/{log_name}",
         }
         with st.spinner("Running miner..."):
             response = api_post("mining/run", base_url, payload=mining_config)

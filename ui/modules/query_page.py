@@ -171,6 +171,7 @@ def render(base_url: str) -> None:
                 "explore_k": explore_k,
             },
             "support_threshold": support_threshold,
+            "output_path": f"output/{log_name}",
         }
         with st.spinner("Running query..."):
             response = api_post(f"querying/{method}", base_url, payload=query_config)

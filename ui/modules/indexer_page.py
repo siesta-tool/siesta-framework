@@ -182,6 +182,7 @@ def render(base_url: str) -> None:
             "field_mappings": field_mappings,
             "trace_level_fields": [item.strip() for item in trace_level_fields.split(",") if item.strip()],
             "timestamp_fields": [item.strip() for item in timestamp_fields.split(",") if item.strip()],
+            "output_path": f"output/{log_name}",
         }
         files = None
         if log_file is not None:
