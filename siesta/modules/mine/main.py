@@ -171,7 +171,7 @@ class Mining(SiestaModule):
             logger.exception(f"Log '{log_name}' does not exist in storage. Run preprocessing first.")
             raise ValueError(f"Log '{log_name}' does not exist in storage. Run preprocessing first.")
         
-        if log_name is None:
+        if config.get("log_name") is None:
             raise ValueError("Log name not specified in config.")
     
         self.mining_config = DEFAULT_MINING_CONFIG.copy()
