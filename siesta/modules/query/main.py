@@ -216,7 +216,12 @@ class Querying(SiestaModule):
     # ------------------------------------------------------------------
 
     def _load_query_config(self, config: Dict[str, Any]):
-        #TODO: Add schema validation w/ explainability
+        if not config.get("method"):
+            raise ValueError("Query method not specified in config.")
+        if config.get("log_name") is None:
+            raise ValueError("Log name not specified in config.")
+        if config.get("query", {}).get("pattern") is None:
+            raise ValueError("Query pattern not specified in config.")
         self.query_config = DEFAULT_QUERY_CONFIG.copy()
         self.query_config = self.query_config | config
         logger.info(self.query_config)

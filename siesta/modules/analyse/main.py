@@ -430,19 +430,22 @@ class Analysing(SiestaModule):
 
     def _load_analyser_config(self, config: Dict[str, Any]):
         if not self.storage.log_exists(config):
-            log_name = config.get("log_name", "default_log")
             logger.error(
-                f"Log '{log_name}' does not exist in storage. Run indexing first."
+                f"Log '{config.get("log_name")}' does not exist in storage. Run indexing first."
             )
-            raise ValueError(f"Log '{log_name}' not found in storage.")
+            raise ValueError(f"Log '{config.get("log_name")}' not found in storage.")
+
+        if config.get("log_name") is None:
+            raise ValueError("Log name not specified in config.")
 
         self.analyser_config = DEFAULT_ANALYSER_CONFIG.copy()
         self.analyser_config.update(config)
+        
+        if config.get("output_path") is not None and config.get("output_path") == "output/example_log":
+            config["output_path"] = "output/" + config.get("log_name", "analyser_results")
 
-        given_output = config.get(
-            "output_path",
-            "output/" + config.get("log_name", "analyser_results"),
-        )
+        given_output = config.get("output_path")
+
         Path(given_output).parent.mkdir(parents=True, exist_ok=True)
         self.analyser_config["output_path"] = (
             given_output + "_" + str(datetime.datetime.now().timestamp())

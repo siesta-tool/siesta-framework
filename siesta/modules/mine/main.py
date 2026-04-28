@@ -167,10 +167,13 @@ class Mining(SiestaModule):
     def _load_mining_config(self, config: Dict[str, Any]):
         # Validate that the specified log exists in storage before proceeding with mining. 
         if not self.storage.log_exists(config):
-            log_name = config.get("log_name", "default_log")
+            log_name = config.get("log_name")
             logger.exception(f"Log '{log_name}' does not exist in storage. Run preprocessing first.")
             raise ValueError(f"Log '{log_name}' does not exist in storage. Run preprocessing first.")
         
+        if log_name is None:
+            raise ValueError("Log name not specified in config.")
+    
         self.mining_config = DEFAULT_MINING_CONFIG.copy()
         self.mining_config.update(config)
 
@@ -233,6 +236,10 @@ class Mining(SiestaModule):
         constraints_df = constraints_df_list[0]
         for constaint_df in constraints_df_list[1:]:
             constraints_df = constraints_df.unionByName(constaint_df, allowMissingColumns=True)
+
+        for col_name in ["target", "occurrences"]:
+            if col_name not in constraints_df.columns:
+                constraints_df = constraints_df.withColumn(col_name, F.lit(None).cast("string"))
 
         # Update metadata with new last mining timestamp based on the max timestamp of the evolved traces
         self.metadata.last_mined_timestamp = evolved_df.agg({"start_timestamp": "max"}).collect()[0][0] if not evolved_df.rdd.isEmpty() else self.metadata.last_mined_timestamp

@@ -230,6 +230,7 @@ def render(base_url: str) -> None:
                 "filter_out": filter_out,
                 "include_traces": include_traces,
                 "return_csv": False,
+                "output_path": f"output/{log_name}_directly_follows",
             }
 
         elif method == "durations":
@@ -249,6 +250,7 @@ def render(base_url: str) -> None:
                 "grouping_value": grouping_value,
                 "per_group": per_group,
                 "return_csv": False,
+                "output_path": f"output/{log_name}_durations",
             }
 
         elif method == "loop_detection":
@@ -269,6 +271,8 @@ def render(base_url: str) -> None:
                 "filter_out": filter_out,
                 "top_k": top_k,
                 "trace_based": trace_based,
+                "return_csv": False,
+                "output_path": f"output/{log_name}_loop_detection",
             }
 
         else:
@@ -310,6 +314,7 @@ def render(base_url: str) -> None:
                 "filter_out": filter_out,
                 "on_rare": on_rare,
                 "output_format": "html",
+                "output_path": f"output/{log_name}_analyser_results",
             }
 
         submit = st.form_submit_button("Run analyser", disabled=st.session_state.analyser_running, key="run_analyser_button")

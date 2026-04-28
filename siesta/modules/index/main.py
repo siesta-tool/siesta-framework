@@ -159,7 +159,7 @@ class Indexing(SiestaModule):
         self.storage = get_storage_manager()
 
         parser = argparse.ArgumentParser(description="Siesta Indexing module")
-        parser.add_argument('--indexer_config', type=str, help='Path to configuration JSON file', required=False)
+        parser.add_argument('--index_config', type=str, help='Path to configuration JSON file', required=False)
         # Add optional arguments ...
 
         parsed_args, unknown_args = parser.parse_known_args(args)

@@ -64,6 +64,7 @@ def render(base_url: str) -> None:
                 "separating_key": separating_key,
                 "separating_groups": parse_group_definitions(separating_groups_text),
                 "support_threshold": support_threshold,
+                "output_path": f"output/{log_name}",
             }
             if method == "ngrams" and vis:
                 comparator_config["method_params"]["vis"] = True
