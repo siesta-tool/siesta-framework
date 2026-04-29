@@ -733,13 +733,6 @@ class AdaptiveIndexing(SiestaModule):
                 if ps.status == PairStatus.PERSISTENT
             ]
 
-            if not persistent_pairs:
-                logger.debug(
-                    f"{self.name}: '{pid}' has no persistent pairs, "
-                    "skipping maintenance."
-                )
-                continue
-
             logger.info(
                 f"{self.name}: incremental maintenance for '{pid}' — "
                 f"{len(persistent_pairs)} persistent pair(s)."
