@@ -291,7 +291,7 @@ class Modeling(SiestaModule):
 
         model_out, png_out, html_out = self._copy_outputs(model_path, fmt, png_path, html_path)
         events_df.unpersist()
-        logger.info(f"DFG model → {model_out}  PNG → {png_out}  HTML → {html_out}")
+        logger.info(f"DFG model -> {model_out}  PNG -> {png_out}  HTML -> {html_out}")
         self.modeler_config["output_path"] = model_out
 
         if caller == "api":
@@ -328,7 +328,7 @@ class Modeling(SiestaModule):
 
         model_out, png_out, html_out = self._copy_outputs(model_path, fmt, png_path, html_path)
         events_df.unpersist()
-        logger.info(f"BPMN model → {model_out}  PNG → {png_out}  HTML → {html_out}")
+        logger.info(f"BPMN model -> {model_out}  PNG -> {png_out}  HTML -> {html_out}")
         self.modeler_config["output_path"] = model_out
 
         if caller == "api":

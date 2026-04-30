@@ -64,7 +64,7 @@ def detect(pattern: str, config: Dict[str, Any], metadata: MetaData):
         branch_pruned_dfs.append(branch_pruned)
 
     if not branch_pruned_dfs:
-        # No required pairs (e.g. all STAR) → every trace with matching data qualifies
+        # No required pairs (e.g. all STAR) -> every trace with matching data qualifies
         pruned_trace_ids = tagged_df.select("trace_id").distinct()
     elif len(branch_pruned_dfs) == 1:
         pruned_trace_ids = branch_pruned_dfs[0].distinct()
@@ -169,4 +169,4 @@ def process_detection_query(config: Dict[str, Any], metadata: MetaData):
 
     result = [{"trace_id": trace_id, "support": len(positions) / metadata.trace_count if metadata.trace_count else 0, "positions": positions} for trace_id, positions in result if len(positions) >= support_threshold]
     logger.info(f"Parsing query took: {end - start}")
-    return {"total": len(result), "detected": result, "time": end - start}
+    return {"code": 200, "total": len(result), "detected": result, "time": end - start}

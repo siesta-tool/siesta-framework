@@ -104,7 +104,7 @@ class TestSimpleSequences:
         assert "trace_3" in _trace_ids(result)
 
     def test_xe_no_match(self, query_preprocessed):
-        """X E: neither X nor E appear → no match."""
+        """X E: neither X nor E appear -> no match."""
         md = query_preprocessed["metadata"]
         result = _query("X E", md)
         assert _total(result) == 0
@@ -131,7 +131,7 @@ class TestOrBranches:
         assert {"trace_3", "trace_4"} == _trace_ids(result)
 
     def test_or_no_match(self, query_preprocessed):
-        """(X||Y) C: neither X nor Y in dataset → no match."""
+        """(X||Y) C: neither X nor Y in dataset -> no match."""
         md = query_preprocessed["metadata"]
         result = _query("(X||Y) C", md)
         assert _total(result) == 0
@@ -144,7 +144,7 @@ class TestOrBranches:
 class TestKleenePlus:
 
     def test_plus_bc_matches_trace1_and_trace3(self, query_preprocessed):
-        """B+ C: one B before C → trace_1 (B at pos 1, C at pos 2) and
+        """B+ C: one B before C -> trace_1 (B at pos 1, C at pos 2) and
         trace_3 (B at pos 0, C at pos 1)."""
         md = query_preprocessed["metadata"]
         result = _query("B+ C", md)
@@ -235,8 +235,8 @@ class TestAttributeInOrBranch:
 
     def test_or_with_attrs_three_traces(self, query_preprocessed):
         """(A[resource="r1"]||B[resource="r2"]) C:
-        Branch 0: A(r1) before C  → trace_1, trace_2
-        Branch 1: B(r2) before C  → trace_1, trace_3
+        Branch 0: A(r1) before C  -> trace_1, trace_2
+        Branch 1: B(r2) before C  -> trace_1, trace_3
         Union: trace_1, trace_2, trace_3."""
         md = query_preprocessed["metadata"]
         result = _query('(A[resource="r1"]||B[resource="r2"]) C', md)
@@ -245,7 +245,7 @@ class TestAttributeInOrBranch:
 
     def test_or_with_matching_and_failing_attrs(self, query_preprocessed):
         """(A[resource="r2"]||B[resource="r2"]) C:
-        A never has r2; B has r2 → only trace_1 (B->C) and trace_3 (B->C)."""
+        A never has r2; B has r2 -> only trace_1 (B->C) and trace_3 (B->C)."""
         md = query_preprocessed["metadata"]
         result = _query('(A[resource="r2"]||B[resource="r2"]) C', md)
         assert _total(result) == 2

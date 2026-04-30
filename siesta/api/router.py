@@ -39,5 +39,13 @@ def startup(siestaInstance: Siesta) -> None:
                     raise ValueError(f"Unsupported API method: {method}")
 
         app.include_router(module_router)
+    
+    
+    health_router = APIRouter(tags=["health"])
+    @health_router.get("/health")
+    def health_check():
+        return {"status": "ok", "message": "Siesta API is healthy."}
+    app.include_router(health_router)
+
     run_config = config.get("api", {"host": "localhost", "port": 8000})
     uvicorn.run(app, host=run_config["host"], port=run_config["port"])

@@ -161,4 +161,4 @@ def process_exploration_query(config: Dict[str, Any], metadata: MetaData) -> Dat
 
     logger.info(f"Exploration query processed in {timedif:.2f} seconds using mode '{mode}'.")
 
-    return {"explored": result, "time": timedif}
+    return {"code": 200, "explored": result, "time": timedif}

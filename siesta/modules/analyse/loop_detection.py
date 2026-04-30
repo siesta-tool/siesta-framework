@@ -58,7 +58,6 @@ def compute_loop_detection(
     events_df: DataFrame,
     grouping_key: Optional[Union[str, list]] = None,
     grouping_value: Optional[Union[str, list]] = None,
-    min_timestamp: Optional[int] = None,
     support_threshold: Optional[float] = None,
     filter_out: bool = False,
     top_k: Optional[int] = None,
@@ -76,8 +75,6 @@ def compute_loop_detection(
                         column. Rows whose group column value is not in this list
                         are dropped before detection. For a composite key, supply
                         a dict mapping each key to its allowed value(s).
-        min_timestamp: Optional lower bound on start_timestamp (epoch seconds).
-                       Events before this timestamp are excluded.
         support_threshold: Fraction [0, 1] threshold; None = no filtering.
         filter_out: When True, keeps loops with support <= threshold (rare).
                     When False (default), keeps loops with support >= threshold
@@ -101,11 +98,7 @@ def compute_loop_detection(
             trace_ids    - list of trace IDs (only when trace_based=True and
                            grouping by trace_id)
     """
-    # --- 1. Timestamp pre-filter ---
-    if min_timestamp is not None:
-        events_df = events_df.filter(F.col("start_timestamp") >= min_timestamp)
-
-    # --- 2. Resolve grouping columns ---
+    # --- 1. Resolve grouping columns ---
     keys = [] if grouping_key is None else (
         [grouping_key] if isinstance(grouping_key, str) else list(grouping_key)
     )
@@ -124,7 +117,7 @@ def compute_loop_detection(
                 events_df = events_df.withColumn(col_name, F.col("attributes").getItem(key))
                 group_cols.append(col_name)
 
-    # --- 3. Grouping-value filter ---
+    # --- 2. Grouping-value filter ---
     if grouping_value is not None:
         if isinstance(grouping_value, dict):
             # Multi-key case: {key: value(s)}
@@ -137,7 +130,7 @@ def compute_loop_detection(
             allowed = [grouping_value] if isinstance(grouping_value, str) else list(grouping_value)
             events_df = events_df.filter(F.col(group_cols[0]).isin(allowed))
 
-    # --- 4. Count total groups ---
+    # --- 3. Count total groups ---
     total_groups = events_df.select(*group_cols).distinct().count()
 
     if total_groups == 0:
@@ -148,7 +141,7 @@ def compute_loop_detection(
             "non_self_loops": [],
         }
 
-    # --- 5. Collect ordered sequences per group and detect loops via UDF ---
+    # --- 4. Collect ordered sequences per group and detect loops via UDF ---
     seq_df = events_df.groupBy(*group_cols).agg(
         F.collect_list(
             F.struct(F.col("activity"), F.col("position"))
@@ -170,7 +163,7 @@ def compute_loop_detection(
     )
     exploded.cache()
 
-    # --- 6. Aggregate: count groups per loop ---
+    # --- 5. Aggregate: count groups per loop ---
     agg_exprs = [
         F.count("*").alias("group_count"),
     ]
@@ -184,19 +177,19 @@ def compute_loop_detection(
         .withColumn("support", F.col("group_count") / F.lit(total_groups))
     )
 
-    # --- 7. Apply support threshold ---
+    # --- 6. Apply support threshold ---
     if support_threshold is not None:
         if filter_out:
             result_df = result_df.filter(F.col("support") <= F.lit(support_threshold))
         else:
             result_df = result_df.filter(F.col("support") >= F.lit(support_threshold))
 
-    # --- 8. Sort and limit ---
+    # --- 7. Sort and limit ---
     result_df = result_df.orderBy(F.col("support").desc())
     if top_k is not None:
         result_df = result_df.limit(top_k)
 
-    # --- 9. Collect to driver and build output dict ---
+    # --- 8. Collect to driver and build output dict ---
     rows = result_df.collect()
     exploded.unpersist()
 

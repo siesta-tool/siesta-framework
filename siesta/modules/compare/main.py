@@ -131,7 +131,12 @@ class Comparing(SiestaModule):
 
         config = comparator_config.model_dump()
         config["method"] = "ngrams"
-        self._load_comparator_config(config)
+        try:
+            self._load_comparator_config(config)
+        except Exception as e:
+            logger.exception(f"Error loading comparator config: {e}")
+            return {"code": 400, "message": f"Invalid config: {e}"}
+
         self.compare(caller="api")
 
         logger.info(f"Completed. Results available at {self.comparator_config['output_path']}.")
@@ -174,7 +179,13 @@ class Comparing(SiestaModule):
 
         config = comparator_config.model_dump()
         config["method"] = "rare_rules"
-        self._load_comparator_config(config)
+        
+        try:
+            self._load_comparator_config(config)
+        except Exception as e:
+            logger.exception(f"Error loading comparator config: {e}")
+            return {"code": 400, "message": f"Invalid config: {e}"}
+        
         self.compare(caller="api")
 
         logger.info(f"Completed. Results available at {self.comparator_config['output_path']}.")
@@ -218,7 +229,13 @@ class Comparing(SiestaModule):
 
         config = comparator_config.model_dump()
         config["method"] = "targeted_rules"
-        self._load_comparator_config(config)
+       
+        try:
+            self._load_comparator_config(config)
+        except Exception as e:
+            logger.exception(f"Error loading comparator config: {e}")
+            return {"code": 400, "message": f"Invalid config: {e}"}
+
         self.compare(caller="api")
 
         logger.info(f"Completed. Results available at {self.comparator_config['output_path']}.")
@@ -235,13 +252,16 @@ class Comparing(SiestaModule):
 
     def _load_comparator_config(self, config: Dict[str, Any]):
         if not self.storage.log_exists(config):
-            log_name = config.get("log_name", "default_log")
-            raise ValueError(f"Log '{log_name}' does not exist in storage. Run preprocessing first.")
+            logger.exception(f"Log '{config.get('log_name')}' does not exist in storage. Run preprocessing first.")
+            raise ValueError(f"Log '{config.get('log_name')}' does not exist in storage. Run preprocessing first.")
+        
 
         self.comparator_config = DEFAULT_COMPARATOR_CONFIG.copy()
         self.comparator_config.update(config)
-
-        given_output_path = config.get("output_path", "../output/" + config.get("log_name", "comparator_results"))
+        if self.comparator_config.get("output_path") is not None and self.comparator_config.get("output_path") == "output/example_log":
+            self.comparator_config["output_path"] = "output/" + config.get("log_name", "comparator_results")
+            
+        given_output_path = config.get("output_path", "../../../output/" + config.get("log_name", "comparator_results"))
         Path(given_output_path).parent.mkdir(parents=True, exist_ok=True)
         self.comparator_config["output_path"] = given_output_path + "_" + str(datetime.datetime.now().timestamp())
 

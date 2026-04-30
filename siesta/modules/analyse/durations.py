@@ -94,9 +94,10 @@ def compute_activity_durations(
         events_df = _apply_group_value_filter(events_df, group_cols[0], grouping_value)
 
     if end_time is not None:
+        # end_time attribute is stored as a datetime string; cast through timestamp to epoch seconds.
         events_df = events_df.withColumn(
             "duration_sec",
-            F.col("attributes").getItem(end_time).cast("double") - F.col("start_timestamp").cast("double"),
+            F.col("attributes").getItem(end_time).cast("timestamp").cast("double") - F.col("start_timestamp").cast("double"),
         )
     else:
         # Transition time: next event's start minus this event's start, within each trace
@@ -159,9 +160,10 @@ def compute_group_durations(
         events_df = _apply_group_value_filter(events_df, group_cols[0], grouping_value)
 
     if end_time is not None:
+        # end_time attribute is stored as a datetime string; cast through timestamp to epoch seconds.
         events_df = events_df.withColumn(
             "_event_dur",
-            F.col("attributes").getItem(end_time).cast("double") - F.col("start_timestamp").cast("double"),
+            F.col("attributes").getItem(end_time).cast("timestamp").cast("double") - F.col("start_timestamp").cast("double"),
         )
         result_df = events_df.groupBy(*group_cols).agg(
             F.sum("_event_dur").alias("duration_sec"),
