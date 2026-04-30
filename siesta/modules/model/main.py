@@ -98,7 +98,11 @@ class Modeling(SiestaModule):
 
         config = modeler_config.model_dump()
         config["method"] = "directly_follows"
-        self._load_modeler_config(config)
+        try:
+            self._load_modeler_config(config)
+        except ValueError as e:
+            logger.error(f"Invalid config for directly_follows: {e}")
+            return {"error": 400, "message": str(e)}
 
         return self._run_directly_follows(caller="api")
 
@@ -136,8 +140,11 @@ class Modeling(SiestaModule):
 
         config = modeler_config.model_dump()
         config["method"] = "bpmn"
-        self._load_modeler_config(config)
-
+        try:
+            self._load_modeler_config(config)
+        except ValueError as e:
+            logger.error(f"Invalid config for bpmn: {e}")
+            return {"error": 400, "message": str(e)}
         return self._run_bpmn(caller="api")
     
 
@@ -187,15 +194,18 @@ class Modeling(SiestaModule):
             logger.error(
                 f"Log '{log_name}' does not exist in storage. Run indexing first."
             )
-            return f"Log '{log_name}' does not exist in storage. Run indexing first."
+            raise ValueError(
+                f"Log '{log_name}' not found. Ensure it is indexed before modeling.")
+        
 
         self.modeler_config = DEFAULT_MODELER_CONFIG.copy()
         self.modeler_config.update(config)
 
-        given_output = config.get(
-            "output_path",
-            "output/" + config.get("log_name", "analyzer_results"),
-        )
+        if config.get("output_path") is None or config.get("output_path") == "/output/example_log":
+            config["output_path"] = "output/" + config.get("log_name", "example_log")
+
+        given_output = config.get("output_path")
+        
         Path(given_output).parent.mkdir(parents=True, exist_ok=True)
         self.modeler_config["output_path"] = (
             given_output + "_" + str(datetime.datetime.now().timestamp())
