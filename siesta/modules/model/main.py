@@ -201,10 +201,11 @@ class Modeling(SiestaModule):
         self.modeler_config = DEFAULT_MODELER_CONFIG.copy()
         self.modeler_config.update(config)
 
-        given_output = config.get(
-            "output_path",
-            "output/" + config.get("log_name", "analyzer_results"),
-        )
+        if config.get("output_path") is None or config.get("output_path") == "/output/example_log":
+            config["output_path"] = "output/" + config.get("log_name", "example_log")
+
+        given_output = config.get("output_path")
+        
         Path(given_output).parent.mkdir(parents=True, exist_ok=True)
         self.modeler_config["output_path"] = (
             given_output + "_" + str(datetime.datetime.now().timestamp())
