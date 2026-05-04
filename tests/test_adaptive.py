@@ -75,7 +75,7 @@ def check(condition: bool, description: str) -> bool:
 
 
 def post_ingest() -> dict:
-    print("\n── Ingest ──────────────────────────────────────────────────────")
+    print("\n── Adaptive Ingest ─────────────────────────────────────────────")
     with open(INDEX_CONFIG_PATH) as f:
         index_config_str = f.read()
     with open(DATASET_PATH, "rb") as fp:
@@ -90,6 +90,37 @@ def post_ingest() -> dict:
     check(body.get("code") == 200, f"Ingest returned code 200 (got {body.get('code')})")
     print(f"  time={body.get('time', '?'):.2f}s")
     return body
+
+
+def post_eager_ingest() -> None:
+    """
+    Run the eager indexer to populate the shared pairs_index.
+
+    The Scenario B cross-check calls /querying/detection which reads
+    exclusively from pairs_index (built only by the eager indexer).
+    Without this step, the cross-check always returns 0.
+    """
+    print("\n── Eager Ingest (pairs_index for cross-check) ──────────────────")
+    with open(INDEX_CONFIG_PATH) as f:
+        index_config_str = f.read()
+    with open(DATASET_PATH, "rb") as fp:
+        r = requests.post(
+            urljoin(API_BASE, "/indexing/run"),
+            files={"log_file": (DATASET_PATH.name, fp, "text/csv")},
+            data={"index_config": index_config_str},
+            timeout=300,
+        )
+    if r.status_code != 200:
+        print(f"  WARN: eager ingest returned {r.status_code} — cross-check may be unreliable.")
+        return
+    body = r.json()
+    ok = check(body.get("code") == 200, f"Eager ingest returned code 200 (got {body.get('code')})")
+    if ok:
+        t = body.get('time')
+        try:
+            print(f"  time={float(t):.2f}s")
+        except (TypeError, ValueError):
+            print(f"  time={t}s")
 
 
 def post_detection(pattern: str, label: str = "") -> dict:
@@ -292,8 +323,9 @@ def main():
     except Exception as exc:
         sys.exit(f"API not reachable at {API_BASE}: {exc}")
 
-    # Ingest.
+    # Ingest — adaptive indexer first, then eager to populate pairs_index.
     post_ingest()
+    post_eager_ingest()
     time.sleep(2)
 
     # Run scenarios.
