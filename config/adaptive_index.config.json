@@ -1,0 +1,25 @@
+{
+  "log_name": "test",
+  "log_path": "datasets/test.csv",
+  "storage_namespace": "siesta",
+  "overwrite_data": true,
+  "enable_streaming": false,
+  "lookback": "30d",
+  "kafka_topic": "example_log",
+  "field_mappings": {
+    "csv": {
+      "activity": "activity",
+      "trace_id": "trace_id",
+      "position": null,
+      "start_timestamp": "timestamp",
+      "attributes": ["resource", "role", "cost", "lifecycle"]
+    }
+  },
+  "trace_level_fields": ["trace_id"],
+  "timestamp_fields": ["start_timestamp"],
+  "perspectives": [
+    {"grouping_keys": ["resource"]}
+  ],
+  "retention_horizon_seconds": 60,
+  "retention_half_life_seconds": 60
+}

@@ -1,0 +1,12 @@
+{
+  "log_name": "test_adaptive",
+  "storage_namespace": "siesta",
+  "method": "detection",
+  "query": {
+    "pattern": "A B"
+  },
+  "support_threshold": 0.0,
+  "grouping_keys": ["resource"],
+  "lookback": "30d",
+  "lookback_mode": "time"
+}

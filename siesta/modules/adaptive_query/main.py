@@ -159,7 +159,7 @@ DEFAULT_ADAPTIVE_QUERY_CONFIG: Dict[str, Any] = (
 # Module
 # ---------------------------------------------------------------------------
 
-class AdaptiveQuerying(SiestaModule):
+class Adaptive_Querying(SiestaModule):
     """
     Adaptive query executor with workload-driven index selection.
 
@@ -184,6 +184,7 @@ class AdaptiveQuerying(SiestaModule):
         self.metadata = None
         self.storage = None
         self._lru = None
+        self._retention = None
 
     # ------------------------------------------------------------------
     # Framework hooks
@@ -805,7 +806,7 @@ class AdaptiveQuerying(SiestaModule):
         if self._retention is None:
             from siesta.modules.adaptive_index.retention import RetentionPolicy
             self._retention = RetentionPolicy(
-                horizon_seconds=self.query_config.get("retention_horizon_seconds", 3600.0),
+                T=self.query_config.get("retention_horizon_seconds", 3600.0),
                 half_life_seconds=self.query_config.get("retention_half_life_seconds", 3600.0),
             )
 
@@ -838,7 +839,7 @@ class AdaptiveQuerying(SiestaModule):
                     t0 = time.time()
                     has_pos = stats.level >= PerspectiveLevel.L2_POS_ESTABLISHED
                     build_pair_persistent(
-                        pid=pid, act_a=a, act_b=b,
+                        pid=pid, act_a=a, act_b=b, lookback=stats.lookback, lookback_mode=stats.lookback_mode,
                         metadata=self.metadata, storage=self.storage,
                         has_pos=has_pos,
                     )

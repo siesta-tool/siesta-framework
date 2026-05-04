@@ -182,7 +182,7 @@ class PerspectiveRegistrationRequest(BaseModel):
 # Module
 # ---------------------------------------------------------------------------
 
-class AdaptiveIndexing(SiestaModule):
+class Adaptive_Indexing(SiestaModule):
     """
     Adaptive, workload-driven indexer for the attribute-aware
     pattern-query framework.
@@ -483,10 +483,14 @@ class AdaptiveIndexing(SiestaModule):
             self.storage.read_metadata_table(self.metadata)
             self._catalog = get_catalog(self.metadata, self.storage)
             self._retention = RetentionPolicy(
-                horizon_seconds=self.index_config.get(
+                T=self.index_config.get(
                     "retention_horizon_seconds",
                     DEFAULT_ADAPTIVE_INDEX_CONFIG["retention_horizon_seconds"],
-                )
+                ),
+                half_life_seconds=self.index_config.get(
+                    "retention_half_life_seconds",
+                    DEFAULT_ADAPTIVE_INDEX_CONFIG["retention_horizon_seconds"],
+                ),
             )
         # ----------------------------------------------------------------
         # Step 1a  Sequence Table
@@ -835,6 +839,8 @@ class AdaptiveIndexing(SiestaModule):
                                 act_b=act_b,
                                 metadata=self.metadata,
                                 storage=self.storage,
+                                lookback=stats.lookback,
+                                lookback_mode=stats.lookback_mode,
                                 has_pos=(
                                     stats.level
                                     >= PerspectiveLevel.L2_POS_ESTABLISHED
