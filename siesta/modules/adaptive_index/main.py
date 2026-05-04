@@ -24,6 +24,7 @@ from siesta.modules.adaptive_index.builders import (
 )
 from siesta.modules.adaptive_index.catalog import evict_catalog, get_catalog
 from siesta.modules.adaptive_index.retention import RetentionPolicy
+from siesta.modules.adaptive_query.lru_cache import get_lru_cache
 from siesta.modules.index.builders import (
     build_activity_index,
     build_sequence_table,
@@ -600,92 +601,6 @@ class AdaptiveIndexing(SiestaModule):
         self.index_config = DEFAULT_ADAPTIVE_INDEX_CONFIG.copy()
         self.index_config.update(config)
 
-    # def _ensure_catalog_and_policy(
-    #     self,
-    #     override_metadata: Optional[MetaData] = None,
-    # ) -> None:
-    #     """
-    #     Ensure that self._catalog and self._retention are initialised
-    #     and consistent with the current call's target log.
-
-    #     This method is safe to call multiple times per request — it is
-    #     a no-op when the target log has not changed and the horizon is
-    #     unchanged.
-
-    #     Parameters
-    #     ----------
-    #     override_metadata
-    #         When provided (e.g. from api_register_perspective), use
-    #         this MetaData directly instead of building one from
-    #         index_config.  The method still detects log changes using
-    #         the (namespace, log_name) key.
-    #     """
-    #     if override_metadata is not None:
-    #         target_metadata = override_metadata
-    #     else:
-    #         target_metadata = MetaData(
-    #             storage_namespace=self.index_config.get(
-    #                 "storage_namespace", "siesta"
-    #             ),
-    #             log_name=self.index_config.get("log_name", "default_log"),
-    #             storage_type=self.index_config.get("storage_type", "s3"),
-    #         )
-
-    #     target_key = (
-    #         target_metadata.storage_namespace,
-    #         target_metadata.log_name,
-    #     )
-
-    #     # ---- Detect log change ----------------------------------------
-    #     # If the target log is different from the one the catalog was
-    #     # last loaded for, refresh self.metadata so that get_catalog()
-    #     # routes to the correct singleton.  self._catalog is reassigned
-    #     # to the new singleton; the old one remains alive in the registry
-    #     # for its own log.
-    #     if self._active_log_key != target_key:
-    #         if self._active_log_key is not None:
-    #             logger.info(
-    #                 f"{self.name}: log target changed "
-    #                 f"{self._active_log_key} -> {target_key}, "
-    #                 "refreshing catalog reference."
-    #             )
-    #         # Update live metadata reference.
-    #         self.metadata = target_metadata
-    #         self._active_log_key = target_key
-    #         # Force catalog refresh for new log.
-    #         self._catalog = None
-
-    #     # Initialise metadata if still None (first call, no override).
-    #     if self.metadata is None:
-    #         self.metadata = target_metadata
-    #         self.storage.read_metadata_table(self.metadata)
-
-    #     # ---- Catalog --------------------------------------------------
-    #     # get_catalog() returns the existing singleton if it already
-    #     # exists in the registry, or creates a new one (loading from
-    #     # Delta) if this is the first access for this log in this process.
-    #     if self._catalog is None:
-    #         storage = self.storage or get_storage_manager()
-    #         self._catalog = get_catalog(self.metadata, storage)
-    #         logger.info(
-    #             f"{self.name}: catalog reference acquired for "
-    #             f"{target_key}."
-    #         )
-
-    #     # ---- Retention policy -----------------------------------------
-    #     # The policy holds no mutable state — all stats live in the
-    #     # catalog.  Recreate only if the configured horizon changed.
-    #     horizon = self.index_config.get(
-    #         "retention_horizon_seconds",
-    #         DEFAULT_ADAPTIVE_INDEX_CONFIG["retention_horizon_seconds"],
-    #     )
-    #     if self._retention is None or self._retention.T != horizon:
-    #         self._retention = RetentionPolicy(horizon_seconds=horizon)
-    #         logger.info(
-    #             f"{self.name}: RetentionPolicy (re)created with "
-    #             f"horizon={horizon}s."
-    #         )
-
     def _declare_proactive_perspectives(self) -> None:
         """
         Register any perspectives listed in index_config['perspectives']
@@ -715,30 +630,16 @@ class AdaptiveIndexing(SiestaModule):
                     f"(keys={grouping_keys}) at L0."
                 )
 
-    def _run_incremental_maintenance(
-        self, batch_activity_df, batch_min_ts: int
-    ) -> None:
-        """
-        For every established perspective (L1+), run incremental pair
-        extraction for all L3 (persistent) pairs and update their
-        PairsIndex and LastChecked entries.
-
-        Times each perspective's maintenance cycle and records the cost
-        in the catalog so the retention policy can track it accurately.
-        """
+    def _run_incremental_maintenance(self, batch_activity_df, batch_min_ts: int) -> None:
         for pid, stats in self._catalog.all_established_perspectives():
+
             persistent_pairs = [
                 (a, b)
                 for (a, b), ps in stats.pairs.items()
                 if ps.status == PairStatus.PERSISTENT
             ]
 
-            logger.info(
-                f"{self.name}: incremental maintenance for '{pid}' — "
-                f"{len(persistent_pairs)} persistent pair(s)."
-            )
             t0 = time.time()
-
             try:
                 pair_elapsed = incremental_update_persistent_pairs(
                     pid=pid,
@@ -761,22 +662,23 @@ class AdaptiveIndexing(SiestaModule):
                 )
                 continue
 
+            # Invalidate the LRU cache for this perspective so that the
+            # query planner does not serve pre-ingest transient pairs.
+            # This must happen after the Delta write completes so that
+            # the next query that rebuilds a transient pair reads the
+            # updated sequence table.
+            get_lru_cache(self.metadata).invalidate_perspective(pid)
+
             total_ms = (time.time() - t0) * 1000
-
-            self._catalog.record_batch_maintenance(
-                pid=pid,
-                l1_ms=0.0,
-                l2_ms=0.0,
-                pair_ms=(
-                    pair_elapsed
-                    if isinstance(pair_elapsed, dict)
-                    else {}
-                ),
-            )
-
+            if pair_elapsed:
+                self._catalog.record_batch_maintenance(
+                    pid=pid,
+                    l1_ms=0.0,
+                    l2_ms=0.0,
+                    pair_ms=pair_elapsed,
+                )
             logger.info(
-                f"{self.name}: maintenance for '{pid}' done in "
-                f"{total_ms:.1f}ms."
+                f"{self.name}: maintenance for '{pid}' done in {total_ms:.1f}ms."
             )
 
     def _evaluate_retention(self) -> None:
@@ -802,10 +704,12 @@ class AdaptiveIndexing(SiestaModule):
 
         Demotion rules
         --------------
-        PERSISTENT -> ABSENT : triggered when utility falls below
-                               (1 - hysteresis) * threshold.  The Delta
-                               table is retained on disk (cheap to rebuild)
-                               but excluded from maintenance.
+        PERSISTENT -> TRANSIENT : triggered when utility falls below
+                               (1 - hysteresis) * threshold.  The pair
+                               stops receiving incremental maintenance
+                               but remains in the LRU cache for reuse.
+                               The LRU eviction policy handles the
+                               final TRANSIENT -> ABSENT transition.
         """
         for pid, stats in self._catalog.all_perspectives():
 
@@ -901,15 +805,22 @@ class AdaptiveIndexing(SiestaModule):
                             )
 
                 elif pair_stats.status == PairStatus.PERSISTENT:
-                    if self._retention.should_evict_pair(pair_stats):
+                    if self._retention.should_demote_pair(pair_stats):
                         logger.info(
                             f"{self.name}: demoting pair "
                             f"({act_a},{act_b}) under '{pid}' — "
-                            "utility below threshold."
+                            "utility below threshold, moving to "
+                            "TRANSIENT (LRU-cached)."
                         )
-                        # Flag as absent; Delta table is kept on disk.
+                        # Demote to TRANSIENT (L3-), not ABSENT.
+                        # The pair stops receiving incremental
+                        # maintenance but stays in the query planner's
+                        # LRU cache for immediate reuse.  The LRU
+                        # eviction policy handles the final
+                        # TRANSIENT -> ABSENT transition based on
+                        # memory pressure.
                         self._catalog.promote_pair(
-                            pid, act_a, act_b, PairStatus.ABSENT
+                            pid, act_a, act_b, PairStatus.TRANSIENT
                         )
 
         # Flush all write-back mutations accumulated during this cycle.

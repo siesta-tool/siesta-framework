@@ -20,6 +20,7 @@ class PairStats:
     query_count: int = 0             # f_pair, number of queries touching this pair
     total_savings_ms: float = 0.0    # cumulative savings vs lazy scan
     total_maintenance_ms: float = 0.0
+    maintenance_batch_count: int = 0
     status: PairStatus = PairStatus.ABSENT
     last_accessed_ts: float = 0.0
 

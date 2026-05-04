@@ -393,6 +393,7 @@ class PerspectiveCatalog:
             for (a, b), ms in pair_ms.items():
                 ps = stats.pairs.setdefault((a, b), PairStats())
                 ps.total_maintenance_ms += ms
+                ps.maintenance_batch_count += 1
 
             self._dirty.add(pid)
 
