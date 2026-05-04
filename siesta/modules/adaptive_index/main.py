@@ -62,7 +62,8 @@ class AdaptiveIndexConfig(BaseModel):
             {"grouping_keys": ["org:resource"], "lookback": "30d"},
             {"grouping_keys": ["concept:name", "org:group"], "lookback": "14d"}
         ],
-        "retention_horizon_seconds": 7200
+        "retention_horizon_seconds": 7200,
+        "half_life_seconds": 3600
     }
     """
 
@@ -145,6 +146,14 @@ class AdaptiveIndexConfig(BaseModel):
             "function.  Shorter values make the policy react faster to "
             "workload shifts; longer values amortise build costs over "
             "more queries."
+        ),
+    )
+    half_life_seconds: float = Field(
+        3600.0,
+        description=(
+            "Half-life (seconds) for exponential decay of perspective counters. "
+            "Shorter values make the policy react faster to workload shifts; "
+            "longer values amortise build costs over more queries."
         ),
     )
 
@@ -362,12 +371,6 @@ class AdaptiveIndexing(SiestaModule):
                 storage_type=request.storage_type,
             )
             self._catalog = get_catalog(meta, self.storage or get_storage_manager())
-
-        pid, _ = self._catalog.get_or_declare(
-            grouping_keys=request.grouping_keys,
-            lookback=request.lookback,
-            lookback_mode=request.lookback_mode,
-        )
 
         pid, _ = self._catalog.get_or_declare(
             grouping_keys=request.grouping_keys,
@@ -768,6 +771,53 @@ class AdaptiveIndexing(SiestaModule):
                         exc_info=True,
                     )
 
+            # ---- L1 -> L0 demotion ----
+            if (
+                stats.level == PerspectiveLevel.L1_POS_FREE
+                and self._retention.should_demote_l1(stats)
+            ):
+                logger.info(f"{self.name}: demoting '{pid}' L1->L0.")
+                # Drop the per-perspective sequence table. Future queries that
+                # touch this perspective will rebuild it via L0->L1 promotion.
+                try:
+                    from siesta.modules.adaptive_index.builders import _perspective_sequence_path
+                    seq_path = _perspective_sequence_path(self.metadata, pid)
+                    spark = get_spark_session()
+                    spark.sql(f"DROP TABLE IF EXISTS delta.`{seq_path}`")
+                    # Reset L1-specific stats so subsequent re-promotion starts clean.
+                    stats.l1_build_cost_ms = 0.0
+                    stats.l1_maintenance_ms_per_batch = 0.0
+                    # Note: we do NOT reset l1_query_count - that's the workload signal
+                    # that drives re-promotion.
+                    self._catalog.set_level(pid, PerspectiveLevel.L0_DECLARED)
+                except Exception as exc:
+                    logger.error(
+                        f"{self.name}: L1 demotion failed for '{pid}': {exc}",
+                        exc_info=True,
+                    )
+
+            # ---- L2 -> L1 demotion ----
+            elif (
+                stats.level == PerspectiveLevel.L2_POS_ESTABLISHED
+                and self._retention.should_demote_l2(stats)
+            ):
+                logger.info(f"{self.name}: demoting '{pid}' L2->L1.")
+                # Stop maintaining pos. Existing per-pair indices keep their pos
+                # data but it goes stale; the query planner falls back to ts-sort.
+                try:
+                    from siesta.modules.adaptive_index.builders import _perspective_seq_metadata_path
+                    meta_path = _perspective_seq_metadata_path(self.metadata, pid)
+                    spark = get_spark_session()
+                    spark.sql(f"DROP TABLE IF EXISTS delta.`{meta_path}`")
+                    stats.l2_build_cost_ms = 0.0
+                    stats.l2_maintenance_ms_per_batch = 0.0
+                    self._catalog.set_level(pid, PerspectiveLevel.L1_POS_FREE)
+                except Exception as exc:
+                    logger.error(
+                        f"{self.name}: L2 demotion failed for '{pid}': {exc}",
+                        exc_info=True,
+                    )
+
             # ---- Per-pair retention -----------------------------------
             for (act_a, act_b), pair_stats in list(stats.pairs.items()):
 
@@ -822,6 +872,6 @@ class AdaptiveIndexing(SiestaModule):
                         self._catalog.promote_pair(
                             pid, act_a, act_b, PairStatus.TRANSIENT
                         )
-
+            
         # Flush all write-back mutations accumulated during this cycle.
         self._catalog.flush()

@@ -397,13 +397,8 @@ class PerspectiveCatalog:
 
             self._dirty.add(pid)
 
-    def record_pair_build_cost(
-        self,
-        pid: str,
-        act_a: str,
-        act_b: str,
-        build_cost_ms: float,
-    ) -> None:
+
+    def record_pair_build_cost(self, pid, act_a, act_b, build_cost_ms) -> None:
         """
         Store the measured first-touch build cost for a pair.
 
@@ -412,15 +407,17 @@ class PerspectiveCatalog:
         cold-start savings baseline: future queries that hit a cached
         or persistent version of the pair are credited with saving
         this cost.  Write-back.
-        """
+        """ 
         with self._lock:
             stats = self._cache.get(pid)
             if stats is None:
                 return
             ps = stats.pairs.setdefault((act_a, act_b), PairStats())
-            # Only record if not already set — first measurement wins.
             if ps.build_cost_ms == 0.0:
                 ps.build_cost_ms = build_cost_ms
+            else:
+                alpha = 0.3  # slightly higher than maintenance EMA
+                ps.build_cost_ms = (1 - alpha) * ps.build_cost_ms + alpha * build_cost_ms
             self._dirty.add(pid)
 
     # ------------------------------------------------------------------
@@ -590,6 +587,32 @@ class PerspectiveCatalog:
                     f"PerspectiveCatalog: could not persist '{pid}': {exc2}",
                     exc_info=True,
                 )
+    def get_pair_status(
+        self, pid: str, act_a: str, act_b: str
+    ) -> Optional[PairStatus]:
+        """
+        Return the current PairStatus for a given pair under a perspective.
+
+        Returns None if the perspective is unknown, otherwise returns the
+        current status (which may be ABSENT, TRANSIENT, or PERSISTENT).
+        """
+        with self._lock:
+            stats = self._cache.get(pid)
+            if stats is None:
+                return None
+            ps = stats.pairs.get((act_a, act_b))
+            if ps is None:
+                return PairStatus.ABSENT
+            return ps.status
+    
+    def set_level(self, pid: str, target_level: PerspectiveLevel) -> None:
+        """Set perspective level without monotonicity check (for demotion)."""
+        with self._lock:
+            stats = self._cache.get(pid)
+            if stats is None:
+                raise KeyError(f"Unknown perspective '{pid}'.")
+            stats.level = target_level
+            self._persist_one(pid)
 
 
 # ---------------------------------------------------------------------------

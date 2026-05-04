@@ -98,6 +98,41 @@ class RetentionPolicy:
     T: float          = 3600.0
     hysteresis: float = 0.15
     min_query_count: int = 3
+    half_life_seconds: float = 3600.0   
+
+    def _decay_perspective(self, stats: PerspectiveStats) -> None:
+        """
+        Apply exponential decay to perspective counters based on elapsed
+        time since last decay.  Called lazily before each predicate
+        evaluation so that decay is computed on demand, not on every
+        record_query_touch.
+        """
+        now = time.time()
+        if stats.last_decay_ts == 0.0:
+            stats.last_decay_ts = now
+            return
+        elapsed = now - stats.last_decay_ts
+        if elapsed <= 0:
+            return
+        factor = math.exp(-elapsed * math.log(2) / self.half_life_seconds)
+        stats.l1_query_count = int(stats.l1_query_count * factor)
+        stats.l1_total_savings_ms *= factor
+        stats.l2_pos_query_count = int(stats.l2_pos_query_count * factor)
+        stats.l2_total_savings_ms *= factor
+        stats.last_decay_ts = now
+
+    def _decay_pair(self, ps: PairStats) -> None:
+        now = time.time()
+        if ps.last_decay_ts == 0.0:
+            ps.last_decay_ts = now
+            return
+        elapsed = now - ps.last_decay_ts
+        if elapsed <= 0:
+            return
+        factor = math.exp(-elapsed * math.log(2) / self.half_life_seconds)
+        ps.query_count = int(ps.query_count * factor)
+        ps.total_savings_ms *= factor
+        ps.last_decay_ts = now
 
     # ------------------------------------------------------------------
     # Eq. 1  Perspective L1
@@ -114,6 +149,7 @@ class RetentionPolicy:
         queries) — the perspective stays at L0 and each query pays the
         lazy-scan cost until enough evidence accumulates.
         """
+        self._decay_perspective(stats)
         if stats.l1_query_count < self.min_query_count:
             return False
         if stats.l1_build_cost_ms <= 0.0:
@@ -138,6 +174,8 @@ class RetentionPolicy:
         Otherwise, demotion fires when utility drops below
         (1 - ε) * cost.
         """
+        self._decay_perspective(stats)
+
         if stats.l1_query_count == 0:
             return True
 
@@ -164,6 +202,7 @@ class RetentionPolicy:
         The min_query_count threshold applies to pos-referencing
         queries specifically — general query volume is irrelevant.
         """
+        self._decay_perspective(stats)
         if stats.l2_pos_query_count < self.min_query_count:
             return False
         if stats.l2_build_cost_ms <= 0.0:
@@ -190,6 +229,7 @@ class RetentionPolicy:
         pos data but become stale if new batches arrive — the query
         planner falls back to ts-sorting for those pairs.
         """
+        self._decay_perspective(stats)
         if stats.l2_pos_query_count == 0:
             return True
 

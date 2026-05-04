@@ -441,7 +441,7 @@ class AdaptiveQuerying(SiestaModule):
 
             if pair_status == PairStatus.TRANSIENT:
                 # L3-: check LRU cache
-                cached = get_lru_cache(self.metadata, self.storage).get(pid, act_a, act_b)
+                cached = get_lru_cache(self.metadata).get(pid, act_a, act_b)
                 if cached is not None:
                     df = spark.createDataFrame(
                         cached, schema=EventPair.get_schema()
@@ -478,9 +478,13 @@ class AdaptiveQuerying(SiestaModule):
                 # Cache in LRU for future queries
                 try:
                     collected = df.collect()
-                    get_lru_cache(self.metadata, self.storage).put(pid, act_a, act_b, collected)
-                except Exception:
-                    pass
+                    get_lru_cache(self.metadata).put(pid, act_a, act_b, collected)
+                    catalog.promote_pair(pid, act_a, act_b, PairStatus.TRANSIENT)
+                except Exception as exc:
+                    logger.warning(
+                        f"{self.name}: failed to cache transient pair "
+                        f"({act_a},{act_b}): {exc}"
+                    )
 
                 pair_dfs.append(df)
 
@@ -618,11 +622,6 @@ class AdaptiveQuerying(SiestaModule):
         t_total = time.time() - t_start
 
         # --- Step 6: Record workload statistics -------------------------
-        total_savings = sum(
-            (stats.pairs.get((a, b), PairStats()).build_cost_ms or cost)
-            - cost
-            for (a, b), cost in lazy_costs.items()
-        )
         catalog.record_query_touch(
             pid=pid,
             pairs_touched=list(all_pairs_2d),
@@ -638,6 +637,8 @@ class AdaptiveQuerying(SiestaModule):
                 and stats.pairs.get((a, b), PairStats()).build_cost_ms > 0
             },
         )
+        self._maybe_promote_after_query(pid, all_pairs_2d, references_pos)
+
         catalog.flush()
 
         formatted = [
@@ -794,8 +795,62 @@ class AdaptiveQuerying(SiestaModule):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+    def _maybe_promote_after_query(self, pid, pairs_touched, references_pos):
+        """
+        Lightweight per-pair retention check after each query.
+
+        Only evaluates the predicates for artefacts this query touched.
+        Full sweep over all perspectives still happens at ingest time.
+        """
+        if self._retention is None:
+            from siesta.modules.adaptive_index.retention import RetentionPolicy
+            self._retention = RetentionPolicy(
+                horizon_seconds=self.query_config.get("retention_horizon_seconds", 3600.0),
+                half_life_seconds=self.query_config.get("retention_half_life_seconds", 3600.0),
+            )
+
+        catalog = get_catalog(self.metadata, self.storage)
+        stats = catalog.get(pid)
+        if stats is None:
+            return
+
+        # L1 promotion is already synchronous on first touch; nothing to do here.
+        # L2 promotion can fire here if pos queries cross threshold.
+        if (references_pos
+            and stats.level == PerspectiveLevel.L1_POS_FREE
+            and self._retention.should_promote_l2(stats)):
+            try:
+                t0 = time.time()
+                promote_to_l2(pid, stats.grouping_keys, self.metadata, self.storage)
+                stats.l2_build_cost_ms = (time.time() - t0) * 1000
+                catalog.promote(pid, PerspectiveLevel.L2_POS_ESTABLISHED)
+            except Exception as exc:
+                logger.error(f"{self.name}: synchronous L2 promotion failed: {exc}")
+
+        # Per-pair L3 promotion.
+        for (a, b) in pairs_touched:
+            ps = stats.pairs.get((a, b))
+            if ps is None or ps.status == PairStatus.PERSISTENT:
+                continue
+            if self._retention.should_persist_pair(ps):
+                try:
+                    from siesta.modules.adaptive_index.builders import build_pair_persistent
+                    t0 = time.time()
+                    has_pos = stats.level >= PerspectiveLevel.L2_POS_ESTABLISHED
+                    build_pair_persistent(
+                        pid=pid, act_a=a, act_b=b,
+                        metadata=self.metadata, storage=self.storage,
+                        has_pos=has_pos,
+                    )
+                    ps.build_cost_ms = (time.time() - t0) * 1000
+                    catalog.promote_pair(pid, a, b, PairStatus.PERSISTENT)
+                except Exception as exc:
+                    logger.error(
+                        f"{self.name}: synchronous L3 promotion failed for "
+                        f"({a},{b}): {exc}"
+                    )
     def _get_lru(self) -> PairLRUCache:
-        return get_lru_cache(self.metadata, self.storage)
+        return get_lru_cache(self.metadata)
 
     def _bootstrap(
         self, config: Dict[str, Any], method: str

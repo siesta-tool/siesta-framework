@@ -23,6 +23,8 @@ class PairStats:
     maintenance_batch_count: int = 0
     status: PairStatus = PairStatus.ABSENT
     last_accessed_ts: float = 0.0
+    last_decay_ts: float = 0.0  
+
 
 @dataclass
 class PerspectiveStats:
@@ -44,6 +46,7 @@ class PerspectiveStats:
     l2_maintenance_ms_per_batch: float = 0.0
     # Per-pair stats: keyed by (A, B)
     pairs: dict[tuple[str,str], PairStats] = field(default_factory=dict)
+    last_decay_ts: float = 0.0   #  wall-clock when counters were last decayed
 
     @staticmethod
     def get_catalog_schema() -> StructType:
