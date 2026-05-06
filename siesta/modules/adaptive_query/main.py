@@ -650,7 +650,7 @@ class Adaptive_Querying(SiestaModule):
                 "positions": positions,
             }
             for gid, positions in result
-            if len(positions) >= support_threshold
+            if len(positions) > support_threshold
         ]
 
         return {
