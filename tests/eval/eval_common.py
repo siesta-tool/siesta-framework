@@ -145,9 +145,14 @@ class DatasetSchema:
         return self.attribute_values.get(attr) or (fallback or [])
 
 
-# Attributes never useful as constraints / perspectives.
+# Attributes never useful as constraints / perspectives.  These match
+# the *raw* keys as they appear in the dataset / index — we deliberately
+# don't normalise XES keys, because the adaptive index keys events by
+# the verbatim attribute name (e.g. `attributes["org:resource"]`).
+# Normalising to "resource" here would make `grouping_keys=["resource"]`
+# produce a NULL `group_id` at query time.
 _BLOCKED_KEYS = {
-    "concept:name", "time:timestamp", "lifecycle:transition",
+    "concept:name", "time:timestamp",
     "activity", "trace_id", "timestamp", "position",
     "case:concept:name", "case_id",
 }
@@ -159,23 +164,6 @@ _XES_NS_RE = re.compile(r"^\{[^}]+\}")
 
 def _strip_ns(tag: str) -> str:
     return _XES_NS_RE.sub("", tag)
-
-
-def _normalise_attr_key(key: str) -> str:
-    """
-    Map common XES key aliases to the short names used in patterns.
-
-    `org:resource` -> `resource`, `org:role` -> `role`,
-    `lifecycle:transition` -> `lifecycle`, etc.  Unknown keys pass
-    through unchanged.
-    """
-    if ":" in key:
-        prefix, _, suffix = key.partition(":")
-        if prefix in {"org", "case"} and suffix:
-            return suffix
-        if prefix == "lifecycle":
-            return "lifecycle"
-    return key
 
 
 def discover_schema(
@@ -223,9 +211,7 @@ def _discover_schema_csv(
             for k, v in row.items():
                 if k in _BLOCKED_KEYS or v is None or v == "":
                     continue
-                key = _normalise_attr_key(k)
-                if key in _BLOCKED_KEYS:
-                    continue
+                key = k
                 if key not in value_sets or len(value_sets[key]) < max_values:
                     if v not in value_sets[key]:
                         value_sets[key].add(v)
@@ -271,9 +257,7 @@ def _discover_schema_xes(
             for k, v in cur_attrs.items():
                 if k in _BLOCKED_KEYS:
                     continue
-                key = _normalise_attr_key(k)
-                if key in _BLOCKED_KEYS:
-                    continue
+                key = k
                 if v not in value_sets[key] and len(value_sets[key]) < max_values:
                     value_sets[key].add(v)
                     values[key].append(v)
@@ -290,7 +274,7 @@ def _discover_schema_xes(
             if k and v is not None:
                 cur_attrs[k] = v
                 if tag in {"int", "float"} and _looks_numeric(v):
-                    numeric_keys.add(_normalise_attr_key(k))
+                    numeric_keys.add(k)
 
     perspectives = sorted(
         k for k in values

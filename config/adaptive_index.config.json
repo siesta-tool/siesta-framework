@@ -7,6 +7,13 @@
   "lookback": "30d",
   "kafka_topic": "example_log",
   "field_mappings": {
+    "xes": {
+      "activity": "concept:name",
+      "trace_id": "concept:name",
+      "position": null,
+      "start_timestamp": "time:timestamp",
+      "attributes" : ["*"]
+    },
     "csv": {
       "activity": "activity",
       "trace_id": "trace_id",
