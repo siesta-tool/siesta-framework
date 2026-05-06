@@ -20,6 +20,5 @@
   "perspectives": [
     {"grouping_keys": ["resource"]}
   ],
-  "retention_horizon_seconds": 60,
   "retention_half_life_seconds": 60
 }

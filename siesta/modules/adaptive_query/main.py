@@ -77,6 +77,7 @@ from siesta.modules.adaptive_index.builders import (
     _perspective_pair_path,
 )
 from siesta.modules.adaptive_index.catalog import get_catalog
+from siesta.modules.adaptive_index.retention import RetentionPolicy
 from siesta.modules.adaptive_query.lru_cache import PairLRUCache, get_lru_cache
 from siesta.modules.query.parse_seql import (
     extract_info_pairs,
@@ -172,19 +173,16 @@ class Adaptive_Querying(SiestaModule):
     name = "adaptive_executor"
     version = "1.0.0"
 
-    storage: Optional[StorageManager]
+    storage: StorageManager
     siesta_config: Dict[str, Any]
     query_config: Dict[str, Any]
-    metadata: Optional[MetaData]
+    metadata: MetaData
     _lru: PairLRUCache
+    _retention: RetentionPolicy
 
     def __init__(self):
         super().__init__()
         self.query_config = {}
-        self.metadata = None
-        self.storage = None
-        self._lru = None
-        self._retention = None
 
     # ------------------------------------------------------------------
     # Framework hooks
@@ -806,7 +804,6 @@ class Adaptive_Querying(SiestaModule):
         if self._retention is None:
             from siesta.modules.adaptive_index.retention import RetentionPolicy
             self._retention = RetentionPolicy(
-                T=self.query_config.get("retention_horizon_seconds", 3600.0),
                 half_life_seconds=self.query_config.get("retention_half_life_seconds", 3600.0),
             )
 
@@ -896,7 +893,7 @@ class Adaptive_Querying(SiestaModule):
 
     def _get_pair_status(
         self, pid: str, act_a: str, act_b: str
-    ) -> PairStatus:
+    ) -> PairStatus | None:
         """
         Return the effective pair status, accounting for LRU cache.
 

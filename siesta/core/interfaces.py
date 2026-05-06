@@ -82,7 +82,7 @@ class StorageManager(ABC):
         pass
     
     @abstractmethod
-    def initialize_db(self) -> None:
+    def initialize_db(self, index_config: Dict[str, Any] = {}) -> None:
         """
         Create the appropriate tables and remove previous ones if necessary.
         

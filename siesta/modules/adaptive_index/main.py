@@ -50,7 +50,7 @@ class AdaptiveIndexConfig(BaseModel):
 
     The only new fields are:
       - perspectives: list of grouping-key dicts to pre-declare at L0.
-      - retention_horizon_seconds: sliding horizon T for the cost function.
+      - retention_half_life_seconds: half-life parameter for the retention cost function.
 
     Example
     -------
@@ -62,8 +62,7 @@ class AdaptiveIndexConfig(BaseModel):
             {"grouping_keys": ["org:resource"], "lookback": "30d"},
             {"grouping_keys": ["concept:name", "org:group"], "lookback": "14d"}
         ],
-        "retention_horizon_seconds": 7200,
-        "half_life_seconds": 3600
+        "retention_half_life_seconds": 3600
     }
     """
 
@@ -139,15 +138,6 @@ class AdaptiveIndexConfig(BaseModel):
             "'lookback_mode' ('time'|'position')."
         ),
     )
-    retention_horizon_seconds: float = Field(
-        3600.0,
-        description=(
-            "Sliding horizon T (seconds) used by the retention cost "
-            "function.  Shorter values make the policy react faster to "
-            "workload shifts; longer values amortise build costs over "
-            "more queries."
-        ),
-    )
     half_life_seconds: float = Field(
         3600.0,
         description=(
@@ -203,10 +193,10 @@ class Adaptive_Indexing(SiestaModule):
     name    = "adaptive_indexer"
     version = "1.0.0"
 
-    storage: Optional[StorageManager]
+    storage: StorageManager
     siesta_config: Dict[str, Any]
     index_config: Dict[str, Any]
-    metadata: Optional[MetaData]
+    metadata: MetaData
 
     _catalog:        Any   # PerspectiveCatalog | None
     _retention:      Any   # RetentionPolicy | None
@@ -214,8 +204,6 @@ class Adaptive_Indexing(SiestaModule):
     def __init__(self):
         super().__init__()
         self.index_config    = {}
-        self.metadata        = None
-        self.storage         = None
         self._catalog        = None
         self._retention      = None
 
@@ -244,7 +232,7 @@ class Adaptive_Indexing(SiestaModule):
                 description=(
                     "JSON configuration object.  Accepts the same fields "
                     "as the eager indexer plus the optional 'perspectives' "
-                    "list and 'retention_horizon_seconds'."
+                    "list and 'retention_half_life_seconds'."
                 ),
                 openapi_examples={
                     "batch_with_perspective": {
@@ -483,13 +471,9 @@ class Adaptive_Indexing(SiestaModule):
             self.storage.read_metadata_table(self.metadata)
             self._catalog = get_catalog(self.metadata, self.storage)
             self._retention = RetentionPolicy(
-                T=self.index_config.get(
-                    "retention_horizon_seconds",
-                    DEFAULT_ADAPTIVE_INDEX_CONFIG["retention_horizon_seconds"],
-                ),
                 half_life_seconds=self.index_config.get(
                     "retention_half_life_seconds",
-                    DEFAULT_ADAPTIVE_INDEX_CONFIG["retention_horizon_seconds"],
+                    DEFAULT_ADAPTIVE_INDEX_CONFIG["retention_half_life_seconds"],
                 ),
             )
         # ----------------------------------------------------------------
