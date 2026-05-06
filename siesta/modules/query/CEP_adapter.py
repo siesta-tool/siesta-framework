@@ -31,7 +31,8 @@ from transformation.PatternTransformationRules import PatternTransformationRules
 
 from siesta.modules.query.parse_seql import (
     ActivityNode, AttrConstraint, ElementNode, NegatedNode,
-    OrNode, Quantifier, SeqNode, StringLiteral, VarExpr, parse_pattern,
+    NumberLiteral, OrNode, Quantifier, SeqNode, StringLiteral, VarExpr,
+    parse_pattern,
 )
 
 
@@ -252,88 +253,160 @@ def _expand_star_dsl(node):
     return [node]
 
 
+def _to_float_or_none(v):
+    """Best-effort numeric coercion. Returns None if v is non-numeric."""
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+# Comparison operators for *string* equality / inequality.  Numeric ordering
+# operators always coerce both sides via _to_float_or_none.
+_STRING_OPS = {
+    "=":  lambda lhs, rhs: lhs == rhs,
+    "!=": lambda lhs, rhs: lhs != rhs,
+}
+
+# Numeric comparison operators.  lhs/rhs are coerced to float; if either
+# coercion fails the predicate is False (rather than raising).
+_NUMERIC_OPS = {
+    "<":  lambda lhs, rhs: lhs <  rhs,
+    "<=": lambda lhs, rhs: lhs <= rhs,
+    ">":  lambda lhs, rhs: lhs >  rhs,
+    ">=": lambda lhs, rhs: lhs >= rhs,
+}
+
+
+def _make_literal_predicate(op: str, target):
+    """
+    Build a unary predicate ``f(event_value) -> bool`` for a literal.
+
+    `target` may be a string (for ``=`` / ``!=``) or a number (for any op).
+    Numeric ops auto-coerce the event value to float; non-numeric values
+    on either side make the predicate return False.
+    """
+    if op in _STRING_OPS:
+        # If the target itself is numeric, allow either string or numeric
+        # event values to compare equal — this is what users expect when
+        # writing ``cost=5`` against an index whose values are strings.
+        if isinstance(target, (int, float)):
+            target_f = float(target)
+            cmp = _STRING_OPS[op]
+            def pred(v, _t=target, _tf=target_f):
+                vf = _to_float_or_none(v)
+                if vf is not None:
+                    return cmp(vf, _tf)
+                return cmp(v, _t)
+            return pred
+        cmp = _STRING_OPS[op]
+        return lambda v, _t=target: cmp(v, _t)
+
+    # Numeric ordering operator — both sides must be numeric.
+    if op in _NUMERIC_OPS:
+        target_f = _to_float_or_none(target)
+        if target_f is None:
+            # Non-numeric target with a numeric op never matches.
+            return lambda _v: False
+        cmp = _NUMERIC_OPS[op]
+        def pred(v, _tf=target_f, _cmp=cmp):
+            vf = _to_float_or_none(v)
+            return vf is not None and _cmp(vf, _tf)
+        return pred
+
+    raise ValueError(f"Unsupported comparison operator: {op!r}")
+
+
+def _make_var_predicate(op: str, var_op: str | None, offset):
+    """
+    Build a binary predicate ``f(ref_value, own_value) -> bool``.
+
+    `var_op` is the arithmetic offset operator on the variable side
+    (``'+'``, ``'-'``, or None) and `offset` is the magnitude (0 if None).
+
+    The predicate evaluates ``own_value <op> (ref_value <var_op> offset)``.
+    Both sides are coerced to float when an arithmetic offset is present
+    or when `op` is a numeric ordering operator; for plain equality on
+    string values with no offset, raw string comparison is used.
+    """
+    off = offset or 0
+    arith = var_op in ("+", "-")
+
+    if op in _NUMERIC_OPS or arith:
+        cmp = _NUMERIC_OPS.get(op) or _STRING_OPS.get(op)
+        if cmp is None:
+            raise ValueError(f"Unsupported comparison operator: {op!r}")
+
+        def pred(rv, ov, _cmp=cmp, _vop=var_op, _off=off):
+            rv_f = _to_float_or_none(rv)
+            ov_f = _to_float_or_none(ov)
+            if rv_f is None or ov_f is None:
+                return False
+            if _vop == "+":
+                target = rv_f + _off
+            elif _vop == "-":
+                target = rv_f - _off
+            else:
+                target = rv_f
+            return _cmp(ov_f, target)
+        return pred
+
+    # Plain string equality / inequality between two events' attrs.
+    cmp = _STRING_OPS[op]
+    return lambda rv, ov, _cmp=cmp: _cmp(ov, rv)
+
+
 def _build_dsl_attr_conditions(positive_event_names: list) -> List:
     """
     Convert DSL attribute constraints into native OpenCEP conditions.
- 
-    StringLiteral constraints  ->  SimpleCondition (unary, per-event check).
-    VarExpr constraints        ->  BinaryCondition (cross-event equality /
-                                  arithmetic), where $N refers to the Nth
-                                  positive event in left-to-right pattern order
-                                  (1-based).
- 
-    Constraints whose VarExpr index is out of range are silently skipped;
-    callers should add a fallback post-filter if strict validation is needed.
+
+    StringLiteral / NumberLiteral constraints
+        SimpleCondition (unary, per-event check). The relation honours
+        the attribute's comparison operator (``=``, ``!=``, ``<``,
+        ``<=``, ``>``, ``>=``); numeric operators auto-coerce.
+
+    VarExpr constraints
+        BinaryCondition where $N refers to the Nth positive event in
+        left-to-right pattern order (1-based).  All comparison operators
+        are supported, including arithmetic offsets (``$1+5``).
+
+    Constraints whose VarExpr index is out of range are silently skipped.
     """
     conditions: List = []
     n = len(positive_event_names)
- 
+
     for own_idx, (activity_node, own_name) in enumerate(positive_event_names):
         for constraint in activity_node.constraints:
             attr = constraint.name
             val  = constraint.value
- 
-            if isinstance(val, StringLiteral):
-                # Unary condition: event[attr] == literal
-                literal = val.value
+            cmp_op = constraint.op
+
+            if isinstance(val, (StringLiteral, NumberLiteral)):
+                target = val.value  # str for StringLiteral, float for NumberLiteral
+                pred = _make_literal_predicate(cmp_op, target)
                 conditions.append(
                     SimpleCondition(
                         Variable(own_name, lambda x, a=attr: x.get(a)),
-                        relation_op=lambda v, lit=literal: v == lit,
+                        relation_op=pred,
                     )
                 )
- 
-                def _numeric_eq(ov, rv, offset: int | float, op: str) -> bool:
-                    """Compare two attribute values (possibly strings) with an arithmetic offset.
-
-                    Attribute values stored in the index are always strings.  This helper
-                    converts both sides to float before the arithmetic so that
-                    ``A[cost=$1] B[cost=$1+5]`` works when cost is stored as "10" / "5".
-                    Returns False if either value cannot be converted to a number.
-                    """
-                    try:
-                        rv_f = float(rv)
-                        ov_f = float(ov)
-                    except (TypeError, ValueError):
-                        return False
-                    if op == "+":
-                        return ov_f == rv_f + offset
-                    return ov_f == rv_f - offset
-
 
             elif isinstance(val, VarExpr):
-                # Cross-event condition: this event's attr relates to the attr
-                # of the $ref_id-th positive event (1-based).
                 ref_id = val.var_id
                 if ref_id < 1 or ref_id > n:
-                    continue  # out-of-range reference - skip
+                    continue
                 _, ref_name = positive_event_names[ref_id - 1]
-                op     = val.op      # '+' | '-' | None
-                offset = val.offset or 0
- 
-                if op == "+":
-                    def rel(rv, ov, off=offset):
-                        try:
-                            return float(ov) == float(rv) + off
-                        except (TypeError, ValueError):
-                            return False
-                elif op == "-":
-                    def rel(rv, ov, off=offset):
-                        try:
-                            return float(ov) == float(rv) - off
-                        except (TypeError, ValueError):
-                            return False
-                else:
-                    rel = lambda rv, ov: ov == rv
- 
+                pred = _make_var_predicate(cmp_op, val.op, val.offset)
                 conditions.append(
                     BinaryCondition(
                         Variable(ref_name, lambda x, a=attr: x.get(a)),
                         Variable(own_name, lambda x, a=attr: x.get(a)),
-                        relation_op=rel,
+                        relation_op=pred,
                     )
                 )
- 
+
     return conditions
 
 def _has_alt(node):

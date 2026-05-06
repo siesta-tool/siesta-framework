@@ -178,11 +178,12 @@ class Adaptive_Querying(SiestaModule):
     query_config: Dict[str, Any]
     metadata: MetaData
     _lru: PairLRUCache
-    _retention: RetentionPolicy
+    _retention: RetentionPolicy | None
 
     def __init__(self):
         super().__init__()
         self.query_config = {}
+        self._retention = None
 
     # ------------------------------------------------------------------
     # Framework hooks
@@ -804,7 +805,7 @@ class Adaptive_Querying(SiestaModule):
         if self._retention is None:
             from siesta.modules.adaptive_index.retention import RetentionPolicy
             self._retention = RetentionPolicy(
-                half_life_seconds=self.query_config.get("retention_half_life_seconds", 3600.0),
+                half_life_seconds=self.query_config.get("half_life_seconds", 3600.0),
             )
 
         catalog = get_catalog(self.metadata, self.storage)

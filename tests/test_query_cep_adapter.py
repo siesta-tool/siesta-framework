@@ -494,6 +494,162 @@ class TestReturnAll:
 
 
 # =====================================================================
+# 11b. Attribute -- inequality / numeric comparison operators
+#
+#   Supported ops: =, !=, <, <=, >, >=
+#   Numeric ops auto-coerce string values to float; non-numeric values
+#   make the predicate False instead of raising.
+# =====================================================================
+
+class TestAttributeInequality:
+
+    # --- numeric literal targets ------------------------------------------
+
+    def test_gt_match(self):
+        result = run(
+            'A[cost>4] B',
+            mk_event("A", cost="5"),
+            mk_event("B"),
+        )
+        assert result == [0, 1]
+
+    def test_gt_no_match(self):
+        result = run(
+            'A[cost>5] B',
+            mk_event("A", cost="5"),
+            mk_event("B"),
+        )
+        assert result == []
+
+    def test_gte_boundary_match(self):
+        result = run(
+            'A[cost>=5] B',
+            mk_event("A", cost="5"),
+            mk_event("B"),
+        )
+        assert result == [0, 1]
+
+    def test_lt_match(self):
+        result = run(
+            'A[cost<5.5] B',
+            mk_event("A", cost="5.0"),
+            mk_event("B"),
+        )
+        assert result == [0, 1]
+
+    def test_lte_no_match(self):
+        result = run(
+            'A[cost<=4] B',
+            mk_event("A", cost="5.0"),
+            mk_event("B"),
+        )
+        assert result == []
+
+    def test_neq_match(self):
+        result = run(
+            'A[role!="clerk"] B',
+            mk_event("A", role="analyst"),
+            mk_event("B"),
+        )
+        assert result == [0, 1]
+
+    def test_neq_no_match(self):
+        result = run(
+            'A[role!="clerk"] B',
+            mk_event("A", role="clerk"),
+            mk_event("B"),
+        )
+        assert result == []
+
+    def test_numeric_op_with_non_numeric_value(self):
+        """Numeric ops on non-numeric event values evaluate False, not error."""
+        result = run(
+            'A[cost>5] B',
+            mk_event("A", cost="not-a-number"),
+            mk_event("B"),
+        )
+        assert result == []
+
+    def test_eq_with_unquoted_number_literal(self):
+        """`cost=5` matches event whose cost is the string "5" via numeric coercion."""
+        result = run(
+            'A[cost=5] B',
+            mk_event("A", cost="5"),
+            mk_event("B"),
+        )
+        assert result == [0, 1]
+
+    def test_negative_number_literal(self):
+        result = run(
+            'A[cost<0] B',
+            mk_event("A", cost="-3"),
+            mk_event("B"),
+        )
+        assert result == [0, 1]
+
+    def test_multiple_inequalities_one_event(self):
+        result = run(
+            'A[cost>=4,cost<10] B',
+            mk_event("A", cost="5.0"),
+            mk_event("B"),
+        )
+        assert result == [0, 1]
+
+    def test_multiple_inequalities_one_fails(self):
+        result = run(
+            'A[cost>=4,cost<10] B',
+            mk_event("A", cost="12"),
+            mk_event("B"),
+        )
+        assert result == []
+
+    # --- variable-reference targets ---------------------------------------
+
+    def test_var_ref_gt_match(self):
+        """B's cost must be strictly greater than A's cost."""
+        result = run(
+            'A[cost=$1] B[cost>$1]',
+            mk_event("A", cost="5"),
+            mk_event("B", cost="10"),
+        )
+        assert result == [0, 1]
+
+    def test_var_ref_gt_no_match(self):
+        result = run(
+            'A[cost=$1] B[cost>$1]',
+            mk_event("A", cost="5"),
+            mk_event("B", cost="5"),
+        )
+        assert result == []
+
+    def test_var_ref_lt_with_offset(self):
+        """B's cost must be less than A's cost + 10 -> 5 < 5+10 = 15 -> match."""
+        result = run(
+            'A[cost=$1] B[cost<$1+10]',
+            mk_event("A", cost="5"),
+            mk_event("B", cost="5"),
+        )
+        assert result == [0, 1]
+
+    def test_var_ref_neq(self):
+        """A and B must have *different* resource values."""
+        result = run(
+            'A[resource=$1] B[resource!=$1]',
+            mk_event("A", resource="r1"),
+            mk_event("B", resource="r2"),
+        )
+        assert result == [0, 1]
+
+    def test_var_ref_neq_no_match(self):
+        result = run(
+            'A[resource=$1] B[resource!=$1]',
+            mk_event("A", resource="r1"),
+            mk_event("B", resource="r1"),
+        )
+        assert result == []
+
+
+# =====================================================================
 # 11. Combined -- STAR + negation; OR+STAR unsupported
 # =====================================================================
 

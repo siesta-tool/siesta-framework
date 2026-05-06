@@ -4,6 +4,6 @@
         "**/__pycache__": true
     },
     "python.analysis.extraPaths": [
-        "siesta/modules/Query/OpenCEP"
+        "siesta/modules/query/OpenCEP/"
     ]
 }

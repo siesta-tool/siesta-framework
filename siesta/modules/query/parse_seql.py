@@ -18,9 +18,22 @@ Grammar
     atom       ::= activity | '(' or_expr ')'
     activity   ::= LABEL ('[' attr_list ']')?
     attr_list  ::= attr (',' attr)*
-    attr       ::= LABEL '=' attr_value
-    attr_value ::= STRING | var_expr
+    attr       ::= LABEL cmp_op attr_value
+    cmp_op     ::= '=' | '!=' | '<' | '<=' | '>' | '>='
+    attr_value ::= STRING | NUMBER | var_expr
     var_expr   ::= '$' NUMBER (('+' | '-') NUMBER)?
+
+Comparison operators
+--------------------
+``=`` and ``!=`` work for any value type (string equality / inequality,
+or numeric equality with auto-coercion when both sides are numeric).
+``<``, ``<=``, ``>``, ``>=`` are numeric comparisons; both sides are
+coerced to ``float`` before comparison and the predicate evaluates to
+False when either side is not numeric.
+
+Number literals (``cost=5.0``, ``cost>=5``) are recognised in the
+grammar; quoted strings (``cost="5.0"``) are accepted too and behave
+identically once coerced.
 
 Pair semantics
 --------------
@@ -73,6 +86,25 @@ class StringLiteral:
 
 
 @dataclass(frozen=True)
+class NumberLiteral:
+    """
+    A literal numeric attribute value, e.g. ``5.0`` or ``-3``.
+
+    The value is preserved as a Python ``float`` so consumers don't need
+    to re-parse the string.  Use this for inequality comparisons where
+    numeric ordering matters; for plain string equality, prefer
+    :class:`StringLiteral` so non-numeric values still match.
+    """
+    value: float
+
+    def __str__(self) -> str:
+        # Render integers without a trailing ".0" for readability.
+        if self.value == int(self.value):
+            return str(int(self.value))
+        return str(self.value)
+
+
+@dataclass(frozen=True)
 class VarExpr:
     """
     A variable reference with an optional arithmetic offset.
@@ -99,17 +131,34 @@ class VarExpr:
         return base
 
 
-AttrValue = Union[StringLiteral, VarExpr]
+AttrValue = Union[StringLiteral, NumberLiteral, VarExpr]
+
+
+# Comparison operators allowed inside an activity's ``[…]`` block.
+CMP_OPS = ("=", "!=", "<", "<=", ">", ">=")
 
 
 @dataclass(frozen=True)
 class AttrConstraint:
-    """A single ``name = value`` constraint inside an activity's ``[…]``."""
+    """
+    A single ``name <op> value`` constraint inside an activity's ``[…]``.
+
+    `op` is one of :data:`CMP_OPS`.  Equality (``=``) is the default for
+    backwards compatibility with patterns produced before inequality
+    support was added.
+    """
     name: str
     value: AttrValue
+    op: str = "="
+
+    def __post_init__(self):
+        if self.op not in CMP_OPS:
+            raise ValueError(
+                f"AttrConstraint op must be one of {CMP_OPS}, got {self.op!r}"
+            )
 
     def __str__(self) -> str:
-        return f"{self.name}={self.value}"
+        return f"{self.name}{self.op}{self.value}"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -251,6 +300,7 @@ class TT(Enum):
     """Token types."""
     OR       = "OR"
     NOT      = "NOT"      # ! or ^  - negation prefix
+    NEQ      = "NEQ"      # !=
     LABEL    = "LABEL"
     LPAREN   = "LPAREN"
     RPAREN   = "RPAREN"
@@ -261,6 +311,10 @@ class TT(Enum):
     MINUS    = "MINUS"
     OPT      = "OPT"
     EQ       = "EQ"
+    LT       = "LT"
+    LTE      = "LTE"
+    GT       = "GT"
+    GTE      = "GTE"
     COMMA    = "COMMA"
     STRING   = "STRING"
     VAR      = "VAR"
@@ -268,13 +322,16 @@ class TT(Enum):
     EOF      = "EOF"
 
 
+# Order matters: longer/more-specific patterns must come BEFORE their
+# single-character prefixes (e.g. NEQ before NOT, LTE before LT).
 _RAW_PATTERNS: List[Tuple[TT, str]] = [
     (TT.OR,     r'\|\|'),
+    (TT.NEQ,    r'!='),
     (TT.NOT,    r'[!^]'),
     (TT.STRING, r'"(?:[^"\\]|\\.)*"'),
     (TT.VAR,    r'\$\d+'),
     (TT.LABEL,  r'[A-Za-z_][A-Za-z0-9_:\\]*'),
-    (TT.NUMBER, r'\d+'),
+    (TT.NUMBER, r'\d+(?:\.\d+)?'),
     (TT.LPAREN, r'\('),
     (TT.RPAREN, r'\)'),
     (TT.LBRACK, r'\['),
@@ -283,6 +340,10 @@ _RAW_PATTERNS: List[Tuple[TT, str]] = [
     (TT.PLUS,   r'\+'),
     (TT.MINUS,  r'-'),
     (TT.OPT,    r'\?'),
+    (TT.LTE,    r'<='),
+    (TT.GTE,    r'>='),
+    (TT.LT,     r'<'),
+    (TT.GT,     r'>'),
     (TT.EQ,     r'='),
     (TT.COMMA,  r','),
 ]
@@ -420,21 +481,20 @@ def _collect_activities(
         # Serialise each attribute constraint
         attrs = []
         for c in node.constraints:
+            entry: dict = {"name": c.name, "op": c.op}
             if isinstance(c.value, StringLiteral):
-                attrs.append({
-                    "name":  c.name,
-                    "kind":  "literal",
-                    "value": c.value.value,          # quotes already stripped
-                })
+                entry["kind"]  = "literal"
+                entry["value"] = c.value.value
+            elif isinstance(c.value, NumberLiteral):
+                entry["kind"]  = "number"
+                entry["value"] = c.value.value
             elif isinstance(c.value, VarExpr):
                 raw = f"${c.value.var_id}"
                 if c.value.op is not None:
                     raw += f"{c.value.op}{c.value.offset}"
-                attrs.append({
-                    "name":  c.name,
-                    "kind":  "variable",
-                    "value": raw,
-                })
+                entry["kind"]  = "variable"
+                entry["value"] = raw
+            attrs.append(entry)
 
         out.append({
             "label":      node.label,
@@ -571,20 +631,48 @@ class Parser:
         attrs: List[AttrConstraint] = []
         while True:
             name = self._consume(TT.LABEL).value
-            self._consume(TT.EQ)
+            op = self._consume_cmp_op()
             value = self._attr_value()
-            attrs.append(AttrConstraint(name=name, value=value))
+            attrs.append(AttrConstraint(name=name, value=value, op=op))
             if not self._at(TT.COMMA):
                 break
             self._consume(TT.COMMA)
         return attrs
 
-    # attr_value ::= STRING | var_expr
+    # cmp_op ::= '=' | '!=' | '<' | '<=' | '>' | '>='
+    def _consume_cmp_op(self) -> str:
+        tok = self._peek()
+        op_map = {
+            TT.EQ:  "=",
+            TT.NEQ: "!=",
+            TT.LT:  "<",
+            TT.LTE: "<=",
+            TT.GT:  ">",
+            TT.GTE: ">=",
+        }
+        if tok.type not in op_map:
+            raise SyntaxError(
+                f"Expected comparison operator (=, !=, <, <=, >, >=) "
+                f"at position {tok.pos}, got {tok.type.value!r}"
+            )
+        self._consume()
+        return op_map[tok.type]
+
+    # attr_value ::= STRING | NUMBER | '-' NUMBER | var_expr
     # var_expr   ::= '$' NUMBER (('+' | '-') NUMBER)?
     def _attr_value(self) -> AttrValue:
         if self._at(TT.STRING):
             tok = self._consume(TT.STRING)
-            return StringLiteral(tok.value[1:-1])   # strip surrounding quotes
+            return StringLiteral(_UNESCAPE_RE.sub(r'\1', tok.value[1:-1]))
+        # Number literal, optionally negative.  Consumes a leading '-' iff
+        # the next token is a NUMBER, so it never steals from var_expr.
+        if self._at(TT.MINUS) and self._tokens[self._pos + 1].type == TT.NUMBER:
+            self._consume(TT.MINUS)
+            tok = self._consume(TT.NUMBER)
+            return NumberLiteral(-float(tok.value))
+        if self._at(TT.NUMBER):
+            tok = self._consume(TT.NUMBER)
+            return NumberLiteral(float(tok.value))
         if self._at(TT.VAR):
             tok = self._consume(TT.VAR)
             var_id = int(tok.value[1:])
@@ -593,10 +681,13 @@ class Parser:
             # Inside [...], a '+' or '-' after $N is arithmetic, not a quantifier
             if self._at(TT.PLUS, TT.MINUS):
                 op = self._consume().value
-                offset = int(self._consume(TT.NUMBER).value)
+                # Offset may be integer or float; coerce defensively.
+                num_tok = self._consume(TT.NUMBER)
+                num_val = float(num_tok.value)
+                offset = int(num_val) if num_val == int(num_val) else num_val
             return VarExpr(var_id=var_id, op=op, offset=offset)
         raise SyntaxError(
-            f"Expected attribute value (string or $var) at position "
+            f"Expected attribute value (string, number, or $var) at position "
             f"{self._peek().pos}"
         )
 
