@@ -56,7 +56,7 @@ def discover_negations(evolved_df: DataFrame, metadata: MetaData,
     **Trace-list** (``include_trace_lists=True``):
         Incrementally maintains per-(pair, trace) rows in storage.
         For evolved traces and newly discovered pairs, scoped cross-joins
-        are used so we never explode the full pairs × traces space
+        are used so we never explode the full pairs * traces space
         unnecessarily.
 
     :param evolved_df:  DataFrame[Event] with events after the last mining
@@ -117,7 +117,7 @@ def discover_negations(evolved_df: DataFrame, metadata: MetaData,
         .join(evolved_trace_ids, on="trace_id", how="left_anti") \
         .join(new_pairs, on=["source", "target"], how="left_anti")
 
-    # -- Evolved traces × ALL pairs (scoped cross-join) --
+    # -- Evolved traces * ALL pairs (scoped cross-join) --
     evolved_combos = all_pairs.crossJoin(evolved_trace_ids)
     evolved_coex = coex.join(evolved_trace_ids, on="trace_id", how="inner")
     new_for_evolved = evolved_combos.join(
@@ -126,7 +126,7 @@ def discover_negations(evolved_df: DataFrame, metadata: MetaData,
      .withColumn("occurrences", lit(None).cast("int")) \
      .select("template", "source", "trace_id", "target", "occurrences")
 
-    # -- New pairs × ALL traces (scoped cross-join) --
+    # -- New pairs * ALL traces (scoped cross-join) --
     # Exclude evolved traces (already handled above) to avoid duplicates
     non_evolved_traces = all_trace_ids.join(
         evolved_trace_ids, on="trace_id", how="left_anti"

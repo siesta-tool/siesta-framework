@@ -347,7 +347,11 @@ def _step4(
         .select("attr_key", "_trans", "score")
     )
     result = trans.join(scored, ["attr_key", "_trans"])
-    return _dev_record(result, STEP_TRANSITION, F.col("_prev"), s_thr)
+    # Context = full "prev->curr" string so the reader sees the whole transition at a glance.
+    # NOTE: activity is NOT a conditioning factor in this step – transitions are tracked
+    # across any consecutive events in the trace that share the same attribute key,
+    # regardless of which activities produced those events.
+    return _dev_record(result, STEP_TRANSITION, F.col("_trans"), s_thr)
 
 
 # ---------------------------------------------------------------------------
@@ -418,10 +422,15 @@ def _assemble(
                 "intra_trace_support": round(float(r.intra_trace_support), 4),
                 "flagged_by": set(),
                 "scores": {},
+                "contexts": {},   # step_name -> context string
             }
         d = summary[key]
         d["flagged_by"].add(r.step)
         d["scores"][r.step] = round(max(d["scores"].get(r.step, 0.0), float(r.score)), 4)
+        # Keep the first non-null context seen for this step (they're identical for
+        # a given step×key combination since context is derived from grouping cols).
+        if r.step not in d["contexts"] and r.context is not None:
+            d["contexts"][r.step] = str(r.context)
 
     return [
         {
@@ -434,6 +443,7 @@ def _assemble(
             "intra_trace_support": v["intra_trace_support"],
             "flagged_by": sorted(v["flagged_by"]),
             "scores": v["scores"],
+            "contexts": v["contexts"],
         }
         for k, v in summary.items()
     ]
@@ -444,31 +454,116 @@ def _assemble(
 # ---------------------------------------------------------------------------
 
 _STEP_LABELS = {
-    STEP_FREQ_INTER:    "Step 0a - Inter-trace rarity",
-    STEP_FREQ_INTRA:    "Step 0b - Intra-trace count",
-    STEP_ACTIVITY_ATTR: "Step 1 - Activity × Attribute",
-    STEP_POSITION:      "Step 2 - Position-conditioned",
-    STEP_NGRAM:         "Step 3 - N-gram context",
-    STEP_TRANSITION:    "Step 4 - Value transitions",
+    STEP_FREQ_INTER:    "Step 0a · Inter-trace rarity",
+    STEP_FREQ_INTRA:    "Step 0b · Intra-trace count anomaly",
+    STEP_ACTIVITY_ATTR: "Step 1 · Activity × Attribute",
+    STEP_POSITION:      "Step 2 · Position-conditioned",
+    STEP_NGRAM:         "Step 3 · N-gram context",
+    STEP_TRANSITION:    "Step 4 · Value transitions",
 }
 
 _STEP_TIPS = {
-    STEP_FREQ_INTER:    "Score = −log₂(fraction of traces containing this value). High = globally rare.",
-    STEP_FREQ_INTRA:    "Robust z-score of how many times the value appears within one trace vs. typically.",
-    STEP_ACTIVITY_ATTR: "Laplace-surprise (categorical) or MAD z-score (numeric) per (activity, attribute) pair.",
-    STEP_POSITION:      "Same as Step 1 but conditioned on the relative position bucket within the trace.",
-    STEP_NGRAM:         "Same as Step 1 but conditioned on the n-gram of activities ending at this event.",
-    STEP_TRANSITION:    "Surprise of the (prev_value->curr_value) transition for categorical attributes.",
+    STEP_FREQ_INTER: (
+        "INTER-TRACE scope. "
+        "Score = −log₂(fraction of all traces that contain this (attr, value) pair). "
+        "High score = globally rare value. "
+        "Example: value present in 5 % of traces → score ≈ −log₂(0.05) ≈ 4.3. "
+        "Default threshold 4.0 ≈ values present in ≤ 6.25 % of traces. "
+        "Context column shows the constant label 'inter_trace_support'."
+    ),
+    STEP_FREQ_INTRA: (
+        "INTRA-TRACE scope. "
+        "Robust z-score (MAD-based) of how many times this (attr, value) appears within one trace, "
+        "compared to the median count across all traces for the same pair. "
+        "High score = the value appears far more (or less) often than usual within this trace. "
+        "Activity is NOT a conditioning factor. "
+        "Default threshold 3.5 (|z-score| units). "
+        "Context column shows the constant label 'intra_trace_count'."
+    ),
+    STEP_ACTIVITY_ATTR: (
+        "INTER-TRACE scope. "
+        "For each (activity, attribute) pair, computes the empirical distribution of values across all traces "
+        "that contain an event of that activity. "
+        "Scores the observed value as Laplace-smoothed surprise (categorical: −log₂ of smoothed probability) "
+        "or MAD robust z-score (numeric: how far the value is from the per-activity median). "
+        "High score = the value is unusual given the activity type. "
+        "Example context: 'Approve' (the activity name)."
+    ),
+    STEP_POSITION: (
+        "INTER-TRACE scope. "
+        "Same scoring as Step 1 (Laplace-surprise / MAD z-score), but additionally conditioned on the "
+        "relative-position bucket of the event within its trace "
+        "(bucket 0 = first 1/n_buckets of the trace, …, bucket n−1 = last segment). "
+        "Captures patterns like 'attribute X usually has value Y near the start of a trace'. "
+        "High score = value unusual for this activity at this position. "
+        "Example context: 'act=Approve|bucket=0'."
+    ),
+    STEP_NGRAM: (
+        "INTER-TRACE scope. "
+        "Same scoring as Step 1 (Laplace-surprise / MAD z-score), conditioned on the ordered "
+        "sequence of n activities ending at the current event (the n-gram). "
+        "Only n-gram × attribute groups with ≥ min_group_size observations are scored. "
+        "High score = value unusual given the immediately preceding activity sequence. "
+        "Example context for n=2: 'Submit->Approve' means the previous activity was Submit."
+    ),
+    STEP_TRANSITION: (
+        "INTRA-TRACE scope (statistics gathered globally). "
+        "Tracks consecutive values of the same attribute key within a single trace, "
+        "ordered by event position. For each adjacent pair, scores the (prev_value→curr_value) "
+        "transition with Laplace-smoothed surprise computed over all such transitions across all traces. "
+        "IMPORTANT: activity is NOT a conditioning factor — any two consecutive events in the trace "
+        "that both carry the same attribute key form a transition, regardless of their activity types. "
+        "Only categorical attributes. "
+        "Only attribute keys with ≥ min_group_size total transitions are scored. "
+        "High score = rare transition pair. "
+        "Context column shows the full transition string 'prev_value->curr_value'. "
+        "The 'value' column shows curr_value; 'prev_value' is the first half of the context string."
+    ),
+}
+
+# Scope classification for each step (for UI badges and filtering).
+# 'inter' = statistics are computed across traces; 'intra' = phenomenon is within a single trace.
+_STEP_SCOPE: Dict[str, str] = {
+    STEP_FREQ_INTER:    "inter",
+    STEP_FREQ_INTRA:    "intra",
+    STEP_ACTIVITY_ATTR: "inter",
+    STEP_POSITION:      "inter",
+    STEP_NGRAM:         "inter",
+    STEP_TRANSITION:    "intra",
 }
 
 
-def render_html(records: List[Dict[str, Any]], log_name: str, active_steps: List[str]) -> str:
-    """Render an interactive HTML deviation report from summary records."""
+def render_html(
+    records: List[Dict[str, Any]],
+    log_name: str,
+    active_steps: List[str],
+    *,
+    low_surprise_mode: bool = False,
+    on_rare_threshold: Optional[float] = None,
+) -> str:
+    """Render an interactive HTML deviation report from summary records.
+
+    Args:
+        records:           Output of compute_attribute_deviations.
+        log_name:          Displayed in the page title / banner.
+        active_steps:      Step name strings that were actually run.
+        low_surprise_mode: When True (set automatically when on_rare is used), colours
+                           low scores instead of high ones and inverts the slider direction.
+                           Low score = common in the selected rare traces = characterises them.
+        on_rare_threshold: If set, shown in the banner so the reader knows the report is
+                           scoped to non-conforming traces.
+    """
     import json as _json
 
     step_cols   = [s for s in _STEP_LABELS if s in active_steps]
     disp_cols   = ["trace_id", "position", "activity", "attribute", "value",
                    "inter_trace_support", "intra_trace_support"] + step_cols
+
+    # Steps whose context varies per row and is worth showing inline in the cell.
+    # Steps 0a/0b have constant context labels ("inter_trace_support" / "intra_trace_count")
+    # which add no information, so we skip them.
+    _CONSTANT_CONTEXT_STEPS = {STEP_FREQ_INTER, STEP_FREQ_INTRA}
+    contextful_steps = [s for s in step_cols if s not in _CONSTANT_CONTEXT_STEPS]
 
     rows_data = []
     for rec in records:
@@ -481,10 +576,14 @@ def render_html(records: List[Dict[str, Any]], log_name: str, active_steps: List
         }
         for sc in step_cols:
             r[sc] = rec["scores"].get(sc)
+        # Inline context for variable steps: keyed as "__ctx_<step>"
+        contexts = rec.get("contexts", {})
+        for sc in contextful_steps:
+            r[f"__ctx_{sc}"] = contexts.get(sc)
         rows_data.append(r)
 
     all_scores  = [r[s] for r in rows_data for s in step_cols if r.get(s) is not None]
-    min_s       = round(min(all_scores, default=3.0), 1)
+    min_s       = round(min(all_scores, default=0.0), 1)
     max_s       = round(max(all_scores, default=10.0), 1)
     slider_max  = round(max(max_s + 1.0, 10.0), 1)
 
@@ -494,20 +593,74 @@ def render_html(records: List[Dict[str, Any]], log_name: str, active_steps: List
 
     col_tips = {
         "trace_id": "Unique process instance identifier.",
-        "position": "0-based event index within the trace.",
+        "position": (
+            "0-based event index within the trace. "
+            "Click the column header to sort."
+        ),
         "activity": "Activity type of the event.",
         "attribute": "Attribute whose value was flagged.",
-        "value": "Actual attribute value at this event.",
-        "inter_trace_support": "Fraction of traces containing this value [0-1]. Lower = rarer.",
-        "intra_trace_support": "Within this trace and activity, fraction of events with this attribute key that take this value [0-1]. Higher = more frequent in local activity context.",
+        "value": (
+            "Actual attribute value at this event. "
+            "For Step 4 (value transitions), the context column shows the full prev->curr pair."
+        ),
+        "inter_trace_support": (
+            "Fraction of all traces that contain this (attribute, value) pair [0–1]. "
+            "Lower = globally rarer value. "
+            "Computed from the trace pool used for this run (may be a subset when on_rare is set)."
+        ),
+        "intra_trace_support": (
+            "Within this trace AND this activity, fraction of events for this attribute key "
+            "that take this particular value [0–1]. "
+            "Higher = the value dominates occurrences of that attribute within this trace/activity."
+        ),
         **_STEP_TIPS,
     }
 
-    data_j  = _json.dumps(rows_data, ensure_ascii=False)
-    scols_j = _json.dumps(step_cols)
-    dcols_j = _json.dumps(disp_cols)
-    labs_j  = _json.dumps(_STEP_LABELS)
-    tips_j  = _json.dumps(col_tips)
+    # ----- thresholds / defaults note shown in banner -----
+    defaults_note = (
+        "Default thresholds: surprise_threshold=4.0 (categorical −log₂ score, "
+        "≈ support ≤ 6.25 %), zscore_threshold=3.5 (numeric MAD-z-score), "
+        "n_buckets=5, ngram_n=2, min_group_size=5."
+    )
+    on_rare_note = ""
+    if on_rare_threshold is not None:
+        on_rare_note = (
+            f" | ⚠ on_rare mode (threshold={on_rare_threshold}): "
+            "report scoped to traces that violate ≥ 1 high-support ordering constraint."
+        )
+
+    # Build scope JSON for per-step badges in the UI
+    scope_j = _json.dumps({k: _STEP_SCOPE.get(k, "") for k in step_cols})
+
+    # Low-surprise mode: slider is MAX-score (show rows with small scores)
+    if low_surprise_mode:
+        slider_init  = slider_max          # start showing everything, user drags LEFT
+        slider_label = "Max score threshold (low-surprise mode)"
+        filter_dir   = "low"              # passed to JS
+        legend_html  = (
+            '<span class="sl2">very common (score ≤ 1.0)</span>'
+            '<span class="sl1">common (score ≤ 2.0)</span>'
+            '<span class="sl0">somewhat common (≤ threshold)</span>'
+            '<span class="sn">— above threshold / absent</span>'
+        )
+    else:
+        slider_init  = min_s
+        slider_label = "Min score threshold"
+        filter_dir   = "high"
+        legend_html  = (
+            '<span class="sm">moderate (≥ threshold)</span>'
+            '<span class="sh">high (≥ 4.0)</span>'
+            '<span class="sc">critical (≥ 6.0)</span>'
+            '<span class="sn">— absent / below threshold</span>'
+        )
+
+    data_j     = _json.dumps(rows_data, ensure_ascii=False)
+    scols_j    = _json.dumps(step_cols)
+    dcols_j    = _json.dumps(disp_cols)
+    labs_j     = _json.dumps(_STEP_LABELS)
+    tips_j     = _json.dumps(col_tips)
+    fdir_j     = _json.dumps(filter_dir)
+    ctx_cols_j = _json.dumps(contextful_steps)  # steps with variable context
 
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -516,9 +669,12 @@ def render_html(records: List[Dict[str, Any]], log_name: str, active_steps: List
 *,*::before,*::after{{box-sizing:border-box}}
 body{{font-family:sans-serif;padding:20px;background:#f7f8fc;color:#222;margin:0}}
 .banner{{background:#1a1a2e;color:#fff;padding:14px 20px;border-radius:8px;margin-bottom:14px}}
-.banner h2{{margin:0 0 10px;font-size:18px}}
-.stats{{font-size:13px;display:flex;flex-wrap:wrap;gap:4px 0;align-items:center}}
+.banner h2{{margin:0 0 6px;font-size:18px}}
+.banner .note{{font-size:11px;opacity:.75;margin-top:4px}}
+.stats{{font-size:13px;display:flex;flex-wrap:wrap;gap:4px 0;align-items:center;margin-bottom:6px}}
 .stats .sep{{margin:0 10px;opacity:.4}}
+.rare-badge{{display:inline-block;background:#e05b00;color:#fff;font-size:11px;font-weight:700;
+  padding:2px 9px;border-radius:4px;margin-left:12px}}
 .ctrl-bar{{background:#fff;border:1px solid #e0e4ef;border-radius:8px;padding:14px 18px;
   margin-bottom:12px;display:flex;flex-wrap:wrap;gap:18px;align-items:flex-end}}
 .ctrl{{display:flex;flex-direction:column;gap:5px}}
@@ -529,38 +685,54 @@ body{{font-family:sans-serif;padding:20px;background:#f7f8fc;color:#222;margin:0
 .step-group{{display:flex;flex-wrap:wrap;gap:6px}}
 .slbl{{display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;
   background:#f0f2f8;padding:4px 10px;border-radius:12px;user-select:none}}
-.slbl:hover{{background:#dde2f0}}
+.slbl:hover{{background:#d5d5d5}}
 .slbl input{{accent-color:#1a1a2e;cursor:pointer}}
+.badge{{font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;text-transform:uppercase}}
+.badge-inter{{background:#d1eaff;color:#004a8c}}
+.badge-intra{{background:#ffe9d1;color:#7a3700}}
 .tv{{display:inline-block;background:#1a1a2e;color:#fff;
   padding:2px 9px;border-radius:4px;font-size:13px;min-width:40px;text-align:center}}
 .rc{{font-size:13px;color:#555;margin-left:auto;align-self:center}}
 .rc b{{color:#1a1a2e;font-size:17px}}
 .legend{{font-size:12px;color:#666;margin-bottom:10px;display:flex;gap:6px;flex-wrap:wrap}}
 .legend span{{padding:3px 10px;border-radius:4px}}
+.scope-bar{{font-size:11px;color:#666;margin-bottom:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}}
+.scope-bar label{{display:flex;align-items:center;gap:4px;cursor:pointer}}
 .tw{{overflow-x:auto;border-radius:6px;box-shadow:0 1px 4px rgba(0,0,0,.08)}}
 table{{border-collapse:collapse;width:100%;font-size:12px;background:#fff}}
-th{{background:#1a1a2e;color:#fff;padding:8px 11px;text-align:left;white-space:nowrap;position:sticky;top:0;z-index:2}}
+th{{background:#1a1a2e;color:#fff;padding:8px 11px;text-align:left;white-space:nowrap;
+  position:sticky;top:0;z-index:2;cursor:pointer;user-select:none}}
+th:hover{{background:#2d2d4e}}
+.sort-ind{{margin-left:5px;opacity:.55;font-size:10px}}
 td{{padding:6px 11px;border-bottom:1px solid #eef0f5;white-space:nowrap}}
 tr:hover td{{background:#e8f0fe!important}}
+/* High-surprise (deviation) colours */
 .sm{{background:#ffe066}}.sh{{background:#ffa500;color:#fff}}.sc{{background:#ff4c4c;color:#fff;font-weight:bold}}
+/* Low-surprise (characterisation) colours */
+.sl0{{background:#d4f0e0}}.sl1{{background:#52c77f;color:#fff}}.sl2{{background:#0d7a40;color:#fff;font-weight:bold}}
 .sn{{background:#f5f5f5;color:#bbb;text-align:center}}
+/* Inline context shown below the score number */
+.ctx{{display:block;font-size:10px;opacity:.7;margin-top:2px;font-weight:normal;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:140px}}
 #tt{{display:none;position:fixed;background:#1a1a2e;color:#fff;font-size:12px;line-height:1.6;
-  padding:9px 13px;border-radius:6px;width:300px;white-space:normal;
+  padding:9px 13px;border-radius:6px;width:320px;white-space:normal;
   box-shadow:0 4px 16px rgba(0,0,0,.3);z-index:99999;pointer-events:none}}
 .tip{{cursor:help}}
 </style></head><body>
 <div class="banner">
-  <h2>Attribute Deviation Report - {log_name}</h2>
+  <h2>Attribute Deviation Report — {log_name}{"&nbsp;<span class='rare-badge'>on_rare mode</span>" if low_surprise_mode else ""}</h2>
   <div class="stats">
-    <span>Flagged records: <b>{n_rec}</b></span><span class="sep">|</span>
+    <span>Records: <b>{n_rec}</b></span><span class="sep">|</span>
     <span>Affected traces: <b>{n_traces}</b></span><span class="sep">|</span>
     <span>Affected attributes: <b>{n_attrs}</b></span>
   </div>
+  <div class="note">{defaults_note}{on_rare_note}</div>
+  {"<div class='note' style='color:#ffcc88;margin-top:6px'>Low-surprise mode: scores near 0 = value is <b>common</b> in these non-conforming traces, characterising their typical behaviour. Green cells = most characteristic.</div>" if low_surprise_mode else ""}
 </div>
 <div class="ctrl-bar">
   <div class="ctrl">
-    <label>Min score threshold &nbsp;<span class="tv" id="tv">{min_s}</span></label>
-    <input type="range" id="ts" min="{min_s}" max="{slider_max}" step="0.1" value="{min_s}"
+    <label>{slider_label}&nbsp;<span class="tv" id="tv">{slider_init}</span></label>
+    <input type="range" id="ts" min="{min_s}" max="{slider_max}" step="0.1" value="{slider_init}"
            oninput="onT(this.value)">
   </div>
   <div class="ctrl"><label>Active steps</label><div class="step-group" id="sg"></div></div>
@@ -570,62 +742,184 @@ tr:hover td{{background:#e8f0fe!important}}
   </div>
   <div class="rc">Showing <b id="rc">0</b> rows</div>
 </div>
-<div class="legend">
-  <span class="sm">moderate (≥ threshold)</span>
-  <span class="sh">high (≥ 4.0)</span>
-  <span class="sc">critical (≥ 6.0)</span>
-  <span class="sn">- absent / below threshold</span>
+<div class="scope-bar">
+  <b>Scope filter:</b>
+  <label><input type="radio" name="scope" value="all" checked onchange="render()"> All</label>
+  <label><input type="radio" name="scope" value="inter" onchange="render()"> Inter-trace only</label>
+  <label><input type="radio" name="scope" value="intra" onchange="render()"> Intra-trace only</label>
+  <span style="margin-left:8px">
+    <span class="badge badge-inter">inter</span> score computed across traces &nbsp;
+    <span class="badge badge-intra">intra</span> phenomenon within a single trace
+  </span>
 </div>
+<div class="legend">{legend_html}</div>
 <div class="tw"><table><thead><tr id="hd"></tr></thead><tbody id="tb"></tbody></table></div>
 <div id="tt"></div>
 <script>
 var _tt=document.getElementById('tt');
 document.addEventListener('mouseover',function(e){{
   var el=e.target.closest('.tip');if(!el){{_tt.style.display='none';return;}}
-  var t=el.getAttribute('data-tip');if(!t){{_tt.style.display='none';return;}}
-  _tt.textContent=t;_tt.style.display='block';pos(e);
+  var tip=el.getAttribute('data-tip');if(!tip){{_tt.style.display='none';return;}}
+  _tt.textContent=tip;_tt.style.display='block';pos(e);
 }});
 document.addEventListener('mousemove',function(e){{if(_tt.style.display==='block')pos(e);}});
 document.addEventListener('mouseout',function(e){{if(!e.target.closest('.tip'))_tt.style.display='none';}});
 function pos(e){{var x=e.clientX+14,y=e.clientY-10;
-  if(x+310>window.innerWidth)x=e.clientX-310;
+  if(x+330>window.innerWidth)x=e.clientX-330;
   if(y+_tt.offsetHeight>window.innerHeight)y=e.clientY-_tt.offsetHeight-10;
   _tt.style.left=x+'px';_tt.style.top=y+'px';}}
-const D={data_j};const SC={scols_j};const DC={dcols_j};const SL={labs_j};const TP={tips_j};
+
+const D={data_j};
+const SC={scols_j};
+const DC={dcols_j};
+const SL={labs_j};
+const TP={tips_j};
+const SCOPE={scope_j};
+const FILTER_DIR={fdir_j};
+const CTX_COLS={ctx_cols_j};  // step names that have variable context worth showing
+
+// ---- Sort state ----
+var _sortCol=null,_sortAsc=true;
+function sortBy(col){{
+  if(_sortCol===col){{_sortAsc=!_sortAsc;}}
+  else{{_sortCol=col;_sortAsc=true;}}
+  updateSortIndicators();
+  render();
+}}
+function updateSortIndicators(){{
+  DC.forEach(function(c){{
+    var el=document.getElementById('th-'+c);
+    if(!el)return;
+    var ind=el.querySelector('.sort-ind');
+    if(!ind)return;
+    if(c===_sortCol){{ind.textContent=_sortAsc?' ▲':' ▼';ind.style.opacity='1';}}
+    else{{ind.textContent=' ⇅';ind.style.opacity='.45';}}
+  }});
+}}
+
+// ---- Build step checkboxes ----
 SC.forEach(function(c){{
+  var scope=SCOPE[c]||'';
   var l=document.createElement('label');l.className='slbl';
   var cb=document.createElement('input');cb.type='checkbox';cb.id='cb-'+c;cb.checked=true;
   cb.addEventListener('change',render);l.appendChild(cb);
-  l.appendChild(document.createTextNode(' '+(SL[c]||c)));
+  l.appendChild(document.createTextNode(' '+(SL[c]||c)+' '));
+  if(scope){{
+    var b=document.createElement('span');
+    b.className='badge badge-'+scope;b.textContent=scope;l.appendChild(b);
+  }}
   document.getElementById('sg').appendChild(l);
 }});
+
+// ---- Build table headers (sortable) ----
 DC.forEach(function(c){{
-  var th=document.createElement('th');var tip=TP[c];
-  if(tip){{th.className='tip';th.setAttribute('data-tip',tip);th.textContent=c;
-    var h=document.createElement('span');h.style.cssText='opacity:.5;font-size:10px;margin-left:4px';
-    h.textContent='(?)';th.appendChild(h);}}else{{th.textContent=c;}}
+  var th=document.createElement('th');
+  th.id='th-'+c;
+  th.onclick=function(){{sortBy(c);}};
+  var tip=TP[c];
+  if(tip){{th.className='tip';th.setAttribute('data-tip',tip);}}
+  th.appendChild(document.createTextNode(c));
+  var ind=document.createElement('span');ind.className='sort-ind';ind.textContent=' ⇅';
+  th.appendChild(ind);
+  if(tip){{
+    var h=document.createElement('span');
+    h.style.cssText='opacity:.5;font-size:10px;margin-left:3px';
+    h.textContent='(?)';th.appendChild(h);
+  }}
   document.getElementById('hd').appendChild(th);
 }});
+updateSortIndicators();
+
 function onT(v){{document.getElementById('tv').textContent=parseFloat(v).toFixed(1);render();}}
-function asc(){{return SC.filter(function(c){{var cb=document.getElementById('cb-'+c);return cb&&cb.checked;}});}}
-function cls(v,t){{if(v===null||v===undefined)return'sn';if(v>=6)return'sc';if(v>=4)return'sh';if(v>=t)return'sm';return'sn';}}
+function activeCols(){{return SC.filter(function(c){{var cb=document.getElementById('cb-'+c);return cb&&cb.checked;}});}}
+function scopeFilter(){{var r=document.querySelector('input[name=scope]:checked');return r?r.value:'all';}}
+
+function cellCls(v,t){{
+  if(v===null||v===undefined)return'sn';
+  if(FILTER_DIR==='low'){{
+    // low-surprise mode: low score = common in rare traces = interesting
+    if(v<=1.0)return'sl2';
+    if(v<=2.0)return'sl1';
+    if(v<=t)return'sl0';
+    return'sn';
+  }}else{{
+    // standard deviation mode: high score = rare = interesting
+    if(v>=6)return'sc';
+    if(v>=4)return'sh';
+    if(v>=t)return'sm';
+    return'sn';
+  }}
+}}
 function esc(s){{return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}}
+
 function render(){{
   var t=parseFloat(document.getElementById('ts').value);
-  var ac=asc();var sr=document.getElementById('sr').value.toLowerCase().trim();
+  var ac=activeCols();
+  var sr=document.getElementById('sr').value.toLowerCase().trim();
+  var sf=scopeFilter();
+
+  // Filter active cols by scope selection
+  var acFiltered=ac.filter(function(c){{
+    if(sf==='all')return true;
+    return(SCOPE[c]||'')=== sf;
+  }});
+  if(acFiltered.length===0&&sf!=='all')acFiltered=ac; // fallback: show all if scope filter yields nothing
+
   var rows=[];
   D.forEach(function(row){{
-    var mx=-Infinity;ac.forEach(function(c){{if(row[c]!==null&&row[c]>mx)mx=row[c];}});
-    if(mx<t)return;
-    if(sr){{var h=['trace_id','activity','attribute','value'].map(function(k){{return(row[k]||'').toLowerCase();}}).join(' ');if(h.indexOf(sr)===-1)return;}}
+    // Determine if row passes the score threshold
+    var passes=false;
+    if(FILTER_DIR==='low'){{
+      var mn=Infinity;
+      acFiltered.forEach(function(c){{if(row[c]!==null&&row[c]!==undefined&&row[c]<mn)mn=row[c];}});
+      passes=(mn<=t);
+    }}else{{
+      var mx=-Infinity;
+      acFiltered.forEach(function(c){{if(row[c]!==null&&row[c]!==undefined&&row[c]>mx)mx=row[c];}});
+      passes=(mx>=t);
+    }}
+    if(!passes)return;
+    if(sr){{
+      var h=['trace_id','activity','attribute','value']
+        .map(function(k){{return(row[k]||'').toLowerCase();}}).join(' ');
+      if(h.indexOf(sr)===-1)return;
+    }}
+    rows.push(row);
+  }});
+
+  // Sort
+  if(_sortCol!==null){{
+    rows.sort(function(a,b){{
+      var va=a[_sortCol],vb=b[_sortCol];
+      if(va===null||va===undefined)va=_sortAsc?Infinity:-Infinity;
+      if(vb===null||vb===undefined)vb=_sortAsc?Infinity:-Infinity;
+      if(typeof va==='string')return _sortAsc?va.localeCompare(vb):vb.localeCompare(va);
+      return _sortAsc?(va-vb):(vb-va);
+    }});
+  }}
+
+  // Render rows
+  var html='';
+  rows.forEach(function(row){{
     var cells='';
     DC.forEach(function(c){{
-            if(SC.indexOf(c)>=0){{var v=row[c];cells+='<td class="'+cls(v,t)+'">'+(v===null||v===undefined?'&ndash;':v.toFixed(3))+'</td>';}}
-      else{{var v=row[c];cells+='<td>'+(v===null||v===undefined?'':esc(String(v)))+'</td>';}}
+      if(SC.indexOf(c)>=0){{
+        var v=row[c];
+        var scoreStr=(v===null||v===undefined)?'&ndash;':v.toFixed(3);
+        var ctxStr='';
+        if(CTX_COLS.indexOf(c)>=0){{
+          var ctx=row['__ctx_'+c];
+          if(ctx!==null&&ctx!==undefined)ctxStr='<span class="ctx">'+esc(String(ctx))+'</span>';
+        }}
+        cells+='<td class="'+cellCls(v,t)+'">'+scoreStr+ctxStr+'</td>';
+      }}else{{
+        var v=row[c];
+        cells+='<td>'+(v===null||v===undefined?'':esc(String(v)))+'</td>';
+      }}
     }});
-    rows.push('<tr>'+cells+'</tr>');
+    html+='<tr>'+cells+'</tr>';
   }});
-  document.getElementById('tb').innerHTML=rows.join('');
+  document.getElementById('tb').innerHTML=html;
   document.getElementById('rc').textContent=rows.length;
 }}
 render();
@@ -649,8 +943,17 @@ def compute_attribute_deviations(
     support_threshold: Optional[float],
     filter_out: bool,
     alpha: float = 1.0,
+    low_surprise_mode: bool = False,
 ) -> tuple[List[Dict[str, Any]], List[str]]:
     """Run the attribute deviation pipeline on a Spark sequence table.
+
+    Args:
+        low_surprise_mode: When True (automatically enabled by on_rare), the function
+            returns records whose score is *below* the threshold (common values within
+            the selected trace subset) instead of records whose score is *above* it.
+            This "low-surprise" perspective characterises what is typical about the
+            non-conforming traces selected by on_rare, rather than finding further
+            anomalies within them.
 
     Returns:
         (records, active_step_names) where records is the list of deviation
@@ -698,7 +1001,14 @@ def compute_attribute_deviations(
         return [], []
 
     combined = reduce(lambda a, b: a.unionByName(b), parts)
-    flagged  = combined.filter(F.col("is_deviation"))
+    # low_surprise_mode: select records whose score is BELOW the threshold —
+    # these are common values within the (rare) trace subset, characterising what
+    # the non-conforming traces look like (set automatically when on_rare is used).
+    if low_surprise_mode:
+        flagged = combined.filter(~F.col("is_deviation"))
+        logger.info("low_surprise_mode: collecting records with score < threshold (common values).")
+    else:
+        flagged = combined.filter(F.col("is_deviation"))
     flagged.cache()
 
     records = _assemble(flagged, exploded, total_traces, support_threshold, filter_out)
