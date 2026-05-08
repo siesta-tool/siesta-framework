@@ -278,7 +278,7 @@ def render(base_url: str) -> None:
         else:
             _STEP_LABELS = {
                 "0 – Value frequency (inter + intra-trace)": 0,
-                "1 – Activity × Attribute anomalies": 1,
+                "1 – Activity * Attribute anomalies": 1,
                 "2 – Position-conditioned anomalies": 2,
                 "3 – N-gram context anomalies": 3,
                 "4 – Value transitions (categorical)": 4,

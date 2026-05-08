@@ -72,7 +72,7 @@ class AttributeDeviationsConfig(BaseModel):
         list(ALL_STEPS),
         description=(
             "Which analysis steps to run. Subset of [0,1,2,3,4]. "
-            "0=value frequency (inter+intra-trace), 1=activity×attribute, "
+            "0=value frequency (inter+intra-trace), 1=activity*attribute, "
             "2=position-conditioned, 3=n-gram context, 4=value transitions."
         ),
     )
@@ -82,7 +82,7 @@ class AttributeDeviationsConfig(BaseModel):
     )
     surprise_threshold: float = Field(
         4.0,
-        description="Anomaly threshold for categorical attributes (−log₂ score). Default 4.0 ≈ support ≤ 6.25 %.",
+        description="Anomaly threshold for categorical attributes (-log₂ score). Default 4.0 ≈ support ≤ 6.25 %.",
     )
     zscore_threshold: float = Field(
         3.5,
@@ -339,7 +339,7 @@ class Analysing(SiestaModule):
         Five steps (all on by default; select via `steps`):
         - **Step 0** - Value frequency: flags values that are globally rare across traces
             (`value_freq_inter`) or appear unusually often within a single trace (`value_freq_intra`).
-        - **Step 1** - Activity × Attribute: flags values whose distribution within an activity type
+        - **Step 1** - Activity * Attribute: flags values whose distribution within an activity type
             is anomalous (Laplace surprise for categorical, MAD z-score for numeric).
         - **Step 2** - Position-conditioned: same as step 1 but conditioned on relative position
             within the trace (bucketed).
@@ -354,7 +354,7 @@ class Analysing(SiestaModule):
         - `min_timestamp` *(str | null, default: `null`)* - lower bound on `start_timestamp` as ISO 8601 with millisecond precision (e.g. `"2024-01-15T10:30:45.123Z"`). Events before this datetime are excluded.
         - `steps` *(list[int], default: `[0,1,2,3,4]`)* - which steps to run.
         - `excluded_attributes` *(list[str] | null)* - attribute keys to skip (auto-excludes timestamp keys).
-        - `surprise_threshold` *(float, default: `4.0`)* - categorical anomaly threshold (−log₂ score).
+        - `surprise_threshold` *(float, default: `4.0`)* - categorical anomaly threshold (-log₂ score).
         - `zscore_threshold` *(float, default: `3.5`)* - numeric anomaly threshold (|robust z-score|).
         - `ngram_n` *(int, default: `2`)* - n-gram length for step 3.
         - `min_group_size` *(int, default: `5`)* - minimum group size for steps 3 and 4.
@@ -685,6 +685,11 @@ class Analysing(SiestaModule):
             min_group_size=self.analyser_config.get("min_group_size", 5),
             support_threshold=self.analyser_config.get("support_threshold"),
             filter_out=self.analyser_config.get("filter_out", False),
+            # When on_rare is active the trace pool has already been filtered to
+            # non-conforming traces.  We pivot to low-surprise perspective so the
+            # report shows what is *typical* about these traces rather than further
+            # flagging anomalies inside them.
+            low_surprise_mode=(rare_support_threshold is not None),
         )
 
         events_df.unpersist()
@@ -717,7 +722,13 @@ class Analysing(SiestaModule):
 
         if output_format == "html":
             output_path = self.analyser_config["output_path"] + "_deviations.html"
-            html_content = render_html(records, log_name, active_steps)
+            html_content = render_html(
+                records,
+                log_name,
+                active_steps,
+                low_surprise_mode=(rare_support_threshold is not None),
+                on_rare_threshold=rare_support_threshold,
+            )
             with open(output_path, "w", encoding="utf-8") as f:
                 f.write(html_content)
             if caller == "api":

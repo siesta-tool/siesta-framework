@@ -154,7 +154,7 @@ def _draw_node(ax, x: float, y: float, kind: str, label: str):
                 ha='center', va='top', fontsize=6.5, zorder=4)
 
     else:  # gateway
-        symbol = {'xor': '×', 'and': '+', 'or': 'O'}.get(kind, '?')
+        symbol = {'xor': '*', 'and': '+', 'or': 'O'}.get(kind, '?')
         ax.add_patch(mpatches.Polygon(
             [(x, y + _GW_SIZE), (x + _GW_SIZE, y),
              (x, y - _GW_SIZE), (x - _GW_SIZE, y)],
@@ -367,7 +367,7 @@ def _save_html_pyvis(G: nx.DiGraph, node_info: dict, edge_labels: dict,
             'and':   ('diamond', 'white',   'black',   'black'),
             'or':    ('diamond', 'white',   'black',   'black'),
         }
-        _GW_SYMBOL = {'xor': '×', 'and': '+', 'or': 'O'}
+        _GW_SYMBOL = {'xor': '*', 'and': '+', 'or': 'O'}
 
         for nid, info in node_info.items():
             kind  = info['kind']
