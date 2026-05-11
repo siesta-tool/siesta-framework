@@ -405,6 +405,7 @@ def detect_adaptive(
         timeout=600,
     )
     r.raise_for_status()
+    print(r.json())
     return r.json()
 
 

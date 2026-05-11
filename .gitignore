@@ -220,6 +220,7 @@ __marimo__/
 **/output/*
 
 acc.json
+acc.csv
 com*.json
 docker-compose-com.yml
 nginx.conf
