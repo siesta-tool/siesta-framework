@@ -898,7 +898,7 @@ def _extract_single_pair_from_df(
             # At L1 all positions are 0, which makes createTuples skip every
             # target (it requires source_pos < target_pos). Assign sequential
             # positions by timestamp so the ordering predicate is satisfied.
-            events.sort(key=lambda e: e[1])  # e[1] = start_timestamp
+            events.sort(key=lambda e: (e[1], e[0]))  # (timestamp, activity)
             events = [
                 (act, ts, idx, attrs)
                 for idx, (act, ts, _, attrs) in enumerate(events)

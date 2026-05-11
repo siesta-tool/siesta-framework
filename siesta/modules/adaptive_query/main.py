@@ -596,7 +596,7 @@ class Adaptive_Querying(SiestaModule):
 
             events = sorted(
                 seen_positions.values(),
-                key=lambda e: int(e[sort_field]),
+                key=lambda e: (int(e[sort_field]), e.get("name", "")),
             )
 
             positions = find_occurrences_dsl(
