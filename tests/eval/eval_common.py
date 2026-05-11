@@ -170,7 +170,8 @@ def discover_schema(
     dataset_path: Path,
     *,
     max_events: int = 5000,
-    max_values_per_key: int = 16,
+    max_values_per_key: int = 20,
+    perspective_cardinality_cap: int = 20,
 ) -> DatasetSchema:
     """
     Read the first `max_events` events of a CSV or XES log and summarise
@@ -182,19 +183,46 @@ def discover_schema(
     """
     fmt = dataset_path.suffix.lower().lstrip(".")
     if fmt == "csv":
-        return _discover_schema_csv(dataset_path, max_events, max_values_per_key)
+        return _discover_schema_csv(
+            dataset_path, max_events, max_values_per_key,
+            perspective_cardinality_cap,
+        )
     if fmt == "xes":
-        return _discover_schema_xes(dataset_path, max_events, max_values_per_key)
+        return _discover_schema_xes(
+            dataset_path, max_events, max_values_per_key,
+            perspective_cardinality_cap,
+        )
     raise ValueError(f"Unsupported dataset format: {fmt!r}")
 
 
+def _select_perspectives(
+    values: dict[str, list[str]],
+    distinct_counts: dict[str, set[str]],
+    numeric_keys: set[str],
+    cardinality_cap: int,
+) -> list[str]:
+    """
+    Pick attribute keys that make sensible grouping perspectives.
+
+    Excludes numeric attributes and attributes whose distinct-value count
+    exceeds `cardinality_cap` (filters out free-text fields like sepsis'
+    "Diagnose").  Single-value attributes are kept — they yield a single
+    bucket, which still exercises the perspective machinery.
+    """
+    return sorted(
+        k for k in values
+        if k not in numeric_keys
+        and len(distinct_counts[k]) <= cardinality_cap
+    )
+
+
 def _discover_schema_csv(
-    path: Path, max_events: int, max_values: int,
+    path: Path, max_events: int, max_values: int, cardinality_cap: int,
 ) -> DatasetSchema:
     activities: list[str] = []
     activity_set: set[str] = set()
     values: dict[str, list[str]] = defaultdict(list)
-    value_sets: dict[str, set[str]] = defaultdict(set)
+    distinct_counts: dict[str, set[str]] = defaultdict(set)
     numeric_keys: set[str] = set()
 
     n = 0
@@ -211,17 +239,15 @@ def _discover_schema_csv(
             for k, v in row.items():
                 if k in _BLOCKED_KEYS or v is None or v == "":
                     continue
-                key = k
-                if key not in value_sets or len(value_sets[key]) < max_values:
-                    if v not in value_sets[key]:
-                        value_sets[key].add(v)
-                        values[key].append(v)
+                if v not in distinct_counts[k]:
+                    distinct_counts[k].add(v)
+                    if len(values[k]) < max_values:
+                        values[k].append(v)
                 if _looks_numeric(v):
-                    numeric_keys.add(key)
+                    numeric_keys.add(k)
 
-    perspectives = sorted(
-        k for k in values
-        if k not in numeric_keys and len(value_sets[k]) > 1
+    perspectives = _select_perspectives(
+        values, distinct_counts, numeric_keys, cardinality_cap,
     )
     return DatasetSchema(
         activities=activities,
@@ -232,12 +258,12 @@ def _discover_schema_csv(
 
 
 def _discover_schema_xes(
-    path: Path, max_events: int, max_values: int,
+    path: Path, max_events: int, max_values: int, cardinality_cap: int,
 ) -> DatasetSchema:
     activities: list[str] = []
     activity_set: set[str] = set()
     values: dict[str, list[str]] = defaultdict(list)
-    value_sets: dict[str, set[str]] = defaultdict(set)
+    distinct_counts: dict[str, set[str]] = defaultdict(set)
     numeric_keys: set[str] = set()
 
     n = 0
@@ -257,12 +283,12 @@ def _discover_schema_xes(
             for k, v in cur_attrs.items():
                 if k in _BLOCKED_KEYS:
                     continue
-                key = k
-                if v not in value_sets[key] and len(value_sets[key]) < max_values:
-                    value_sets[key].add(v)
-                    values[key].append(v)
+                if v not in distinct_counts[k]:
+                    distinct_counts[k].add(v)
+                    if len(values[k]) < max_values:
+                        values[k].append(v)
                 if _looks_numeric(v) and tag in _XES_ATTR_TAGS:
-                    numeric_keys.add(key)
+                    numeric_keys.add(k)
             in_event = False
             elem.clear()
             n += 1
@@ -276,9 +302,8 @@ def _discover_schema_xes(
                 if tag in {"int", "float"} and _looks_numeric(v):
                     numeric_keys.add(k)
 
-    perspectives = sorted(
-        k for k in values
-        if k not in numeric_keys and len(value_sets[k]) > 1
+    perspectives = _select_perspectives(
+        values, distinct_counts, numeric_keys, cardinality_cap,
     )
     return DatasetSchema(
         activities=activities,
@@ -332,6 +357,13 @@ class Recorder:
 # API helpers
 # ---------------------------------------------------------------------------
 
+# Timeout (seconds) applied to every ingest and query API call.
+# Spark jobs on large real-world datasets can take well over 10 minutes;
+# 1800 s (30 min) is the recommended lower bound for production runs.
+# Override via the EVAL_API_TIMEOUT environment variable.
+API_TIMEOUT_S: int = int(os.environ.get("EVAL_API_TIMEOUT", "1800"))
+
+
 def health_check() -> None:
     r = requests.get(urljoin(API_BASE, "/health"), timeout=5)
     r.raise_for_status()
@@ -361,7 +393,7 @@ def ingest_adaptive(
             urljoin(API_BASE, f"/{INDEXER_PREFIX}/run"),
             files={"log_file": (dataset_path.name, fp, _guess_mime(dataset_path))},
             data={"index_config": json.dumps(config)},
-            timeout=600,
+            timeout=API_TIMEOUT_S,
         )
     r.raise_for_status()
     return r.json()
@@ -376,7 +408,7 @@ def ingest_eager(log_name: str, dataset_path: Path, config_path: Path) -> dict:
             urljoin(API_BASE, f"/{EAGER_INDEXER}/run"),
             files={"log_file": (dataset_path.name, fp, _guess_mime(dataset_path))},
             data={"index_config": json.dumps(config)},
-            timeout=600,
+            timeout=API_TIMEOUT_S,
         )
     r.raise_for_status()
     return r.json()
@@ -402,10 +434,9 @@ def detect_adaptive(
     r = requests.post(
         urljoin(API_BASE, f"/{QUERY_PREFIX}/detection"),
         json=body,
-        timeout=600,
+        timeout=API_TIMEOUT_S,
     )
     r.raise_for_status()
-    print(r.json())
     return r.json()
 
 
@@ -420,27 +451,58 @@ def detect_eager(log_name: str, pattern: str) -> dict:
     r = requests.post(
         urljoin(API_BASE, f"/{EAGER_QUERY}/detection"),
         json=body,
-        timeout=600,
+        timeout=API_TIMEOUT_S,
     )
     r.raise_for_status()
     return r.json()
 
 
 # ---------------------------------------------------------------------------
+# Label quoting
+# ---------------------------------------------------------------------------
+
+# Characters allowed in a bare LABEL token by the SeQL lexer.
+_BARE_LABEL_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_:\\]*$')
+
+
+def quote_label(label: str) -> str:
+    """
+    Return the label in a form the SeQL parser accepts as an activity name.
+
+    If the label is a valid bare LABEL token (letters, digits, underscores,
+    colons, backslashes) it is returned unchanged.  Otherwise it is wrapped
+    in double quotes with embedded double-quotes and backslashes escaped::
+
+        quote_label("A")                       -> "A"
+        quote_label("Submit_Application")      -> "Submit_Application"
+        quote_label("W Completeren aanvraag")  -> '"W Completeren aanvraag"'
+        quote_label('Say "hello"')             -> '"Say \\"hello\\""'
+
+    This must be called whenever an activity label is interpolated into a
+    SeQL pattern string.  Attribute *keys* (e.g. org:resource) are always
+    LABEL tokens and must NOT be quoted; attribute *values* are already
+    quoted by the caller.
+    """
+    if _BARE_LABEL_RE.match(label):
+        return label
+    escaped = label.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+# ---------------------------------------------------------------------------
 # Pattern introspection
 # ---------------------------------------------------------------------------
 
-# Activity tokens are uppercase identifiers (single letters in synthetic
-# tests; multi-char labels in real logs).  Operators we explicitly skip
-# when extracting required pairs:
-#   *  +  ?         Kleene operators
-#   |               disjunction
-#   ~  !  ^         negation prefix (excluded by design — see paper §4.3)
-#   ()              grouping parentheses
-#   [..]            attribute-constraint blocks (stripped before pair extraction)
-_ACTIVITY_RE = re.compile(r"[A-Za-z][A-Za-z0-9_:]*")
-_NEGATION_RE = re.compile(r"[~!^]\s*[A-Za-z][A-Za-z0-9_:]*(?:\[[^\]]*\])?")
-_ATTR_BLOCK_RE = re.compile(r"\[[^\]]*\]")
+# Matches a quoted STRING activity label.
+_QUOTED_LABEL_RE = re.compile(r'"(?:[^"\\]|\\.)*"')
+# Matches a bare LABEL token (same charset as the SeQL lexer).
+_BARE_TOKEN_RE   = re.compile(r"[A-Za-z_][A-Za-z0-9_:\\]*")
+# Matches attribute-constraint blocks (including quoted strings inside).
+_ATTR_BLOCK_RE   = re.compile(r"\[[^\]]*\]")
+# Matches a negated activity with optional attribute block.
+_NEGATION_RE     = re.compile(
+    r'[~!^]\s*(?:"(?:[^"\\]|\\.)*"|[A-Za-z_][A-Za-z0-9_:\\]*)(?:\[[^\]]*\])?'
+)
 
 
 def extract_required_pairs(pattern: str) -> set[tuple[str, str]]:
@@ -448,21 +510,40 @@ def extract_required_pairs(pattern: str) -> set[tuple[str, str]]:
     Return the set of consecutive activity pairs implied by `pattern`,
     excluding any pair involving a negated activity.
 
-    Inline attribute-constraint blocks (``A[cost="5.0"]``) are stripped
-    before pair extraction so they don't introduce phantom tokens.
+    Handles both bare labels (``A``, ``Submit_Application``) and
+    quoted labels (``"W Completeren aanvraag"``) correctly.
 
-    The implementation deliberately ignores Kleene operators and
-    disjunction details — for footprint purposes we want a superset of
-    what the query planner will actually look up.
+    Attribute-constraint blocks, Kleene operators, disjunction, and
+    grouping parentheses are stripped — for footprint purposes we want
+    a superset of what the query planner will actually look up.
     """
+    # Remove negated activities (never pair endpoints).
     cleaned = _NEGATION_RE.sub("", pattern)
+    # Remove attribute-constraint blocks.
     cleaned = _ATTR_BLOCK_RE.sub("", cleaned)
+    # Replace Kleene operators with spaces.
     cleaned = re.sub(r"[*+?]", " ", cleaned)
-    tokens = [
-        m.group(0)
-        for chunk in re.split(r"[|()]", cleaned)
-        for m in _ACTIVITY_RE.finditer(chunk)
-    ]
+
+    # Split on OR / grouping operators, then within each chunk extract
+    # activity tokens in order — quoted strings first so their contents
+    # are not re-matched by the bare-label regex.
+    tokens: list[str] = []
+    for chunk in re.split(r"[|()\[\]]", cleaned):
+        pos = 0
+        while pos < len(chunk):
+            m = _QUOTED_LABEL_RE.match(chunk, pos)
+            if m:
+                raw = m.group(0)[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+                tokens.append(raw)
+                pos = m.end()
+                continue
+            m = _BARE_TOKEN_RE.match(chunk, pos)
+            if m:
+                tokens.append(m.group(0))
+                pos = m.end()
+                continue
+            pos += 1  # skip spaces and punctuation residue
+
     return set(zip(tokens, tokens[1:]))
 
 

@@ -320,6 +320,32 @@ def main() -> None:
     print(f"  Dataset:  {spec.path}")
     print(f"  Log name: {spec.log_name}")
     print(f"  Results:  {RESULTS_DIR}")
+    print(f"  Timeout:  {os.environ.get('EVAL_API_TIMEOUT', '1800')}s per API call")
+
+    # ── Dump generated workloads to results/ ─────────────────────────────
+    # This is the canonical record of exactly which queries the evaluation
+    # ran.  Written once at startup so it is available even if experiments
+    # fail partway through.
+    try:
+        from tests.eval.workload import build_workloads
+        wl = build_workloads(dataset, log_name)
+        workload_path = RESULTS_DIR / "workloads.json"
+        workload_path.write_text(
+            json.dumps(
+                {
+                    "dataset":    str(spec.path),
+                    "log_name":   spec.log_name,
+                    "activities": wl.context.activities,
+                    "perspectives": wl.context.perspectives,
+                    "workloads":  wl.as_dict(),
+                },
+                indent=2,
+            )
+        )
+        print(f"  Workloads: {workload_path}  "
+              f"({sum(len(v) for v in wl.as_dict().values())} total queries)")
+    except Exception as exc:
+        print(f"  [WARN] Could not dump workloads: {exc}")
 
     # ── Build per-experiment extra args ───────────────────────────────────
     shared_dataset_args: list[str] = []

@@ -224,3 +224,5 @@ acc.csv
 com*.json
 docker-compose-com.yml
 nginx.conf
+
+**/eval/results*

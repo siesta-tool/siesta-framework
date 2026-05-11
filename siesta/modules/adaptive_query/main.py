@@ -475,11 +475,16 @@ class Adaptive_Querying(SiestaModule):
                     pid, act_a, act_b, cost_ms
                 )
 
-                # Cache in LRU for future queries
+                # Cache in LRU for future queries.  Reuse the materialized
+                # rows for this query so the downstream union/prune/CEP
+                # pipeline does not re-execute the lazy build plan.
                 try:
                     collected = df.collect()
                     get_lru_cache(self.metadata).put(pid, act_a, act_b, collected)
                     catalog.promote_pair(pid, act_a, act_b, PairStatus.TRANSIENT)
+                    df = spark.createDataFrame(
+                        collected, schema=EventPair.get_schema()
+                    )
                 except Exception as exc:
                     logger.warning(
                         f"{self.name}: failed to cache transient pair "

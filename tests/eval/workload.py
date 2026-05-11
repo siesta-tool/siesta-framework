@@ -57,6 +57,7 @@ from typing import Sequence
 from tests.eval.eval_common import (
     DatasetSchema,
     discover_schema,
+    quote_label,
     resolve_dataset,
 )
 
@@ -111,7 +112,7 @@ class WorkloadContext:
         schema: DatasetSchema,
         *,
         max_activities: int = 6,
-        max_perspectives: int = 2,
+        max_perspectives: int = 4,
     ) -> "WorkloadContext":
         acts = schema.activities[:max_activities]
         if len(acts) < 2:
@@ -137,19 +138,23 @@ class WorkloadContext:
         """
         Return ``activity[attr="<value>"]`` using the first observed value
         for `attr`, or `fallback` if the attribute is unknown.  When no
-        value is available at all, returns the bare activity (no constraint).
+        value is available at all, returns the bare (quoted if needed) activity.
+
+        The activity label is always passed through quote_label() so that
+        multi-word activity names (e.g. "W Completeren aanvraag") are
+        correctly wrapped in double quotes for the SeQL parser.
         """
         values = self.attribute_values.get(attr, [])
         value = values[0] if values else fallback
+        ql = quote_label(activity)
         if value is None:
-            return activity
-        # Escape any embedded double quotes in the value.
+            return ql
         safe = value.replace('"', '\\"')
-        return f'{activity}[{attr}="{safe}"]'
+        return f'{ql}[{attr}="{safe}"]'
 
     def equal_var(self, activity: str, attr: str, var_id: int) -> str:
         """``activity[attr=$N]`` — used to bind cross-activity equality."""
-        return f"{activity}[{attr}=${var_id}]"
+        return f"{quote_label(activity)}[{attr}=${var_id}]"
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +167,16 @@ def _ordered_pairs(activities: Sequence[str]) -> list[tuple[str, str]]:
 
 def _ordered_triples(activities: Sequence[str]) -> list[tuple[str, str, str]]:
     return list(itertools.permutations(activities, 3))
+
+
+def _pat2(a: str, b: str) -> str:
+    """Two-activity pattern, quoting labels that contain spaces."""
+    return f"{quote_label(a)} {quote_label(b)}"
+
+
+def _pat3(a: str, b: str, c: str) -> str:
+    """Three-activity pattern, quoting labels that contain spaces."""
+    return f"{quote_label(a)} {quote_label(b)} {quote_label(c)}"
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +193,7 @@ def build_structural(ctx: WorkloadContext, *, max_queries: int = 10) -> list[dic
     for gk in ctx.perspectives:
         for a, b in pairs:
             queries.append(_q(
-                f"S{next(counter)}", f"{a} {b}",
+                f"S{next(counter)}", _pat2(a, b),
                 log_name=ctx.log_name, gkeys=gk,
             ))
             if len(queries) >= max_queries:
@@ -186,7 +201,7 @@ def build_structural(ctx: WorkloadContext, *, max_queries: int = 10) -> list[dic
     for gk in ctx.perspectives:
         for a, b, c in triples:
             queries.append(_q(
-                f"S{next(counter)}", f"{a} {b} {c}",
+                f"S{next(counter)}", _pat3(a, b, c),
                 log_name=ctx.log_name, gkeys=gk,
             ))
             if len(queries) >= max_queries:
@@ -255,7 +270,7 @@ def build_attribute_aware(
         attr1, attr2 = available[0], available[1]
         v1 = ctx.attribute_values[attr1][0]
         v2 = ctx.attribute_values[attr2][0]
-        pat = f'{a}[{attr1}="{v1}",{attr2}="{v2}"] {b}'
+        pat = f'{quote_label(a)}[{attr1}="{v1}",{attr2}="{v2}"] {quote_label(b)}'
         queries.append(_q(
             f"A{next(counter)}", pat,
             log_name=ctx.log_name, gkeys=gk,
@@ -285,13 +300,13 @@ def build_skewed(
     primary_persp = ctx.perspectives[0]
     secondary_persp = ctx.perspectives[1] if len(ctx.perspectives) > 1 else primary_persp
 
-    hot_templates = [(f"{a} {b}", primary_persp) for a, b in pairs[:n_hot_combos]]
+    hot_templates = [(_pat2(a, b), primary_persp) for a, b in pairs[:n_hot_combos]]
     cold_templates: list[tuple[str, list[str]]] = []
     for a, b in pairs[n_hot_combos:n_hot_combos + 3]:
-        cold_templates.append((f"{a} {b}", primary_persp))
+        cold_templates.append((_pat2(a, b), primary_persp))
     if secondary_persp != primary_persp:
         for a, b in pairs[:2]:
-            cold_templates.append((f"{a} {b}", secondary_persp))
+            cold_templates.append((_pat2(a, b), secondary_persp))
     if not cold_templates:
         cold_templates = hot_templates[-1:]
 
@@ -332,7 +347,7 @@ def build_uniform(ctx: WorkloadContext, *, n_queries: int = 50) -> list[dict]:
     if not pairs:
         return []
     templates = [
-        (f"{a} {b}", gk)
+        (_pat2(a, b), gk)
         for gk in ctx.perspectives
         for a, b in pairs
     ]
@@ -374,14 +389,23 @@ def build_workloads(
     *,
     n_skewed: int = 50,
     n_uniform: int = 50,
+    max_perspectives: int = 4,
 ) -> Workloads:
     """
     Build all four standard workloads from a dataset.  See
     `eval_common.resolve_dataset` for selection rules.
+
+    `max_perspectives` controls how many distinct grouping perspectives are
+    included.  Perspectives are drawn from the dataset's low-cardinality
+    string attributes (cardinality 2–50), sorted by cardinality ascending
+    so the most semantically meaningful groupings come first.  Pass a
+    larger value (e.g. 4) to include more perspectives in the skewed and
+    uniform workloads.
     """
     spec = resolve_dataset(dataset, log_name)
     schema = discover_schema(spec.path)
-    ctx = WorkloadContext.from_schema(spec.log_name, schema)
+    ctx = WorkloadContext.from_schema(spec.log_name, schema,
+                                     max_perspectives=max_perspectives)
     return Workloads(
         structural      = build_structural(ctx),
         attribute_aware = build_attribute_aware(ctx),

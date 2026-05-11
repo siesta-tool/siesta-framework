@@ -40,6 +40,7 @@ from typing import Sequence
 from tests.eval.eval_common import (
     DatasetSchema,
     discover_schema,
+    quote_label,
     resolve_dataset,
 )
 
@@ -49,13 +50,16 @@ from tests.eval.eval_common import (
 # ---------------------------------------------------------------------------
 
 def _two_activity_patterns(activities: Sequence[str]) -> list[str]:
-    """All ordered pairs as two-activity patterns."""
-    return [f"{a} {b}" for a, b in itertools.permutations(activities, 2)]
+    """All ordered pairs as two-activity patterns, quoting labels with spaces."""
+    return [
+        f"{quote_label(a)} {quote_label(b)}"
+        for a, b in itertools.permutations(activities, 2)
+    ]
 
 
 def _three_activity_patterns(activities: Sequence[str]) -> list[str]:
     return [
-        f"{a} {b} {c}"
+        f"{quote_label(a)} {quote_label(b)} {quote_label(c)}"
         for a, b, c in itertools.permutations(activities, 3)
     ]
 
@@ -170,13 +174,19 @@ def gen_demand_shift(
     """
     rng = random.Random(seed)
     persp = list(perspectives[0]) if perspectives else []
-    pairs = _two_activity_patterns(activities)
     if not pairs:
         return []
 
     half = max(1, len(pairs) // 2)
-    pairs_phase1 = [(persp, p) for p in pairs[:half]]
-    pairs_phase2 = [(persp, p) for p in pairs[half:]] or pairs_phase1
+    # Build from raw activity permutations so quote_label is applied at
+    # pattern-construction time, not after splitting a pre-built string.
+    raw_pairs = list(itertools.permutations(activities, 2))
+    half_raw  = max(1, len(raw_pairs) // 2)
+    phase1_raw = raw_pairs[:half_raw]
+    phase2_raw = raw_pairs[half_raw:] or phase1_raw
+
+    pairs_phase1 = [(persp, f"{quote_label(a)} {quote_label(b)}") for a, b in phase1_raw]
+    pairs_phase2 = [(persp, f"{quote_label(a)} {quote_label(b)}") for a, b in phase2_raw]
 
     cutoff = int(n_queries * shift_at)
     queries = []
@@ -222,9 +232,9 @@ def gen_attribute_aware(
         if i % 2 == 0:
             value = rng.choice(attribute_values[attr])
             value_safe = value.replace('"', '\\"')
-            pat = f'{a}[{attr}="{value_safe}"] {b}'
+            pat = f'{quote_label(a)}[{attr}="{value_safe}"] {quote_label(b)}'
         else:
-            pat = f'{a}[{attr}=$1] {b}[{attr}=$1]'
+            pat = f'{quote_label(a)}[{attr}=$1] {quote_label(b)}[{attr}=$1]'
         queries.append(make_query(
             qid=f"AA{i}",
             pattern=pat,

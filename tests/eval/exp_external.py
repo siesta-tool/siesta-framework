@@ -66,7 +66,7 @@ from urllib.parse import urljoin
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tests.eval.eval_common import (
-    API_BASE, CONFIG_DIR,
+    API_BASE, API_TIMEOUT_S, CONFIG_DIR,
     EAGER_QUERY, QUERY_PREFIX,
     Recorder, health_check,
     ingest_adaptive, ingest_eager,
@@ -276,7 +276,7 @@ def run_elk(
         try:
             r = requests.post(
                 f"{ELK_ENDPOINT}/{ELK_INDEX}/_search",
-                json=elk_query, timeout=60,
+                json=elk_query, timeout=API_TIMEOUT_S,
             )
             r.raise_for_status()
             latency = time.perf_counter() - t0

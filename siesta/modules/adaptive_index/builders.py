@@ -86,6 +86,7 @@ from pyspark.sql.functions import (
     concat_ws,
     lit,
     row_number,
+    when,
 )
 from pyspark.sql.types import StringType
 from pyspark.sql.window import Window
@@ -157,20 +158,32 @@ def _grouping_col(grouping_keys: List[str]) -> "Column":  # noqa: F821
     are referenced directly; all other keys are looked up in the
     attributes MapType column.  Keys are sorted before concatenation so
     that the group value is independent of the order in grouping_keys.
+
+    Returns NULL when any of the requested keys is missing on the event.
+    Callers MUST filter null rows before partitioning: events that do
+    not carry the perspective's attributes are not part of the
+    perspective and must not be indexed under it.
     """
     parts = []
     for key in sorted(grouping_keys):
         if key in _TOP_LEVEL_COLS:
-            parts.append(coalesce(col(key).cast(StringType()), lit("__null__")))
+            parts.append(col(key).cast(StringType()))
         else:
-            parts.append(
-                coalesce(col("attributes")[key], lit("__null__"))
-            )
+            parts.append(col("attributes")[key].cast(StringType()))
 
     if len(parts) == 1:
         return parts[0].alias("trace_id")
 
-    return concat_ws("|||", *parts).alias("trace_id")
+    # All-or-nothing: if any key is missing the whole value is NULL.
+    # concat_ws silently skips nulls, so guard explicitly.
+    any_null = parts[0].isNull()
+    for p in parts[1:]:
+        any_null = any_null | p.isNull()
+    return (
+        when(any_null, lit(None).cast(StringType()))
+        .otherwise(concat_ws("|||", *parts))
+        .alias("trace_id")
+    )
 
 
 # ===========================================================================
@@ -205,10 +218,13 @@ def promote_to_l1(
 
     seq_df = storage.read_sequence_table(metadata)
 
-    # Compute grouping value and rename to trace_id.
+    # Compute grouping value and rename to trace_id.  Drop events that
+    # do not carry the perspective's attributes — they are not part of
+    # this perspective and must not be indexed under it.
     grouped_df = (
         seq_df
         .withColumn("trace_id", _grouping_col(grouping_keys))
+        .filter(col("trace_id").isNotNull())
         .select("trace_id", "activity", "start_timestamp", "attributes")
     )
 
@@ -361,6 +377,7 @@ def incremental_update_perspective(
     new_events = (
         batch_activity_df
         .withColumn("trace_id", _grouping_col(grouping_keys))
+        .filter(col("trace_id").isNotNull())
     )
 
     if not has_pos:
@@ -700,6 +717,7 @@ def incremental_update_persistent_pairs(
     affected_groups_df = (
         batch_activity_df
         .withColumn("trace_id", batch_v_col)
+        .filter(col("trace_id").isNotNull())
         .select("trace_id", "activity")
         .distinct()
     )

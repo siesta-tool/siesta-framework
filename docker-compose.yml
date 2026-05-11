@@ -31,6 +31,7 @@ services:
       - siesta-net
     ports:
       - '8000:8000'
+      - '4040:4040'
 
   spark-master:
     container_name: spark-master
@@ -57,7 +58,6 @@ services:
     ports:
       - '7077:7077'
       - '8085:8085'
-      - '4040:4040'
       - '8081:8081'
     # Uncomment for docker swarm
     # deploy:
