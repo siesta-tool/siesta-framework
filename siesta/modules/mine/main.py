@@ -148,10 +148,13 @@ class Mining(SiestaModule):
             try:
                 with open(config_path, 'r') as f:
                     user_mining_config = json.load(f)
+                    try:
+                        self._load_mining_config(user_mining_config)
+                        self.storage.initialize_db(self.mining_config)
+                    except ValueError as e:
+                        logger.error(f"Invalid mining config in {config_path}: {e}")
+                        raise ValueError(f"Invalid mining config: {e}")
                     
-                    self._load_mining_config(user_mining_config)
-                    self.storage.initialize_db(self.mining_config)
-
                     logger.info(f"Loaded config from {config_path}: {user_mining_config}")
             except Exception as e:
                 logger.error(f"Failed to load mining config from {config_path}: {e}")
@@ -171,7 +174,9 @@ class Mining(SiestaModule):
             logger.exception(f"Log '{log_name}' does not exist in storage. Run preprocessing first.")
             raise ValueError(f"Log '{log_name}' does not exist in storage. Run preprocessing first.")
         
-       if config.get("output_path")
+        if config.get("output_path") == "../output/example_log":
+            logger.warning("Using default output path '../output/example_log' is not suggested; we update the suffix to the logname'")
+            config["output_path"] = "../output/" + config.get("log_name", "mining_results")
 
         if config.get("log_name") is None:
             raise ValueError("Log name not specified in config.")
