@@ -169,20 +169,22 @@ class Mining(SiestaModule):
 
     def _load_mining_config(self, config: Dict[str, Any]):
         # Validate that the specified log exists in storage before proceeding with mining. 
-        if not self.storage.log_exists(config):
+        if not self.storage.log_exists(config) or config.get("log_name") is None:
             log_name = config.get("log_name")
             logger.exception(f"Log '{log_name}' does not exist in storage. Run preprocessing first.")
             raise ValueError(f"Log '{log_name}' does not exist in storage. Run preprocessing first.")
         
-        if config.get("output_path") == "../output/example_log":
-            logger.warning("Using default output path '../output/example_log' is not suggested; we update the suffix to the logname'")
-            config["output_path"] = "../output/" + config.get("log_name", "mining_results")
-
-        if config.get("log_name") is None:
-            raise ValueError("Log name not specified in config.")
-    
+        
         self.mining_config = DEFAULT_MINING_CONFIG.copy()
         self.mining_config.update(config)
+
+        raw_path = config.get("output_path")
+        if raw_path is None or raw_path == "output/example_log":
+            raw_path = "output/" + config.get("log_name", "comparator_results")
+
+        Path(raw_path).parent.mkdir(parents=True, exist_ok=True)
+        self.mining_config["output_path"] = raw_path + "_" + str(datetime.datetime.now().timestamp())
+
 
         # Ensure that the specified categories are valid before proceeding with mining.
         valid_categories = {"positional", "existential", "ordered", "unordered", "negation", "*"}
