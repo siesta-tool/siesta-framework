@@ -219,10 +219,10 @@ __marimo__/
 *.xes
 **/output/*
 
-acc.json
-acc.csv
-com*.json
+acc*.*
+com*.*
 docker-compose-com.yml
 nginx.conf
 
 **/eval/results*
+**/tests/eval/results/**

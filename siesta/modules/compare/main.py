@@ -14,6 +14,7 @@ from siesta.core.storageFactory import get_storage_manager
 from pyspark.sql import SparkSession, functions as F
 from siesta.modules.compare.ngrams import discover_ngrams, save_ngram_results, create_network
 from siesta.modules.compare.dm import discover_rare_rules, discover_targeted_rules, save_dm_results
+from siesta.modules.compare.loops import discover_loops, save_loops_results, create_loops_html
 from siesta.modules.mine.ordered import discover_ordered
 import logging
 
@@ -55,6 +56,7 @@ class Comparing(SiestaModule):
             "ngrams":         ("POST", self.api_ngrams),
             "rare_rules":     ("POST", self.api_rare_rules),
             "targeted_rules": ("POST", self.api_targeted_rules),
+            "loops":          ("POST", self.api_loops),
         }
 
     def startup(self):
@@ -246,24 +248,100 @@ class Comparing(SiestaModule):
                 logger.error(f"Failed to parse targeted_rules results from {self.comparator_config['output_path']}.")
                 return f"Cannot parse results. Check logs and {self.comparator_config['output_path']} for details."
 
+    def api_loops(self, comparator_config: Annotated[ComparatorConfig, Body(
+        openapi_examples={
+            "default": {
+                "summary": "Comparative loop detection with default settings",
+                "value": {
+                    "log_name": "example_log",
+                    "storage_namespace": "siesta",
+                    "method_params": {
+                        "output_format": "json",
+                        "include_trace_ids": True,
+                    },
+                    "separating_key": "activity",
+                    "separating_groups": [],
+                    "support_threshold": 0.0,
+                },
+            },
+        }
+    )]) -> Any | None:
+        """Detect self-loops and minimal non-self-loops in three comparison scopes.
+
+        Runs loop detection (self-loops and minimal non-self-loops) in three
+        complementary scopes and returns all results in a single response:
+
+        * **global** - detection over the entire event log, equivalent to the
+          analyser's ``loop_detection`` with ``trace_based=True``.
+        * **per_label** - detection restricted to the traces belonging to each
+          label group defined by ``separating_key`` / ``separating_groups``.
+        * **exclusive** - for every label group, the loops that occur in that
+          group's traces but in *no* other group.
+
+        Each loop entry carries ``pattern``, ``support_count`` (number of
+        traces containing it), and optionally ``trace_ids``.
+
+        Results are written to a file and the parsed contents are returned.
+
+        **Request body (`ComparatorConfig`):**
+        - `log_name` *(str, default: `\"example_log\"`)* - name of the indexed log.
+        - `storage_namespace` *(str, default: `\"siesta\"`)* - storage namespace.
+        - `method_params` *(object)* - method-specific options:
+            - `output_format` *(str, default: `\"json\"`)* - `\"json\"` or `\"csv\"`.
+            - `include_trace_ids` *(bool, default: `true`)* - include the
+              ``trace_ids`` list in every loop entry.
+        - `separating_key` *(str, default: `\"activity\"`)* - column used to
+          label traces into groups.
+        - `separating_groups` *(list[list[str]])* - group definitions, e.g.
+          `[[\"fail\", \"error\"]]`.
+        - `support_threshold` *(float [0, 1], default: `0.0`)* - keep only
+          loops whose ``support_count`` exceeds
+          ``support_threshold * trace_count``.
+        """
+        self.siesta_config = get_system_config()
+        self.storage = get_storage_manager()
+
+        config = comparator_config.model_dump()
+        config["method"] = "loops"
+        try:
+            self._load_comparator_config(config)
+        except Exception as e:
+            logger.exception(f"Error loading comparator config: {e}")
+            return {"code": 400, "message": f"Invalid config: {e}"}
+
+        self.compare(caller="api")
+
+        logger.info(f"Completed. Results available at {self.comparator_config['output_path']}.")
+        output_path = self.comparator_config["output_path"]
+        fmt = self.comparator_config.get("method_params", {}).get("output_format", "json")
+        with open(output_path, "r", newline="" if fmt == "csv" else None) as fh:
+            try:
+                if fmt == "csv":
+                    return list(csv.DictReader(fh))
+                return json.load(fh)
+            except Exception:
+                logger.error(f"Failed to parse loops results from {output_path}.")
+                return f"Cannot parse results. Check logs and {output_path} for details."
+
     # ------------------------------------------------------------------
     # Shared helpers
     # ------------------------------------------------------------------
 
     def _load_comparator_config(self, config: Dict[str, Any]):
-        if not self.storage.log_exists(config):
+        if not self.storage.log_exists(config) or config.get("log_name") is None:
             logger.exception(f"Log '{config.get('log_name')}' does not exist in storage. Run preprocessing first.")
             raise ValueError(f"Log '{config.get('log_name')}' does not exist in storage. Run preprocessing first.")
-        
 
         self.comparator_config = DEFAULT_COMPARATOR_CONFIG.copy()
         self.comparator_config.update(config)
-        if self.comparator_config.get("output_path") is not None and self.comparator_config.get("output_path") == "output/example_log":
-            self.comparator_config["output_path"] = "output/" + config.get("log_name", "comparator_results")
-            
-        given_output_path = config.get("output_path", "../../../output/" + config.get("log_name", "comparator_results"))
-        Path(given_output_path).parent.mkdir(parents=True, exist_ok=True)
-        self.comparator_config["output_path"] = given_output_path + "_" + str(datetime.datetime.now().timestamp())
+
+        raw_path = config.get("output_path")
+        if raw_path is None or raw_path == "output/example_log":
+            raw_path = "output/" + config.get("log_name", "comparator_results")
+
+        Path(raw_path).parent.mkdir(parents=True, exist_ok=True)
+        self.comparator_config["output_path"] = raw_path + "_" + str(datetime.datetime.now().timestamp())
+
 
     def compare(self, caller: str):
         logger.info(f"Beginning comparator process initiated by {caller}.")
@@ -328,6 +406,33 @@ class Comparing(SiestaModule):
 
             self.comparator_config["output_path"] += ".json"
             save_dm_results(result_list, self.comparator_config["output_path"])
-            logger.info(f"DM_2 results written to {self.comparator_config['output_path']}.")
+            logger.info(f"Targeted rules results written to {self.comparator_config['output_path']}.")
+
+        elif method == "loops":
+            fmt = params.get("output_format", "csv")
+            if fmt not in ("json", "csv"):
+                logger.warning(
+                    f"Unknown output_format '{fmt}' for loops; falling back to 'json'."
+                )
+                fmt = "json"
+
+            result = discover_loops(
+                events_df=all_events_df,
+                trace_labels=trace_labels,
+                trace_count=self.metadata.trace_count,
+                support_threshold=self.comparator_config.get("support_threshold", 0.0),
+                include_trace_ids=params.get("include_trace_ids", True),
+            )
+
+            self.comparator_config["output_path"] += f".{fmt}"
+            save_loops_results(result, self.comparator_config["output_path"], fmt=fmt)
+
+            if params.get("vis", False):
+                html_path = (
+                    self.comparator_config["output_path"].rsplit(".", 1)[0] + ".html"
+                )
+                with open(html_path, "w", encoding="utf-8") as fh:
+                    fh.write(create_loops_html(result))
+                logger.info(f"Loops visualisation written to {html_path}.")
 
         all_events_df.unpersist()

@@ -37,7 +37,6 @@ RUN chmod 0755 /usr/local/bin/siesta-api-entrypoint.sh
 # correct ownership on first mount.
 RUN mkdir -p /tmp/.ivy2 /workspace/output && chown -R 1001:0 /tmp/.ivy2 /workspace/output
 
-
 USER 1001
 
 ENTRYPOINT ["/usr/local/bin/siesta-api-entrypoint.sh"]

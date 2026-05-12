@@ -174,14 +174,12 @@ def gen_demand_shift(
     """
     rng = random.Random(seed)
     persp = list(perspectives[0]) if perspectives else []
-    if not pairs:
+
+    raw_pairs = list(itertools.permutations(activities, 2))
+    if not raw_pairs:
         return []
 
-    half = max(1, len(pairs) // 2)
-    # Build from raw activity permutations so quote_label is applied at
-    # pattern-construction time, not after splitting a pre-built string.
-    raw_pairs = list(itertools.permutations(activities, 2))
-    half_raw  = max(1, len(raw_pairs) // 2)
+    half_raw   = max(1, len(raw_pairs) // 2)
     phase1_raw = raw_pairs[:half_raw]
     phase2_raw = raw_pairs[half_raw:] or phase1_raw
 

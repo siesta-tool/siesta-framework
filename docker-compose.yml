@@ -21,7 +21,7 @@ services:
     volumes:
       - .:/workspace
       - spark-ivy-cache:/tmp/.ivy2
-      - siesta-output:/workspace/output
+      - ./output:/workspace/output
     depends_on:
       - spark-master
       - spark-worker
@@ -200,5 +200,4 @@ volumes:
   minio-data: {}
   kafka_data: {}
   zookeeper_data: {}
-  siesta-output: {}
   spark-ivy-cache: {}

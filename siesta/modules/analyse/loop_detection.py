@@ -17,7 +17,7 @@ _LOOP_SCHEMA = ArrayType(StructType([
 
 
 @F.udf(_LOOP_SCHEMA)
-def _find_loops_udf(sequence):
+def find_loops_udf(sequence):
     """Detect self-loops and minimal non-self-loops in an ordered activity sequence.
 
     A self-loop is an activity immediately followed by itself.
@@ -148,7 +148,7 @@ def compute_loop_detection(
         ).alias("sequence")
     )
 
-    loops_df = seq_df.withColumn("loops", _find_loops_udf(F.col("sequence")))
+    loops_df = seq_df.withColumn("loops", find_loops_udf(F.col("sequence")))
 
     # Explode: one row per (group, loop_pattern, loop_type), deduplicated per group
     exploded = (
