@@ -420,7 +420,18 @@ def detect_adaptive(
     grouping_keys: list[str],
     lookback: str = "3650d",
     lookback_mode: str = "time",
+    *,
+    retention_overrides: dict | None = None,
 ) -> dict:
+    """
+    POST to the adaptive detection endpoint.
+
+    `retention_overrides` is merged into the top-level request body, so
+    keys like ``min_query_count`` or ``half_life_seconds`` flow through
+    QueryConfig (which is ``extra="allow"``) to the lazy-initialised
+    RetentionPolicy inside the query module.  Use it to make the warm-up
+    experiment promote pairs after a single query, etc.
+    """
     body = {
         "log_name":          log_name,
         "storage_namespace": "siesta",
@@ -431,6 +442,8 @@ def detect_adaptive(
         "lookback_mode":     lookback_mode,
         "support_threshold": 0.0,
     }
+    if retention_overrides:
+        body.update(retention_overrides)
     r = requests.post(
         urljoin(API_BASE, f"/{QUERY_PREFIX}/detection"),
         json=body,
@@ -455,6 +468,43 @@ def detect_eager(log_name: str, pattern: str) -> dict:
     )
     r.raise_for_status()
     return r.json()
+
+
+def build_trace_to_perspective_map(
+    dataset_path: Path, grouping_keys: list[str]
+) -> dict[str, str]:
+    """
+    Build a {trace_id -> perspective_value} map from the source log.
+
+    NOTE: this map is useful only for diagnostic inspection — e.g. to
+    understand which resource a matched trace belongs to.  It is NOT
+    suitable for constructing a fair eager baseline because the eager
+    pairs_index groups by trace_id and STNM pairs never cross trace
+    boundaries.  Any perspective pair that co-occurs across two cases
+    belonging to the same resource group will be found by the adaptive
+    system but will be absent from any regrouped eager result.
+
+    Use detect_eager_perspective() for a correct eager comparison.
+    """
+    from collections import Counter
+    from tests.eval.batch_splitter import _iter_log
+
+    trace_vals: dict[str, Counter] = {}
+    for ev in _iter_log(dataset_path):
+        tid = ev.get("trace_id")
+        if tid is None:
+            continue
+        parts = [ev.get(k) for k in grouping_keys]
+        if any(p is None for p in parts):
+            continue
+        val = "|".join(str(p) for p in parts)
+        trace_vals.setdefault(tid, Counter())[val] += 1
+
+    return {
+        tid: counter.most_common(1)[0][0]
+        for tid, counter in trace_vals.items()
+        if counter
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -572,8 +622,15 @@ def timed_query(
     pattern: str,
     grouping_keys: list[str],
     lookback: str = "3650d",
+    *,
+    retention_overrides: dict | None = None,
 ) -> tuple[dict, float]:
-    """Return (response, wall_clock_seconds)."""
+    """Return (response, wall_clock_seconds).
+
+    Forwards `retention_overrides` to detect_adaptive so the experiment
+    can drive the retention policy (e.g. min_query_count=1 for warm-up).
+    """
     t0 = time.perf_counter()
-    body = detect_adaptive(log_name, pattern, grouping_keys, lookback)
+    body = detect_adaptive(log_name, pattern, grouping_keys, lookback,
+                           retention_overrides=retention_overrides)
     return body, time.perf_counter() - t0

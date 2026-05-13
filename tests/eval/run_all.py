@@ -89,8 +89,16 @@ from tests.eval.eval_common import (
 
 EXPERIMENTS: list[tuple[str, str, str]] = [
     # (label, module, description)
-    ("6.3.1", "tests.eval.exp_warmup",
-     "Query performance under adaptive indexing (warm-up curves)"),
+    # 6.3.1 runs twice: once with --no-promote-on-first to capture the cold
+    # lazy-scan curve (output: 6_3_1_warmup_cold.jsonl), once normally to
+    # capture the warm-up convergence (output: 6_3_1_warmup_warm.jsonl).
+    # Both are needed because the cold pass deliberately disables early
+    # promotion so reps 0-2 stay cold and only reps 2+ promote.  Plotting
+    # combines both files: rep 0 of cold pass + reps 1-N of warm pass.
+    ("6.3.1.cold", "tests.eval.exp_warmup",
+     "Warm-up COLD pass — first-query lazy scan baseline"),
+    ("6.3.1.warm", "tests.eval.exp_warmup",
+     "Warm-up WARM pass — convergence to L3 PERSISTENT"),
     ("6.3.2", "tests.eval.exp_maintenance",
      "Index maintenance cost vs workload coverage"),
     ("6.3.3", "tests.eval.exp_retention",
@@ -357,10 +365,18 @@ def main() -> None:
     extra_for: dict[str, list[str]] = {
         label: list(shared_dataset_args) for label, _, _ in EXPERIMENTS
     }
+    # Per-pass flags for the two 6.3.1 sub-experiments.
+    extra_for.setdefault("6.3.1.cold", []).extend(
+        ["--no-promote-on-first", "--out-suffix", "cold"]
+    )
+    extra_for.setdefault("6.3.1.warm", []).extend(
+        ["--out-suffix", "warm"]
+    )
     if args.skip_elk:
         extra_for.setdefault("6.4", []).append("--skip-elk")
     if args.reps is not None:
-        extra_for.setdefault("6.3.1", []).extend(["--reps", str(args.reps)])
+        extra_for.setdefault("6.3.1.cold", []).extend(["--reps", str(args.reps)])
+        extra_for.setdefault("6.3.1.warm", []).extend(["--reps", str(args.reps)])
 
     # Equivalence check also accepts --dataset / --log-name.
     equiv_args = list(shared_dataset_args)

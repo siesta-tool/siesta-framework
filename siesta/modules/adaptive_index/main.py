@@ -146,6 +146,21 @@ class AdaptiveIndexConfig(BaseModel):
             "longer values amortise build costs over more queries."
         ),
     )
+    min_query_count: int = Field(
+        3,
+        description=(
+            "Minimum queries touching an artefact before the retention "
+            "predicate evaluates promotion.  Set to 1 to allow promotion "
+            "after a single query (useful for warm-up benchmarks)."
+        ),
+    )
+    hysteresis: float = Field(
+        0.15,
+        description=(
+            "Hysteresis band ε used by the retention predicate.  Promotion "
+            "requires utility > (1+ε)·cost; demotion requires utility < (1-ε)·cost."
+        ),
+    )
 
 
 DEFAULT_ADAPTIVE_INDEX_CONFIG: Dict[str, Any] = (
@@ -474,6 +489,14 @@ class Adaptive_Indexing(SiestaModule):
                 half_life_seconds=self.index_config.get(
                     "half_life_seconds",
                     DEFAULT_ADAPTIVE_INDEX_CONFIG["half_life_seconds"],
+                ),
+                min_query_count=self.index_config.get(
+                    "min_query_count",
+                    DEFAULT_ADAPTIVE_INDEX_CONFIG["min_query_count"],
+                ),
+                hysteresis=self.index_config.get(
+                    "hysteresis",
+                    DEFAULT_ADAPTIVE_INDEX_CONFIG["hysteresis"],
                 ),
             )
         # ----------------------------------------------------------------

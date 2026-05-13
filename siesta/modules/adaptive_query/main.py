@@ -658,12 +658,26 @@ class Adaptive_Querying(SiestaModule):
             if len(positions) > support_threshold
         ]
 
+        # Diagnostic: report the lifecycle level of each touched pair AFTER
+        # the (possibly synchronous) post-query promotion fires.  Consumers
+        # of the API can plot how many reps it took for each pair to reach
+        # PERSISTENT.  Levels: ABSENT, TRANSIENT, PERSISTENT.
+        pair_status_after = {}
+        post_stats = catalog.get(pid)
+        if post_stats is not None:
+            for (a, b) in all_pairs_2d:
+                ps = post_stats.pairs.get((a, b))
+                pair_status_after[f"{a}->{b}"] = (
+                    ps.status.name if ps is not None else "ABSENT"
+                )
+
         return {
             "code": 200,
             "perspective": pid,
             "total": len(formatted),
             "detected": formatted,
             "time": t_total,
+            "pair_status_after": pair_status_after,
         }
 
     # ------------------------------------------------------------------
@@ -811,6 +825,8 @@ class Adaptive_Querying(SiestaModule):
             from siesta.modules.adaptive_index.retention import RetentionPolicy
             self._retention = RetentionPolicy(
                 half_life_seconds=self.query_config.get("half_life_seconds", 3600.0),
+                min_query_count=self.query_config.get("min_query_count", 3),
+                hysteresis=self.query_config.get("hysteresis", 0.15),
             )
 
         catalog = get_catalog(self.metadata, self.storage)

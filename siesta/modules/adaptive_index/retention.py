@@ -263,21 +263,45 @@ class RetentionPolicy:
         """
         Should pair (A, B) be promoted from ABSENT/TRANSIENT to PERSISTENT?
 
-        Requires both a minimum query count (after decay) and a known
-        build cost.  For pairs that have never been maintained, the
-        right-hand side reduces to the build cost alone, which biases
-        the predicate toward promotion — intentionally: a pair with
-        observed demand and unknown maintenance cost should be given a
-        chance.  If maintenance proves expensive, the next evaluation
-        cycle will demote it.
+        Two gates:
+          1. Demand gate — `query_count` must reach `min_query_count` after
+             decay.  This protects against premature promotion based on a
+             single expensive first query.
+          2. Cost-function gate — accumulated savings must dominate the
+             build cost plus expected maintenance, by a hysteresis margin.
+
+        Eager-promotion bypass
+        ----------------------
+        When `min_query_count <= 1` the operator has explicitly signalled
+        that promotion should fire as soon as a pair is queried — for
+        instance during the warm-up benchmark (Experiment 6.3.1) where
+        the goal is to observe the L3 transition rather than to optimise
+        long-run cost.  In this regime the cost-function gate is bypassed
+        because a single observed query cannot yet produce enough savings
+        to amortise the build cost; the predicate becomes a pure count
+        check.
+
+        For pairs that have never been maintained the maintenance term
+        is zero, biasing the cost-function gate slightly toward
+        promotion — intentional, because a pair with observed demand
+        and unknown maintenance cost deserves a chance.  Demotion will
+        correct the decision at the next evaluation cycle if maintenance
+        proves expensive.
         """
         self._decay_pair(pair_stats)
 
+        # Gate 1 — demand
         if pair_stats.query_count < self.min_query_count:
             return False
         if pair_stats.build_cost_ms <= 0.0:
             return False
 
+        # Eager-promotion bypass: low min_query_count signals operator
+        # intent to promote on demand evidence alone.
+        if self.min_query_count <= 1:
+            return True
+
+        # Gate 2 — cost-function
         mean_savings = pair_stats.total_savings_ms / pair_stats.query_count
         mean_maintenance = (
             pair_stats.total_maintenance_ms / pair_stats.maintenance_batch_count

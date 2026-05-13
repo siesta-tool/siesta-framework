@@ -27,5 +27,5 @@
   "perspectives": [
     {"grouping_keys": ["resource"]}
   ],
-  "half_life_seconds": 60
+  "half_life_seconds": 300
 }
