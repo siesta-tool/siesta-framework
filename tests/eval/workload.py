@@ -413,7 +413,7 @@ def build_result_bearing_workload(
     dense_threshold: float = 0.5,
     sparse_lo: float = 0.05,
     sparse_hi: float = 0.20,
-    min_perspective_cardinality: int = 8,
+    min_perspective_cardinality: int = 6,
     rng_seed: int = 0,
 ) -> list[dict]:
     """

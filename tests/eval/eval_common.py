@@ -492,16 +492,12 @@ def _guess_mime(path: Path) -> str:
     return mimetypes.guess_type(str(path))[0] or "application/octet-stream"
 
 
-def ingest_adaptive(
-    log_name: str,
-    dataset_path: Path,
-    config_path: Path,
-    overrides: dict | None = None,
-) -> dict:
+def ingest_adaptive(log_name, dataset_path, config_path, overrides=None, *, clear_existing=False):
     """POST to the adaptive indexer.  `overrides` is merged into the JSON
     config before sending."""
     config = json.loads(config_path.read_text())
     config["log_name"] = log_name
+    config["clear_existing"] = clear_existing
     if overrides:
         config.update(overrides)
 
@@ -516,10 +512,11 @@ def ingest_adaptive(
     return r.json()
 
 
-def ingest_eager(log_name: str, dataset_path: Path, config_path: Path) -> dict:
+def ingest_eager(log_name, dataset_path, config_path, *, clear_existing=False):
     """POST to the eager (SIESTA) indexer to populate pairs_index."""
     config = json.loads(config_path.read_text())
     config["log_name"] = log_name
+    config["clear_existing"] = clear_existing
     with dataset_path.open("rb") as fp:
         r = requests.post(
             urljoin(API_BASE, f"/{EAGER_INDEXER}/run"),

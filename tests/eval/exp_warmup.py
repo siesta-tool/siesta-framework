@@ -15,8 +15,9 @@ COLD pass  (--no-promote-on-first):
     min_query_count=3.  rep 0 measures the lazy-scan path against an
     empty catalog.  No promotion fires during the measured rep.
     Default --reps 1: only rep 0 is informative for the cold curve.
-    Eager ingest and eager reference are skipped — they are not needed
-    for the cold baseline and would waste time.
+    Eager reference queries are skipped, but the eager ingest still
+    runs because the adaptive system reads from the eager sequence
+    table on demand.
 
 WARM pass  (default):
     min_query_count=1 plus the eager-promotion bypass in
@@ -30,20 +31,35 @@ The intended plot combines both files:
   - rep 0 from the cold file  (pure lazy scan, no build on hot path)
   - reps 1-4 from the warm file (pure Delta reads)
   rep 0 of the warm file carries plot_exclude=True because its latency
-  includes the synchronous build_pair_persistent cost and is therefore
-  not representative of either the cold or the warm steady state.
+  includes the synchronous build_pair_persistent cost.
+
+Ingest model
+------------
+Only the eager indexer is invoked.  It builds the shared sequence_table,
+activity_index, last_checked_table, pairs_index, and count_table.  The
+adaptive system reads from the eager sequence_table on demand:
+  * perspectives are auto-declared at L0 on first query
+  * the PerspectiveCatalog initialises itself when first accessed
+  * promote_to_l1 reads sequence_table directly
+
+`ingest_adaptive` is deliberately NOT called.  Its `run` endpoint
+re-executes `build_sequence_table` against the same path, which
+combined with `update_event_positions` poisons the existing table:
+positions of the second ingest are offset by the trace_metadata max,
+so the MERGE inserts every row a second time and doubles the data.
+`clear_existing=True` on the eager ingest ensures we start each run
+from a clean slate.
 
 Workload
 --------
 With --result-bearing the workload is built from observed pair
-co-occurrences in the eager sequence table (built during warm ingest).
-Pairs are stratified into DENSE / SPARSE / SINGLETON buckets so the
-warmup curve covers the full spectrum of result density.  Perspectives
-with fewer than min_perspective_cardinality groups are skipped.
+co-occurrences in the eager sequence table.  Pairs are stratified into
+DENSE / SPARSE / SINGLETON buckets so the warmup curve covers the full
+spectrum of result density.  Perspectives with fewer than
+`min_perspective_cardinality` groups are skipped.
 
 Without --result-bearing the synthetic all-pairs structural workload
-is used (all ordered activity pairs, all perspectives, no cardinality
-filter).  This is useful for smoke tests and small datasets.
+is used (useful for smoke tests).
 
 Eager comparison
 ----------------
@@ -78,7 +94,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from tests.eval.eval_common import (
     CONFIG_DIR,
     Recorder, health_check,
-    ingest_adaptive, ingest_eager,
+    ingest_eager,
     timed_query, detect_eager,
     resolve_dataset,
 )
@@ -91,7 +107,7 @@ CONFIG = CONFIG_DIR / "adaptive_index.config.json"
 # eager-promotion bypass in retention.py so rep 0 promotes every touched
 # pair to PERSISTENT and reps 1+ read from Delta.
 WARMUP_RETENTION_OVERRIDES = {
-    "min_query_count":   1,
+    "min_query_count":   3,
     "half_life_seconds": 3600.0,
     "hysteresis":        0.15,
 }
@@ -119,10 +135,10 @@ def run_category(
     """
     Run `workload` × `reps` times, recording per-query latency.
 
-    Each record includes `plot_exclude=True` for rep 0 of the warm
-    pass, because that rep's latency includes the synchronous
-    build_pair_persistent cost and should not be plotted alongside
-    either the cold baseline or the warm steady-state readings.
+    Each record carries `plot_exclude=True` for rep 0 of the warm pass,
+    because that rep's latency includes the synchronous
+    build_pair_persistent cost and is not representative of either the
+    cold or the warm steady state.
     """
     print(f"\n── adaptive {category} — {len(workload)} queries × {reps} reps ──")
 
@@ -147,7 +163,7 @@ def run_category(
                     qid=q["id"],
                     pattern=q["pattern"],
                     grouping_keys=q["grouping_keys"],
-                    bucket=q.get("tags", [None])[0],
+                    bucket=(q.get("tags") or [None])[0],
                     group_coverage=q.get("group_coverage"),
                     has_constraints="[" in q["pattern"],
                     latency_s=latency,
@@ -210,7 +226,7 @@ def _load_workload_from_jsonl(path: Path) -> list[dict]:
     """
     Reconstruct the structural workload from an existing warm JSONL so
     the cold pass uses the exact same query set without re-running pair
-    coverage (which requires the eager sequence table).
+    coverage (which requires the eager sequence table to already exist).
     """
     queries: list[dict] = []
     seen_ids: set[str] = set()
@@ -256,8 +272,7 @@ def main() -> None:
                          "pass and 5 for the warm pass.")
     ap.add_argument("--no-promote-on-first", action="store_true",
                     help="COLD pass mode: use min_query_count=3 so no "
-                         "promotion fires during the measured rep.  "
-                         "Skips eager ingest and eager reference.")
+                         "promotion fires during the measured rep.")
     ap.add_argument("--out-suffix", default=None,
                     help="Override the JSONL filename suffix.  Defaults to "
                          "'cold' or 'warm' based on pass mode.")
@@ -266,12 +281,15 @@ def main() -> None:
                          "(DENSE/SPARSE/SINGLETON buckets) instead of the "
                          "synthetic all-pairs structural workload.  Requires "
                          "the eager sequence table, so only usable on the "
-                         "warm pass.  Ignored on the cold pass when "
-                         "--queries-from is supplied.")
+                         "warm pass.  Use --queries-from for the cold pass.")
     ap.add_argument("--queries-from", default=None, metavar="JSONL",
                     help="Load the query set from an existing warm-pass JSONL "
                          "instead of rebuilding it.  Use this for the cold "
                          "pass so both passes share the exact same queries.")
+    ap.add_argument("--skip-ingest", action="store_true",
+                    help="Skip the eager ingest call.  Use when the dataset "
+                         "is already ingested in MinIO and you want to iterate "
+                         "on queries without re-parsing the XES file.")
     args = ap.parse_args()
 
     # ── resolve pass mode ────────────────────────────────────────────────
@@ -282,11 +300,11 @@ def main() -> None:
 
     if is_cold:
         retention_overrides = dict(COLD_RETENTION_OVERRIDES)
-        suffix   = args.out_suffix or "cold"
+        suffix    = args.out_suffix or "cold"
         pass_mode = "cold"
     else:
         retention_overrides = dict(WARMUP_RETENTION_OVERRIDES)
-        suffix   = args.out_suffix or "warm"
+        suffix    = args.out_suffix or "warm"
         pass_mode = "warm"
 
     # ── dataset / context ────────────────────────────────────────────────
@@ -313,19 +331,20 @@ def main() -> None:
     )
 
     # ── ingest ───────────────────────────────────────────────────────────
-    print("\nIngesting (adaptive) ...")
-    ingest_adaptive(spec.log_name, spec.path, CONFIG,
-                    overrides=retention_overrides)
-    if not is_cold:
-        print("Ingesting (eager) ...")
-        ingest_eager(spec.log_name, spec.path, CONFIG)
+    # Only eager ingest runs.  See module docstring "Ingest model" for why
+    # ingest_adaptive is intentionally skipped.  clear_existing=True wipes
+    # all tables under the log_name so we start clean every run.
+    if args.skip_ingest:
+        print("\nSkipping ingest (--skip-ingest).")
+    else:
+        print("\nIngesting (eager, clear_existing=True) ...")
+        ingest_eager(spec.log_name, spec.path, CONFIG, clear_existing=True)
     rec.emit("ingest_complete", log_name=spec.log_name)
     time.sleep(2)
 
     # ── workload construction ─────────────────────────────────────────────
-    # Done AFTER ingest so the eager sequence table exists for pair_coverage.
+    # Done AFTER ingest so the eager sequence_table exists for pair_coverage.
     if args.queries_from:
-        # Reuse queries from an existing warm JSONL (typical cold-pass usage).
         queries_path = Path(args.queries_from)
         if not queries_path.exists():
             ap.error(f"--queries-from: file not found: {queries_path}")
@@ -341,7 +360,8 @@ def main() -> None:
         ap.error(
             "--result-bearing requires the eager sequence table which is only "
             "built during the warm pass.  Run the warm pass first, then use "
-            "--queries-from results/6_3_1_warmup_warm.jsonl for the cold pass."
+            "--queries-from tests/eval/results/6_3_1_warmup_warm.jsonl for "
+            "the cold pass."
         )
     else:
         structural = workloads.structural
