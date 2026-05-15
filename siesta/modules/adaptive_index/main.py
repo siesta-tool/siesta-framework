@@ -215,12 +215,14 @@ class Adaptive_Indexing(SiestaModule):
 
     _catalog:        Any   # PerspectiveCatalog | None
     _retention:      Any   # RetentionPolicy | None
+    _retention_params: tuple | None
 
     def __init__(self):
         super().__init__()
         self.index_config    = {}
         self._catalog        = None
         self._retention      = None
+        self._retention_params = None
 
     # ------------------------------------------------------------------
     # Framework hooks
@@ -301,6 +303,7 @@ class Adaptive_Indexing(SiestaModule):
                 storage_type=self.index_config.get("storage_type", "s3"),
             )
             evict_catalog(candidate)
+            self._retention_params = None
             self._catalog        = None
             self._retention      = None
             logger.info(
@@ -485,20 +488,31 @@ class Adaptive_Indexing(SiestaModule):
             )
             self.storage.read_metadata_table(self.metadata)
             self._catalog = get_catalog(self.metadata, self.storage)
+
+        # Rebuild the retention policy whenever request-level overrides
+        # differ from the cached values.  Stateless, so this is free.
+        retention_params = (
+            float(self.index_config.get(
+                "half_life_seconds",
+                DEFAULT_ADAPTIVE_INDEX_CONFIG["half_life_seconds"],
+            )),
+            int(self.index_config.get(
+                "min_query_count",
+                DEFAULT_ADAPTIVE_INDEX_CONFIG["min_query_count"],
+            )),
+            float(self.index_config.get(
+                "hysteresis",
+                DEFAULT_ADAPTIVE_INDEX_CONFIG["hysteresis"],
+            )),
+        )
+        if self._retention is None or self._retention_params != retention_params:
             self._retention = RetentionPolicy(
-                half_life_seconds=self.index_config.get(
-                    "half_life_seconds",
-                    DEFAULT_ADAPTIVE_INDEX_CONFIG["half_life_seconds"],
-                ),
-                min_query_count=self.index_config.get(
-                    "min_query_count",
-                    DEFAULT_ADAPTIVE_INDEX_CONFIG["min_query_count"],
-                ),
-                hysteresis=self.index_config.get(
-                    "hysteresis",
-                    DEFAULT_ADAPTIVE_INDEX_CONFIG["hysteresis"],
-                ),
+                half_life_seconds=retention_params[0],
+                min_query_count=retention_params[1],
+                hysteresis=retention_params[2],
             )
+            self._retention_params = retention_params
+            
         # ----------------------------------------------------------------
         # Step 1a  Sequence Table
         # ----------------------------------------------------------------

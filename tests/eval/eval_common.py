@@ -132,9 +132,11 @@ class DatasetSchema:
 
     `attribute_values` maps attribute_key -> list of distinct values
     observed (truncated to a configurable cap to keep memory bounded).
-    `perspective_keys` lists string-typed attributes that make sensible
-    grouping keys (resource, role, etc.) — numeric attributes like
-    `cost` are filtered out.
+    `perspective_keys` lists string-typed event-level attributes that
+    make sensible grouping keys — numeric attributes, boolean flags, and
+    case-level metadata (values constant within a trace) are filtered out.
+    Sorted by cardinality ascending so the workload builder sees the
+    lowest-cardinality perspectives first.
     """
     activities: list[str]
     attribute_values: dict[str, list[str]]
@@ -161,93 +163,182 @@ _BLOCKED_KEYS = {
 _XES_ATTR_TAGS = {"string", "date", "int", "float", "boolean", "id"}
 _XES_NS_RE = re.compile(r"^\{[^}]+\}")
 
+# Threshold for event-level vs case-level classification.  An attribute
+# whose average distinct-value count per trace is at or below this
+# threshold is treated as case-level (value constant within each trace)
+# and excluded from perspective candidates.  1.2 is conservative: it
+# absorbs rare cases where a trace has two slightly different values for
+# an attribute that is conceptually per-case, while still catching true
+# event-level attributes (org:resource averages 4-10+ per trace).
+_EVENT_LEVEL_DPT_THRESHOLD = 1.2
+
 
 def _strip_ns(tag: str) -> str:
     return _XES_NS_RE.sub("", tag)
 
 
-def discover_schema(
-    dataset_path: Path,
-    *,
-    max_events: int = 5000,
-    max_values_per_key: int = 20,
-    perspective_cardinality_cap: int = 20,
-) -> DatasetSchema:
-    """
-    Read the first `max_events` events of a CSV or XES log and summarise
-    activities, observed attribute values, and likely perspective keys.
-
-    The result is used by the workload builders to derive realistic
-    inline-bracket patterns (e.g. ``A[cost="5.0"] B``) without requiring
-    the user to hand-curate per-dataset constants.
-    """
-    fmt = dataset_path.suffix.lower().lstrip(".")
-    if fmt == "csv":
-        return _discover_schema_csv(
-            dataset_path, max_events, max_values_per_key,
-            perspective_cardinality_cap,
-        )
-    if fmt == "xes":
-        return _discover_schema_xes(
-            dataset_path, max_events, max_values_per_key,
-            perspective_cardinality_cap,
-        )
-    raise ValueError(f"Unsupported dataset format: {fmt!r}")
+def _looks_numeric(s: str) -> bool:
+    try:
+        float(s)
+        return True
+    except (TypeError, ValueError):
+        return False
 
 
 def _select_perspectives(
     values: dict[str, list[str]],
     distinct_counts: dict[str, set[str]],
     numeric_keys: set[str],
+    *,
+    per_trace_distinct_sum: dict[str, int],
+    traces_with_attr: dict[str, int],
     cardinality_cap: int,
+    cardinality_floor: int,
+    event_level_threshold: float,
 ) -> list[str]:
     """
     Pick attribute keys that make sensible grouping perspectives.
 
-    Excludes numeric attributes and attributes whose distinct-value count
-    exceeds `cardinality_cap` (filters out free-text fields like sepsis'
-    "Diagnose").  Single-value attributes are kept — they yield a single
-    bucket, which still exercises the perspective machinery.
+    Filtering rules (all must hold):
+      1. Not a numeric attribute.
+      2. Cardinality in [cardinality_floor, cardinality_cap].
+      3. Event-level: avg distinct values per trace > event_level_threshold.
+         This removes case-level metadata lifted onto every event (e.g.
+         loan amount, patient age, document type when constant per case).
+
+    Result is sorted by cardinality ascending so the workload builder
+    picks representatives across the full group-size range.
     """
-    return sorted(
-        k for k in values
-        if k not in numeric_keys
-        and len(distinct_counts[k]) <= cardinality_cap
-    )
+    candidates: list[tuple[str, int]] = []
+    for k in values:
+        if k in numeric_keys:
+            continue
+        n_dist = len(distinct_counts[k])
+        if not (cardinality_floor <= n_dist <= cardinality_cap):
+            continue
+        traces_seen = traces_with_attr.get(k, 0)
+        if traces_seen == 0:
+            continue
+        avg_dpt = per_trace_distinct_sum.get(k, 0) / traces_seen
+        if avg_dpt <= event_level_threshold:
+            continue
+        candidates.append((k, n_dist))
+
+    candidates.sort(key=lambda kv: (kv[1], kv[0]))
+    return [k for k, _ in candidates]
+
+
+def discover_schema(
+    dataset_path: Path,
+    *,
+    max_events: int = 200_000,
+    max_values_per_key: int = 50,
+    perspective_cardinality_cap: int = 500,
+    perspective_cardinality_floor: int = 3,
+    event_level_dpt_threshold: float = _EVENT_LEVEL_DPT_THRESHOLD,
+) -> DatasetSchema:
+    """
+    Read up to `max_events` events of a CSV or XES log and summarise
+    activities, observed attribute values, and likely perspective keys.
+
+    A perspective key is an attribute that:
+      - is non-numeric
+      - has between `perspective_cardinality_floor` and
+        `perspective_cardinality_cap` distinct values
+      - varies within at least some traces (event-level, not case-level)
+
+    The result is used by the workload builders to derive realistic
+    patterns and grouping keys without requiring per-dataset constants.
+    """
+    fmt = dataset_path.suffix.lower().lstrip(".")
+    if fmt == "csv":
+        return _discover_schema_csv(
+            dataset_path, max_events, max_values_per_key,
+            perspective_cardinality_cap, perspective_cardinality_floor,
+            event_level_dpt_threshold,
+        )
+    if fmt == "xes":
+        return _discover_schema_xes(
+            dataset_path, max_events, max_values_per_key,
+            perspective_cardinality_cap, perspective_cardinality_floor,
+            event_level_dpt_threshold,
+        )
+    raise ValueError(f"Unsupported dataset format: {fmt!r}")
 
 
 def _discover_schema_csv(
-    path: Path, max_events: int, max_values: int, cardinality_cap: int,
+    path: Path,
+    max_events: int,
+    max_values: int,
+    cardinality_cap: int,
+    cardinality_floor: int,
+    event_level_threshold: float,
 ) -> DatasetSchema:
     activities: list[str] = []
     activity_set: set[str] = set()
     values: dict[str, list[str]] = defaultdict(list)
     distinct_counts: dict[str, set[str]] = defaultdict(set)
-    numeric_keys: set[str] = set()
+    numeric_counts: dict[str, int] = defaultdict(int)
+    total_counts: dict[str, int] = defaultdict(int)
+    per_trace_distinct_sum: dict[str, int] = defaultdict(int)
+    traces_with_attr: dict[str, int] = defaultdict(int)
+
+    cur_trace_id: str | None = None
+    trace_local: dict[str, set[str]] = {}
 
     n = 0
     with path.open("r", newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            if n >= max_events:
+            if max_events and n >= max_events:
                 break
             n += 1
+            tid = (
+                row.get("trace_id")
+                or row.get("case:concept:name")
+                or row.get("case_id")
+            )
+            if tid != cur_trace_id and cur_trace_id is not None:
+                for k, vset in trace_local.items():
+                    per_trace_distinct_sum[k] += len(vset)
+                    traces_with_attr[k] += 1
+                trace_local.clear()
+            cur_trace_id = tid
+
             act = row.get("activity") or row.get("concept:name")
             if act and act not in activity_set:
                 activity_set.add(act)
                 activities.append(act)
+
             for k, v in row.items():
                 if k in _BLOCKED_KEYS or v is None or v == "":
                     continue
+                total_counts[k] += 1
+                if _looks_numeric(v):
+                    numeric_counts[k] += 1
                 if v not in distinct_counts[k]:
                     distinct_counts[k].add(v)
                     if len(values[k]) < max_values:
                         values[k].append(v)
-                if _looks_numeric(v):
-                    numeric_keys.add(k)
+                trace_local.setdefault(k, set()).add(v)
+
+    # Flush the last trace.
+    for k, vset in trace_local.items():
+        per_trace_distinct_sum[k] += len(vset)
+        traces_with_attr[k] += 1
+
+    numeric_keys = {
+        k for k, cnt in numeric_counts.items()
+        if total_counts[k] and cnt / total_counts[k] > 0.95
+    }
 
     perspectives = _select_perspectives(
-        values, distinct_counts, numeric_keys, cardinality_cap,
+        values, distinct_counts, numeric_keys,
+        per_trace_distinct_sum=per_trace_distinct_sum,
+        traces_with_attr=traces_with_attr,
+        cardinality_cap=cardinality_cap,
+        cardinality_floor=cardinality_floor,
+        event_level_threshold=event_level_threshold,
     )
     return DatasetSchema(
         activities=activities,
@@ -258,23 +349,42 @@ def _discover_schema_csv(
 
 
 def _discover_schema_xes(
-    path: Path, max_events: int, max_values: int, cardinality_cap: int,
+    path: Path,
+    max_events: int,
+    max_values: int,
+    cardinality_cap: int,
+    cardinality_floor: int,
+    event_level_threshold: float,
 ) -> DatasetSchema:
     activities: list[str] = []
     activity_set: set[str] = set()
     values: dict[str, list[str]] = defaultdict(list)
     distinct_counts: dict[str, set[str]] = defaultdict(set)
-    numeric_keys: set[str] = set()
+    numeric_counts: dict[str, int] = defaultdict(int)
+    total_counts: dict[str, int] = defaultdict(int)
+    per_trace_distinct_sum: dict[str, int] = defaultdict(int)
+    traces_with_attr: dict[str, int] = defaultdict(int)
 
-    n = 0
-    context = ET.iterparse(str(path), events=("start", "end"))
-    in_event = False
+    trace_local: dict[str, set[str]] = {}
     cur_attrs: dict[str, str] = {}
+    in_event = False
+    n = 0
+
+    context = ET.iterparse(str(path), events=("start", "end"))
     for ev, elem in context:
         tag = _strip_ns(elem.tag)
-        if ev == "start" and tag == "event":
+
+        if ev == "end" and tag == "trace":
+            for k, vset in trace_local.items():
+                per_trace_distinct_sum[k] += len(vset)
+                traces_with_attr[k] += 1
+            trace_local.clear()
+            elem.clear()
+
+        elif ev == "start" and tag == "event":
             in_event = True
             cur_attrs = {}
+
         elif ev == "end" and tag == "event":
             act = cur_attrs.get("concept:name")
             if act and act not in activity_set:
@@ -283,27 +393,42 @@ def _discover_schema_xes(
             for k, v in cur_attrs.items():
                 if k in _BLOCKED_KEYS:
                     continue
+                total_counts[k] += 1
+                if _looks_numeric(v):
+                    numeric_counts[k] += 1
                 if v not in distinct_counts[k]:
                     distinct_counts[k].add(v)
                     if len(values[k]) < max_values:
                         values[k].append(v)
-                if _looks_numeric(v) and tag in _XES_ATTR_TAGS:
-                    numeric_keys.add(k)
+                trace_local.setdefault(k, set()).add(v)
             in_event = False
             elem.clear()
             n += 1
-            if n >= max_events:
+            if max_events and n >= max_events:
+                # Flush in-progress trace before stopping.
+                for k, vset in trace_local.items():
+                    per_trace_distinct_sum[k] += len(vset)
+                    traces_with_attr[k] += 1
                 break
+
         elif ev == "end" and in_event and tag in _XES_ATTR_TAGS:
             k = elem.attrib.get("key")
             v = elem.attrib.get("value")
             if k and v is not None:
                 cur_attrs[k] = v
-                if tag in {"int", "float"} and _looks_numeric(v):
-                    numeric_keys.add(k)
+
+    numeric_keys = {
+        k for k, cnt in numeric_counts.items()
+        if total_counts[k] and cnt / total_counts[k] > 0.95
+    }
 
     perspectives = _select_perspectives(
-        values, distinct_counts, numeric_keys, cardinality_cap,
+        values, distinct_counts, numeric_keys,
+        per_trace_distinct_sum=per_trace_distinct_sum,
+        traces_with_attr=traces_with_attr,
+        cardinality_cap=cardinality_cap,
+        cardinality_floor=cardinality_floor,
+        event_level_threshold=event_level_threshold,
     )
     return DatasetSchema(
         activities=activities,
@@ -311,14 +436,6 @@ def _discover_schema_xes(
         perspective_keys=perspectives,
         sampled_events=n,
     )
-
-
-def _looks_numeric(s: str) -> bool:
-    try:
-        float(s)
-        return True
-    except (TypeError, ValueError):
-        return False
 
 
 # ---------------------------------------------------------------------------

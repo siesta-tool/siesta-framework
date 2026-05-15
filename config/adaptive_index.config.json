@@ -24,8 +24,5 @@
   },
   "trace_level_fields": ["trace_id"],
   "timestamp_fields": ["start_timestamp"],
-  "perspectives": [
-    {"grouping_keys": ["resource"]}
-  ],
   "half_life_seconds": 300
 }

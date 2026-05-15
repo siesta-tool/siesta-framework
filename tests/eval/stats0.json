@@ -1,0 +1,1325 @@
+[
+  {
+    "path": "/mnt/datasets/bpic2011.xes",
+    "format": "xes",
+    "events_scanned": 150291,
+    "truncated": false,
+    "activities": 624,
+    "activity_sample": [
+      "1e consult poliklinisch",
+      "administratief tarief       - eerste pol",
+      "verlosk.-gynaec. korte kaart kosten-out",
+      "echografie  - genitalia interna",
+      "simulator - gebruik voor aanvang megavol",
+      "behandeltijd - eenheid t3 - megavolt",
+      "teletherapie - megavolt fotonen bestrali",
+      "aanname laboratoriumonderzoek",
+      "ureum",
+      "hemoglobine foto-elektrisch"
+    ],
+    "traces": 1143,
+    "attrs": [
+      {
+        "key": "Activity code",
+        "distinct": 675,
+        "samples": [
+          "410100",
+          "419100",
+          "10107",
+          "339486E",
+          "390520"
+        ],
+        "numeric_count": 116375,
+        "boolean_like": false,
+        "avg_len": 6.2,
+        "type_guess": "HIGH_CARD",
+        "verdict": "GOOD"
+      },
+      {
+        "key": "Number of executions",
+        "distinct": 37,
+        "samples": [
+          "1",
+          "-1",
+          "200",
+          "100",
+          "4"
+        ],
+        "numeric_count": 150291,
+        "boolean_like": false,
+        "avg_len": 1.0,
+        "type_guess": "NUMERIC",
+        "verdict": "NUMERIC"
+      },
+      {
+        "key": "Producer code",
+        "distinct": 117,
+        "samples": [
+          "SRTH",
+          "SGEH",
+          "SGEC",
+          "RATH",
+          "CRLA"
+        ],
+        "numeric_count": 0,
+        "boolean_like": false,
+        "avg_len": 4.0,
+        "type_guess": "CATEGORICAL",
+        "verdict": "GOOD"
+      },
+      {
+        "key": "Section",
+        "distinct": 7,
+        "samples": [
+          "Section 5",
+          "Section 2",
+          "Section 4",
+          "Section 1",
+          "Section 3"
+        ],
+        "numeric_count": 0,
+        "boolean_like": false,
+        "avg_len": 9.0,
+        "type_guess": "CATEGORICAL",
+        "verdict": "GOOD"
+      },
+      {
+        "key": "Specialism code",
+        "distinct": 25,
+        "samples": [
+          "61",
+          "7",
+          "86",
+          "87",
+          "13"
+        ],
+        "numeric_count": 150291,
+        "boolean_like": false,
+        "avg_len": 1.7,
+        "type_guess": "NUMERIC",
+        "verdict": "NUMERIC"
+      },
+      {
+        "key": "lifecycle:transition",
+        "distinct": 1,
+        "samples": [
+          "complete"
+        ],
+        "numeric_count": 0,
+        "boolean_like": false,
+        "avg_len": 8.0,
+        "type_guess": "SINGLETON",
+        "verdict": "TOO_LOW"
+      },
+      {
+        "key": "org:group",
+        "distinct": 42,
+        "samples": [
+          "Radiotherapy",
+          "Nursing ward",
+          "Obstetrics & Gynaecology clinic",
+          "General Lab Clinical Chemistry",
+          "Medical Microbiology"
+        ],
+        "numeric_count": 0,
+        "boolean_like": false,
+        "avg_len": 24.7,
+        "type_guess": "CATEGORICAL",
+        "verdict": "GOOD"
+      }
+    ]
+  },
+  {
+    "path": "/mnt/datasets/bpic2012.xes",
+    "format": "xes",
+    "events_scanned": 262200,
+    "truncated": false,
+    "activities": 24,
+    "activity_sample": [
+      "A_SUBMITTED",
+      "A_PARTLYSUBMITTED",
+      "A_PREACCEPTED",
+      "W_Completeren aanvraag",
+      "A_ACCEPTED",
+      "O_SELECTED",
+      "A_FINALIZED",
+      "O_CREATED",
+      "O_SENT",
+      "W_Nabellen offertes"
+    ],
+    "traces": 13087,
+    "attrs": [
+      {
+        "key": "lifecycle:transition",
+        "distinct": 3,
+        "samples": [
+          "COMPLETE",
+          "SCHEDULE",
+          "START"
+        ],
+        "numeric_count": 0,
+        "boolean_like": false,
+        "avg_len": 7.2,
+        "type_guess": "CATEGORICAL",
+        "verdict": "GOOD"
+      },
+      {
+        "key": "org:resource",
+        "distinct": 68,
+        "samples": [
+          "112",
+          "10862",
+          "10913",
+          "11049",
+          "10629"
+        ],
+        "numeric_count": 244190,
+        "boolean_like": false,
+        "avg_len": 4.6,
+        "type_guess": "CATEGORICAL",
+        "verdict": "GOOD"
+      }
+    ]
+  },
+  {
+    "path": "/mnt/datasets/bpic2015.xes",
+    "format": "xes",
+    "events_scanned": 52217,
+    "truncated": false,
+    "activities": 398,
+    "activity_sample": [
+      "01_HOOFD_010",
+      "01_HOOFD_011",
+      "01_HOOFD_020",
+      "02_DRZ_010",
+      "04_BPT_005",
+      "01_HOOFD_065_0",
+      "01_HOOFD_110_0",
+      "01_HOOFD_100_0",
+      "01_HOOFD_015",
+      "01_HOOFD_061"
+    ],
+    "traces": 1199,
+    "attrs": [
+      {
+        "key": "action_code",
+        "distinct": 397,
+        "samples": [
+          "01_HOOFD_010",
+          "01_HOOFD_011",
+          "01_HOOFD_020",
+          "02_DRZ_010",
+          "04_BPT_005"
+        ],
+        "numeric_count": 0,
+        "boolean_like": false,
+        "avg_len": 12.4,
+        "type_guess": "HIGH_CARD",
+        "verdict": "GOOD"
+      },
+      {
+        "key": "activityNameEN",
+        "distinct": 289,
+        "samples": [
+          "register submission date request",
+          "OLO messaging active",
+          "send confirmation receipt",
+          "forward to the competent authority",
+          "regular procedure without MER"
+        ],
+        "numeric_count": 0,
+        "boolean_like": false,
+        "avg_len": 28.6,
+        "type_guess": "HIGH_CARD",
+        "verdict": "GOOD"
+      },
+      {
+        "key": "activityNameNL",
+        "distinct": 289,
+        "samples": [
+          "registratie datum binnenkomst aanvraag",
+          "OLO berichtenverkeer actief",
+          "versturen ontvangstbevestiging",
+          "doorsturen aan bevoegd gezag",
+          "reguliere procedure zonder MER"
+        ],
+        "numeric_count": 0,
+        "boolean_like": false,
+        "avg_len": 32.3,
+        "type_guess": "HIGH_CARD",
+        "verdict": "GOOD"
+      },
+      {
+        "key": "dateFinished",
+        "distinct": 5566,
+        "samples": [
+          "2014-04-14 00:00:00",
+          "2014-05-20 00:00:00",
+          "2014-06-04 00:00:00",
+          "2014-04-17 00:00:00",
+          "2014-05-27 00:00:00"
+        ],
+        "numeric_count": 0,
+        "boolean_like": false,
+        "avg_len": 19.0,
+        "type_guess": "HIGH_CARD",
+        "verdict": "TOO_HIGH"
+      },
+      {
+        "key": "dateStop",
+        "distinct": 2,
+        "samples": [
+          "2012-04-03 10:48:53",
+          "2012-04-17 12:35:24"
+        ],
+        "numeric_count": 0,
+        "boolean_like": false,
+        "avg_len": 19.0,
+        "type_guess": "CATEGORICAL",
+        "verdict": "TOO_LOW"
+      },
+      {
+        "key": "dueDate",
+        "distinct": 3340,
+        "samples": [
+          "2014-04-17T09:30:39+02:00",
+          "2014-04-21T09:37:17+02:00",
+          "2014-04-24T14:38:13+02:00",
+          "2014-04-22T14:26:41+02:00",
+          "2014-04-22T14:56:35+02:00"
+        ],
+        "numeric_count": 0,
+        "boolean_like": false,
+        "avg_len": 25.0,
+        "type_guess": "HIGH_CARD",
+        "verdict": "TOO_HIGH"
+      },
+      {
+        "key": "lifecycle:transition",
+        "distinct": 1,
+        "samples": [
+          "complete"
+        ],
+        "numeric_count": 0,
+        "boolean_like": false,
+        "avg_len": 8.0,
+        "type_guess": "SINGLETON",
+        "verdict": "TOO_LOW"
+      },
+      {
+        "key": "monitoringResource",
+        "distinct": 26,
+        "samples": [
+          "2670601",
+          "560912",
+          "560872",
+          "560890",
+          "9264148"
+        ],
+        "numeric_count": 52217,
+        "boolean_like": false,
+        "avg_len": 6.6,
+        "type_guess": "NUMERIC",
+        "verdict": "NUMERIC"
+      },
+      {
+        "key": "org:resource",
+        "distinct": 23,
+        "samples": [
+          "9264148",
+          "2670601",
+          "560912",
+          "560872",
+          "560890"
+        ],
+        "numeric_count": 52217,
+        "boolean_like": false,
+        "avg_len": 6.4,
+        "type_guess": "NUMERIC",
+        "verdict": "NUMERIC"
+      },
+      {
+        "key": "planned",
+        "distinct": 38879,
+        "samples": [
+          "2014-04-15T09:30:39+02:00",
+          "2014-04-15T09:34:03+02:00",
+          "2014-04-15T09:37:17+02:00",
+          "2014-04-15T09:37:22+02:00",
+          "2014-04-15T09:37:24+02:00"
+        ],
+        "numeric_count": 0,
+        "boolean_like": false,
+        "avg_len": 25.0,
+        "type_guess": "HIGH_CARD",
+        "verdict": "TOO_HIGH"
+      },
+      {
+        "key": "question",
+        "distinct": 422,
+        "samples": [
+          "EMPTY",
+          "False",
+          "True",
+          "42",
+          "13-6-2014 0:00:00"
+        ],
+        "numeric_count": 1050,
+        "boolean_like": false,
+        "avg_len": 5.0,
+        "type_guess": "HIGH_CARD",
+        "verdict": "GOOD"
+      }
+    ]
+  },
+  {
+    "path": "/mnt/datasets/bpic2017.xes",
+    "format": "xes",
+    "events_scanned": 1202267,
+    "truncated": false,
+    "activities": 26,
+    "activity_sample": [
+      "A_Create Application",
+      "A_Submitted",
+      "W_Handle leads",
+      "W_Complete application",
+      "A_Concept",
+      "A_Accepted",
+      "O_Create Offer",
+      "O_Created",
+      "O_Sent (mail and online)",
+      "W_Call after offers"
+    ],
+    "traces": 31509,
+    "attrs": [
+      {
+        "key": "Accepted",
+        "distinct": 2,
+        "samples": [
+          "true",
+          "false"
+        ],
+        "numeric_count": 0,
+        "boolean_like": true,
+        "avg_len": 4.3,
+        "type_guess": "BOOLEAN",
+        "verdict": "DEGENERATE_BOOL"
+      },
+      {
+        "key": "Action",
+        "distinct": 5,
+        "samples": [
+          "Created",
+          "statechange",
+          "Deleted",
+          "Obtained",
+          "Released"
+        ],
+        "numeric_count": 0,
+        "boolean_like": false,
+        "avg_len": 8.6,
+        "type_guess": "CATEGORICAL",
+        "verdict": "GOOD"
+      },
+      {
+        "key": "CreditScore",
+        "distinct": 520,
+        "samples": [
+          "979",
+          "0",
+          "1059",
+          "834",
+          "799"
+        ],
+        "numeric_count": 42995,
+        "boolean_like": false,
+        "avg_len": 1.8,
+        "type_guess": "HIGH_CARD",
+        "verdict": "GOOD"
+      },
+      {
+        "key": "EventID",
+        "distinct": 1202267,
+        "samples": [
+          "Application_652823628",
+          "ApplState_1582051990",
+          "Workitem_1298499574",
+          "Workitem_1673366067",
+          "Workitem_1493664571"
+        ],
+        "numeric_count": 0,
+        "boolean_like": false,
+        "avg_len": 18.9,
+        "type_guess": "HIGH_CARD",
+        "verdict": "TOO_HIGH"
+      },
+      {
+        "key": "EventOrigin",
+        "distinct": 3,
+        "samples": [
+          "Application",
+          "Workflow",
+          "Offer"
+        ],
+        "numeric_count": 0,
+        "boolean_like": false,
+        "avg_len": 8.1,
+        "type_guess": "CATEGORICAL",
+        "verdict": "GOOD"
+      },
+      {
+        "key": "FirstWithdrawalAmount",
+        "distinct": 5930,
+        "samples": [
+          "20000.0",
+          "500.0",
+          "15000.0",
+          "3726.0",
+          "35000.0"
+        ],
+        "numeric_count": 42995,
+        "boolean_like": false,
+        "avg_len": 5.4,
+        "type_guess": "HIGH_CARD",
+        "verdict": "TOO_HIGH"
+      },
+      {
+        "key": "MonthlyCost",
+        "distinct": 5816,
+        "samples": [
+          "498.29",
+          "200.0",
+          "158.98",
+          "198.65",
+          "252.73"
+        ],
+        "numeric_count": 42995,
+        "boolean_like": false,
+        "avg_len": 5.5,
+        "type_guess": "HIGH_CARD",
+        "verdict": "TOO_HIGH"
+      },
+      {
+        "key": "NumberOfTerms",
+        "distinct": 147,
+        "samples": [
+          "44",
+          "33",
+          "120",
+          "96",
+          "72"
+        ],
+        "numeric_count": 42995,
+        "boolean_like": false,
+        "avg_len": 2.4,
+        "type_guess": "CATEGORICAL",
+        "verdict": "GOOD"
+      },
+      {
+        "key": "OfferID",
+        "distinct": 42995,
+        "samples": [
+          "Offer_148581083",
+          "Offer_1669071500",
+          "Offer_1209840642",
+          "Offer_997411923",
+          "Offer_1319158006"
+        ],
+        "numeric_count": 0,
+        "boolean_like": false,
+        "avg_len": 15.5,
+        "type_guess": "HIGH_CARD",
+        "verdict": "TOO_HIGH"
+      },
+      {
+        "key": "OfferedAmount",
+        "distinct": 663,
+        "samples": [
+          "20000.0",
+          "6000.0",
+          "15000.0",
+          "15700.0",
+          "35000.0"
+        ],
+        "numeric_count": 42995,
+        "boolean_like": false,
+        "avg_len": 6.7,
+        "type_guess": "HIGH_CARD",
+        "verdict": "GOOD"
+      },
+      {
+        "key": "Selected",
+        "distinct": 2,
+        "samples": [
+          "true",
+          "false"
+        ],
+        "numeric_count": 0,
+        "boolean_like": true,
+        "avg_len": 4.5,
+        "type_guess": "BOOLEAN",
+        "verdict": "DEGENERATE_BOOL"
+      },
+      {
+        "key": "lifecycle:transition",
+        "distinct": 7,
+        "samples": [
+          "complete",
+          "schedule",
+          "withdraw",
+          "start",
+          "suspend"
+        ],
+        "numeric_count": 0,
+        "boolean_like": false,
+        "avg_len": 7.4,
+        "type_guess": "CATEGORICAL",
+        "verdict": "GOOD"
+      },
+      {
+        "key": "org:resource",
+        "distinct": 149,
+        "samples": [
+          "User_1",
+          "User_17",
+          "User_52",
+          "User_11",
+          "User_117"
+        ],
+        "numeric_count": 0,
+        "boolean_like": false,
+        "avg_len": 7.0,
+        "type_guess": "CATEGORICAL",
+        "verdict": "GOOD"
+      }
+    ]
+  },
+  {
+    "path": "/mnt/datasets/bpic2018.xes",
+    "format": "xes",
+    "events_scanned": 2514266,
+    "truncated": false,
+    "activities": 41,
+    "activity_sample": [
+      "mail income",
+      "mail valid",
+      "initialize",
+      "begin editing",
+      "finish editing",
+      "save",
+      "insert document",
+      "performed",
+      "calculate",
+      "decide"
+    ],
+    "traces": 43809,
+    "attrs": [
+      {
+        "key": "docid",
+        "distinct": 225270,
+        "samples": [
+          "-18008611495569447",
+          "-18008615298673397",
+          "-72051858488795160",
+          "-72051858488795087",
+          "-54037444591557142"
+        ],
+        "numeric_count": 2514266,
+        "boolean_like": false,
+        "avg_len": 18.0,
+        "type_guess": "NUMERIC",
+        "verdict": "NUMERIC"
+      },
+      {
+        "key": "docid_uuid",
+        "distinct": 225270,
+        "samples": [
+          "CD3DC291-76C6-420A-B3F1-7C808970915B",
+          "7CB69360-6D10-426F-A426-DDE3E24E4334",
+          "CCBAA174-CDD7-4D32-892E-F14197C65B8A",
+          "EBC916E3-4569-4261-BA02-E49C5B5ED730",
+          "76392148-6105-434D-9CD8-66BDD62F3B31"
+        ],
+        "numeric_count": 0,
+        "boolean_like": false,
+        "avg_len": 36.0,
+        "type_guess": "HIGH_CARD",
+        "verdict": "TOO_HIGH"
+      },
+      {
+        "key": "doctype",
+        "distinct": 8,
+        "samples": [
+          "Payment application",
+          "Entitlement application",
+          "Parcel document",
+          "Control summary",
+          "Reference alignment"
+        ],
+        "numeric_count": 0,
+        "boolean_like": false,
+        "avg_len": 18.4,
+        "type_guess": "CATEGORICAL",
+        "verdict": "GOOD"
+      },
+      {
+        "key": "eventid",
+        "distinct": 2396133,
+        "samples": [
+          "null",
+          "-72051858488795157",
+          "-72051858488795084",
+          "-72051858488795082",
+          "-72051858488795081"
+        ],
+        "numeric_count": 2396132,
+        "boolean_like": false,
+        "avg_len": 17.5,
+        "type_guess": "NUMERIC",
+        "verdict": "NUMERIC"
+      },
+      {
+        "key": "identity:id",
+        "distinct": 2514266,
+        "samples": [
+          "510B5333-731A-40FD-B7D6-FC149E50E961",
+          "F1DD45EF-80BF-46A5-97D6-CC5886DD2D23",
+          "AA02CA32-D021-4264-A7CB-660A9D603EFC",
+          "097D1E41-3CDB-4652-ABF1-EAEFC0410FA0",
+          "96CBE6E6-9774-4DF8-842B-073F4FDCE2B8"
+        ],
+        "numeric_count": 0,
+        "boolean_like": false,
+        "avg_len": 36.0,
+        "type_guess": "HIGH_CARD",
+        "verdict": "TOO_HIGH"
+      },
+      {
+        "key": "lifecycle:transition",
+        "distinct": 1,
+        "samples": [
+          "complete"
+        ],
+        "numeric_count": 0,
+        "boolean_like": false,
+        "avg_len": 8.0,
+        "type_guess": "SINGLETON",
+        "verdict": "TOO_LOW"
+      },
+      {
+        "key": "note",
+        "distinct": 138,
+        "samples": [
+          "none",
+          "automatic",
+          "automatic during payment",
+          "change by department",
+          "manual note"
+        ],
+        "numeric_count": 0,
+        "boolean_like": false,
+        "avg_len": 7.9,
+        "type_guess": "CATEGORICAL",
+        "verdict": "GOOD"
+      },
+      {
+        "key": "org:resource",
+        "distinct": 165,
+        "samples": [
+          "0;n/a",
+          "fb5fa8",
+          "dde669",
+          "Reference alignment processor",
+          "727350"
+        ],
+        "numeric_count": 837612,
+        "boolean_like": false,
+        "avg_len": 11.5,
+        "type_guess": "CATEGORICAL",
+        "verdict": "GOOD"
+      },
+      {
+        "key": "subprocess",
+        "distinct": 8,
+        "samples": [
+          "Application",
+          "Main",
+          "Change",
+          "Remote",
+          "On-Site"
+        ],
+        "numeric_count": 0,
+        "boolean_like": false,
+        "avg_len": 7.6,
+        "type_guess": "CATEGORICAL",
+        "verdict": "GOOD"
+      },
+      {
+        "key": "success",
+        "distinct": 2,
+        "samples": [
+          "true",
+          "false"
+        ],
+        "numeric_count": 0,
+        "boolean_like": true,
+        "avg_len": 4.0,
+        "type_guess": "BOOLEAN",
+        "verdict": "DEGENERATE_BOOL"
+      }
+    ]
+  },
+  {
+    "path": "/mnt/datasets/bpic2019.xes",
+    "format": "xes",
+    "events_scanned": 1595923,
+    "truncated": false,
+    "activities": 42,
+    "activity_sample": [
+      "SRM: Created",
+      "SRM: Complete",
+      "SRM: Awaiting Approval",
+      "SRM: Document Completed",
+      "SRM: In Transfer to Execution Syst.",
+      "SRM: Ordered",
+      "SRM: Change was Transmitted",
+      "Create Purchase Order Item",
+      "Vendor creates invoice",
+      "Record Goods Receipt"
+    ],
+    "traces": 251734,
+    "attrs": [
+      {
+        "key": "Cumulative net worth (EUR)",
+        "distinct": 25221,
+        "samples": [
+          "298.0",
+          "557.0",
+          "76210.0",
+          "28.0",
+          "37.0"
+        ],
+        "numeric_count": 1595923,
+        "boolean_like": false,
+        "avg_len": 5.3,
+        "type_guess": "NUMERIC",
+        "verdict": "NUMERIC"
+      },
+      {
+        "key": "User",
+        "distinct": 628,
+        "samples": [
+          "batch_00",
+          "user_000",
+          "NONE",
+          "user_001",
+          "user_002"
+        ],
+        "numeric_count": 0,
+        "boolean_like": false,
+        "avg_len": 7.0,
+        "type_guess": "HIGH_CARD",
+        "verdict": "GOOD"
+      },
+      {
+        "key": "org:resource",
+        "distinct": 628,
+        "samples": [
+          "batch_00",
+          "user_000",
+          "NONE",
+          "user_001",
+          "user_002"
+        ],
+        "numeric_count": 0,
+        "boolean_like": false,
+        "avg_len": 7.0,
+        "type_guess": "HIGH_CARD",
+        "verdict": "GOOD"
+      }
+    ]
+  },
+  {
+    "path": "/mnt/datasets/bpic2020.xes",
+    "format": "xes",
+    "events_scanned": 56437,
+    "truncated": false,
+    "activities": 17,
+    "activity_sample": [
+      "Declaration SUBMITTED by EMPLOYEE",
+      "Declaration FINAL_APPROVED by SUPERVISOR",
+      "Request Payment",
+      "Payment Handled",
+      "Declaration APPROVED by PRE_APPROVER",
+      "Declaration REJECTED by MISSING",
+      "Declaration REJECTED by PRE_APPROVER",
+      "Declaration REJECTED by EMPLOYEE",
+      "Declaration SAVED by EMPLOYEE",
+      "Declaration REJECTED by SUPERVISOR"
+    ],
+    "traces": 10500,
+    "attrs": [
+      {
+        "key": "id",
+        "distinct": 56437,
+        "samples": [
+          "st_step 86794_0",
+          "st_step 86793_0",
+          "dd_declaration 86791_19",
+          "dd_declaration 86791_20",
+          "st_step 86798_0"
+        ],
+        "numeric_count": 0,
+        "boolean_like": false,
+        "avg_len": 18.6,
+        "type_guess": "HIGH_CARD",
+        "verdict": "TOO_HIGH"
+      },
+      {
+        "key": "org:resource",
+        "distinct": 2,
+        "samples": [
+          "STAFF MEMBER",
+          "SYSTEM"
+        ],
+        "numeric_count": 0,
+        "boolean_like": false,
+        "avg_len": 9.9,
+        "type_guess": "CATEGORICAL",
+        "verdict": "TOO_LOW"
+      },
+      {
+        "key": "org:role",
+        "distinct": 7,
+        "samples": [
+          "EMPLOYEE",
+          "SUPERVISOR",
+          "UNDEFINED",
+          "PRE_APPROVER",
+          "MISSING"
+        ],
+        "numeric_count": 0,
+        "boolean_like": false,
+        "avg_len": 10.0,
+        "type_guess": "CATEGORICAL",
+        "verdict": "GOOD"
+      }
+    ]
+  },
+  {
+    "path": "/mnt/datasets/sepsis.xes",
+    "format": "xes",
+    "events_scanned": 15214,
+    "truncated": false,
+    "activities": 16,
+    "activity_sample": [
+      "ER Registration",
+      "Leucocytes",
+      "CRP",
+      "LacticAcid",
+      "ER Triage",
+      "ER Sepsis Triage",
+      "IV Liquid",
+      "IV Antibiotics",
+      "Admission NC",
+      "Release A"
+    ],
+    "traces": 1050,
+    "attrs": [
+      {
+        "key": "Age",
+        "distinct": 15,
+        "samples": [
+          "85",
+          "45",
+          "55",
+          "70",
+          "75"
+        ],
+        "numeric_count": 1050,
+        "boolean_like": false,
+        "avg_len": 2.0,
+        "type_guess": "CATEGORICAL",
+        "verdict": "GOOD"
+      },
+      {
+        "key": "CRP",
+        "distinct": 371,
+        "samples": [
+          "21.0",
+          "109.0",
+          "47.0",
+          "15.0",
+          "9.0"
+        ],
+        "numeric_count": 3123,
+        "boolean_like": false,
+        "avg_len": 4.4,
+        "type_guess": "HIGH_CARD",
+        "verdict": "GOOD"
+      },
+      {
+        "key": "Diagnose",
+        "distinct": 146,
+        "samples": [
+          "A",
+          "B",
+          "C",
+          "D",
+          "E"
+        ],
+        "numeric_count": 0,
+        "boolean_like": false,
+        "avg_len": 1.3,
+        "type_guess": "CATEGORICAL",
+        "verdict": "GOOD"
+      },
+      {
+        "key": "DiagnosticArtAstrup",
+        "distinct": 2,
+        "samples": [
+          "true",
+          "false"
+        ],
+        "numeric_count": 0,
+        "boolean_like": true,
+        "avg_len": 4.7,
+        "type_guess": "BOOLEAN",
+        "verdict": "DEGENERATE_BOOL"
+      },
+      {
+        "key": "DiagnosticBlood",
+        "distinct": 2,
+        "samples": [
+          "true",
+          "false"
+        ],
+        "numeric_count": 0,
+        "boolean_like": true,
+        "avg_len": 4.2,
+        "type_guess": "BOOLEAN",
+        "verdict": "DEGENERATE_BOOL"
+      },
+      {
+        "key": "DiagnosticECG",
+        "distinct": 2,
+        "samples": [
+          "true",
+          "false"
+        ],
+        "numeric_count": 0,
+        "boolean_like": true,
+        "avg_len": 4.3,
+        "type_guess": "BOOLEAN",
+        "verdict": "DEGENERATE_BOOL"
+      },
+      {
+        "key": "DiagnosticIC",
+        "distinct": 2,
+        "samples": [
+          "true",
+          "false"
+        ],
+        "numeric_count": 0,
+        "boolean_like": true,
+        "avg_len": 4.2,
+        "type_guess": "BOOLEAN",
+        "verdict": "DEGENERATE_BOOL"
+      },
+      {
+        "key": "DiagnosticLacticAcid",
+        "distinct": 2,
+        "samples": [
+          "true",
+          "false"
+        ],
+        "numeric_count": 0,
+        "boolean_like": true,
+        "avg_len": 4.2,
+        "type_guess": "BOOLEAN",
+        "verdict": "DEGENERATE_BOOL"
+      },
+      {
+        "key": "DiagnosticLiquor",
+        "distinct": 2,
+        "samples": [
+          "false",
+          "true"
+        ],
+        "numeric_count": 0,
+        "boolean_like": true,
+        "avg_len": 5.0,
+        "type_guess": "BOOLEAN",
+        "verdict": "DEGENERATE_BOOL"
+      },
+      {
+        "key": "DiagnosticOther",
+        "distinct": 2,
+        "samples": [
+          "false",
+          "true"
+        ],
+        "numeric_count": 0,
+        "boolean_like": true,
+        "avg_len": 5.0,
+        "type_guess": "BOOLEAN",
+        "verdict": "DEGENERATE_BOOL"
+      },
+      {
+        "key": "DiagnosticSputum",
+        "distinct": 2,
+        "samples": [
+          "false",
+          "true"
+        ],
+        "numeric_count": 0,
+        "boolean_like": true,
+        "avg_len": 5.0,
+        "type_guess": "BOOLEAN",
+        "verdict": "DEGENERATE_BOOL"
+      },
+      {
+        "key": "DiagnosticUrinaryCulture",
+        "distinct": 2,
+        "samples": [
+          "true",
+          "false"
+        ],
+        "numeric_count": 0,
+        "boolean_like": true,
+        "avg_len": 4.5,
+        "type_guess": "BOOLEAN",
+        "verdict": "DEGENERATE_BOOL"
+      },
+      {
+        "key": "DiagnosticUrinarySediment",
+        "distinct": 2,
+        "samples": [
+          "true",
+          "false"
+        ],
+        "numeric_count": 0,
+        "boolean_like": true,
+        "avg_len": 4.5,
+        "type_guess": "BOOLEAN",
+        "verdict": "DEGENERATE_BOOL"
+      },
+      {
+        "key": "DiagnosticXthorax",
+        "distinct": 2,
+        "samples": [
+          "true",
+          "false"
+        ],
+        "numeric_count": 0,
+        "boolean_like": true,
+        "avg_len": 4.3,
+        "type_guess": "BOOLEAN",
+        "verdict": "DEGENERATE_BOOL"
+      },
+      {
+        "key": "DisfuncOrg",
+        "distinct": 2,
+        "samples": [
+          "true",
+          "false"
+        ],
+        "numeric_count": 0,
+        "boolean_like": true,
+        "avg_len": 4.9,
+        "type_guess": "BOOLEAN",
+        "verdict": "DEGENERATE_BOOL"
+      },
+      {
+        "key": "Hypotensie",
+        "distinct": 2,
+        "samples": [
+          "true",
+          "false"
+        ],
+        "numeric_count": 0,
+        "boolean_like": true,
+        "avg_len": 4.9,
+        "type_guess": "BOOLEAN",
+        "verdict": "DEGENERATE_BOOL"
+      },
+      {
+        "key": "Hypoxie",
+        "distinct": 2,
+        "samples": [
+          "false",
+          "true"
+        ],
+        "numeric_count": 0,
+        "boolean_like": true,
+        "avg_len": 5.0,
+        "type_guess": "BOOLEAN",
+        "verdict": "DEGENERATE_BOOL"
+      },
+      {
+        "key": "InfectionSuspected",
+        "distinct": 2,
+        "samples": [
+          "true",
+          "false"
+        ],
+        "numeric_count": 0,
+        "boolean_like": true,
+        "avg_len": 4.2,
+        "type_guess": "BOOLEAN",
+        "verdict": "DEGENERATE_BOOL"
+      },
+      {
+        "key": "Infusion",
+        "distinct": 2,
+        "samples": [
+          "true",
+          "false"
+        ],
+        "numeric_count": 0,
+        "boolean_like": true,
+        "avg_len": 4.2,
+        "type_guess": "BOOLEAN",
+        "verdict": "DEGENERATE_BOOL"
+      },
+      {
+        "key": "LacticAcid",
+        "distinct": 79,
+        "samples": [
+          "2.2",
+          "0.8",
+          "1.6",
+          "2.8",
+          "2.3"
+        ],
+        "numeric_count": 1454,
+        "boolean_like": false,
+        "avg_len": 3.0,
+        "type_guess": "CATEGORICAL",
+        "verdict": "GOOD"
+      },
+      {
+        "key": "Leucocytes",
+        "distinct": 360,
+        "samples": [
+          "9.6",
+          "8.7",
+          "10.7",
+          "13.0",
+          "11.3"
+        ],
+        "numeric_count": 3361,
+        "boolean_like": false,
+        "avg_len": 3.6,
+        "type_guess": "HIGH_CARD",
+        "verdict": "GOOD"
+      },
+      {
+        "key": "Oligurie",
+        "distinct": 2,
+        "samples": [
+          "false",
+          "true"
+        ],
+        "numeric_count": 0,
+        "boolean_like": true,
+        "avg_len": 5.0,
+        "type_guess": "BOOLEAN",
+        "verdict": "DEGENERATE_BOOL"
+      },
+      {
+        "key": "SIRSCritHeartRate",
+        "distinct": 2,
+        "samples": [
+          "true",
+          "false"
+        ],
+        "numeric_count": 0,
+        "boolean_like": true,
+        "avg_len": 4.2,
+        "type_guess": "BOOLEAN",
+        "verdict": "DEGENERATE_BOOL"
+      },
+      {
+        "key": "SIRSCritLeucos",
+        "distinct": 2,
+        "samples": [
+          "false",
+          "true"
+        ],
+        "numeric_count": 0,
+        "boolean_like": true,
+        "avg_len": 5.0,
+        "type_guess": "BOOLEAN",
+        "verdict": "DEGENERATE_BOOL"
+      },
+      {
+        "key": "SIRSCritTachypnea",
+        "distinct": 2,
+        "samples": [
+          "true",
+          "false"
+        ],
+        "numeric_count": 0,
+        "boolean_like": true,
+        "avg_len": 4.4,
+        "type_guess": "BOOLEAN",
+        "verdict": "DEGENERATE_BOOL"
+      },
+      {
+        "key": "SIRSCritTemperature",
+        "distinct": 2,
+        "samples": [
+          "true",
+          "false"
+        ],
+        "numeric_count": 0,
+        "boolean_like": true,
+        "avg_len": 4.2,
+        "type_guess": "BOOLEAN",
+        "verdict": "DEGENERATE_BOOL"
+      },
+      {
+        "key": "SIRSCriteria2OrMore",
+        "distinct": 2,
+        "samples": [
+          "true",
+          "false"
+        ],
+        "numeric_count": 0,
+        "boolean_like": true,
+        "avg_len": 4.2,
+        "type_guess": "BOOLEAN",
+        "verdict": "DEGENERATE_BOOL"
+      },
+      {
+        "key": "lifecycle:transition",
+        "distinct": 1,
+        "samples": [
+          "complete"
+        ],
+        "numeric_count": 0,
+        "boolean_like": false,
+        "avg_len": 8.0,
+        "type_guess": "SINGLETON",
+        "verdict": "TOO_LOW"
+      },
+      {
+        "key": "org:group",
+        "distinct": 26,
+        "samples": [
+          "A",
+          "B",
+          "C",
+          "D",
+          "E"
+        ],
+        "numeric_count": 0,
+        "boolean_like": false,
+        "avg_len": 1.0,
+        "type_guess": "CATEGORICAL",
+        "verdict": "GOOD"
+      }
+    ]
+  }
+]

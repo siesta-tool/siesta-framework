@@ -55,6 +55,9 @@ from dataclasses import dataclass
 from typing import Sequence
 
 from tests.eval.eval_common import (
+    API_BASE,
+    QUERY_PREFIX,
+    API_TIMEOUT_S,
     DatasetSchema,
     discover_schema,
     quote_label,
@@ -119,8 +122,9 @@ class WorkloadContext:
             raise ValueError(
                 f"Dataset has too few activities to build a workload: {acts}"
             )
-        # Use single-key perspectives drawn from low-cardinality string attrs.
-        # Fall back to no grouping if the dataset has no usable perspective keys.
+        # Perspectives are already sorted by cardinality ascending by
+        # _select_perspectives.  Take the first max_perspectives so the
+        # workload builder covers a range from low to high cardinality.
         if schema.perspective_keys:
             perspectives = [[k] for k in schema.perspective_keys[:max_perspectives]]
         else:
@@ -363,6 +367,157 @@ def build_uniform(ctx: WorkloadContext, *, n_queries: int = 50) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Result-bearing workload (data-driven, stratified by result density)
+# ---------------------------------------------------------------------------
+
+def fetch_pair_coverage(
+    log_name: str,
+    grouping_keys: list[str],
+    *,
+    activities: list[str] | None = None,
+    storage_namespace: str = "siesta",
+) -> dict:
+    """
+    Call the /pair_coverage endpoint and return the parsed JSON.
+
+    Separated from build_result_bearing_workload so callers can cache
+    the result (one call per (log, perspective) is enough — the coverage
+    distribution is stable within an experiment run).
+    """
+    import requests
+    from urllib.parse import urljoin
+
+    body: dict = {
+        "log_name":          log_name,
+        "storage_namespace": storage_namespace,
+        "grouping_keys":     grouping_keys,
+    }
+    if activities:
+        body["activities"] = activities
+
+    r = requests.post(
+        urljoin(API_BASE, f"/{QUERY_PREFIX}/pair_coverage"),
+        json=body,
+        timeout=API_TIMEOUT_S,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def build_result_bearing_workload(
+    ctx: WorkloadContext,
+    *,
+    k_dense: int = 4,
+    k_sparse: int = 4,
+    k_singleton: int = 2,
+    dense_threshold: float = 0.5,
+    sparse_lo: float = 0.05,
+    sparse_hi: float = 0.20,
+    min_perspective_cardinality: int = 8,
+    rng_seed: int = 0,
+) -> list[dict]:
+    """
+    Build a stratified, data-driven structural workload.
+
+    For each perspective in ctx.perspectives whose group count is at
+    least `min_perspective_cardinality`, fetch the pair-coverage
+    distribution from the /pair_coverage endpoint and sample queries
+    from three buckets:
+
+      DENSE     — pairs covering >= dense_threshold * group_count groups.
+                  "Most groups qualify."
+      SPARSE    — pairs covering [sparse_lo, sparse_hi] * group_count.
+                  "A few real groups qualify."
+      SINGLETON — pairs covering exactly 1 group.
+                  "Almost-empty result, but non-trivial."
+
+    Perspectives below `min_perspective_cardinality` are skipped:
+    below 8 groups, the DENSE/SPARSE/SINGLETON thresholds collapse
+    (e.g. with 5 groups, SPARSE = [0, 1] groups, indistinguishable
+    from SINGLETON).  For meaningful stratification prefer >= 20.
+
+    Sampling within each bucket is deterministic given `rng_seed`.
+
+    Returns the full query list across all retained perspectives with:
+      - `id` values numbered globally (S1, S2, ...)
+      - `bucket` tag  (DENSE / SPARSE / SINGLETON)
+      - `group_coverage`  — observed number of qualifying groups
+      - `perspective_groups` — total groups in this perspective
+    """
+    import random
+
+    queries: list[dict] = []
+    counter = itertools.count(1)
+    rng = random.Random(rng_seed)
+
+    for gk in ctx.perspectives:
+        try:
+            cov = fetch_pair_coverage(
+                ctx.log_name,
+                gk,
+                activities=ctx.activities,
+            )
+        except Exception as exc:
+            print(f"  [workload] skipping perspective {gk}: {exc}")
+            continue
+
+        group_count = cov["group_count"]
+        if group_count < min_perspective_cardinality:
+            print(
+                f"  [workload] skipping perspective {gk}: "
+                f"only {group_count} groups (< {min_perspective_cardinality})"
+            )
+            continue
+
+        pairs = cov["pairs"]
+        if not pairs:
+            print(f"  [workload] skipping perspective {gk}: no co-occurring pairs")
+            continue
+
+        dense_cut   = dense_threshold * group_count
+        sparse_lo_n = max(1, int(sparse_lo * group_count))
+        sparse_hi_n = max(sparse_lo_n, int(sparse_hi * group_count))
+
+        dense     = [p for p in pairs if p["groups"] >= dense_cut]
+        sparse    = [p for p in pairs if sparse_lo_n <= p["groups"] <= sparse_hi_n]
+        singleton = [p for p in pairs if p["groups"] == 1]
+
+        def take(bucket: list[dict], k: int) -> list[dict]:
+            if len(bucket) <= k:
+                return list(bucket)
+            return rng.sample(bucket, k)
+
+        chosen = (
+            [("DENSE",     p) for p in take(dense,     k_dense)]
+            + [("SPARSE",    p) for p in take(sparse,    k_sparse)]
+            + [("SINGLETON", p) for p in take(singleton, k_singleton)]
+        )
+
+        print(
+            f"  [workload] perspective {gk}: "
+            f"group_count={group_count}  "
+            f"DENSE={len(dense)} (took {min(len(dense), k_dense)})  "
+            f"SPARSE={len(sparse)} (took {min(len(sparse), k_sparse)})  "
+            f"SINGLETON={len(singleton)} (took {min(len(singleton), k_singleton)})"
+        )
+
+        for bucket_name, pair in chosen:
+            q = _q(
+                f"S{next(counter)}",
+                _pat2(pair["source"], pair["target"]),
+                log_name=ctx.log_name,
+                gkeys=gk,
+                category="structural",
+                tags=[bucket_name],
+            )
+            q["group_coverage"]     = pair["groups"]
+            q["perspective_groups"] = group_count
+            queries.append(q)
+
+    return queries
+
+
+# ---------------------------------------------------------------------------
 # Convenience: derive all four workloads from the configured dataset
 # ---------------------------------------------------------------------------
 
@@ -392,15 +547,13 @@ def build_workloads(
     max_perspectives: int = 4,
 ) -> Workloads:
     """
-    Build all four standard workloads from a dataset.  See
-    `eval_common.resolve_dataset` for selection rules.
+    Build all four standard workloads from a dataset.
 
-    `max_perspectives` controls how many distinct grouping perspectives are
-    included.  Perspectives are drawn from the dataset's low-cardinality
-    string attributes (cardinality 2–50), sorted by cardinality ascending
-    so the most semantically meaningful groupings come first.  Pass a
-    larger value (e.g. 4) to include more perspectives in the skewed and
-    uniform workloads.
+    Perspectives are drawn from event-level, non-numeric attributes
+    with cardinality in [3, 500], sorted by cardinality ascending.
+    The case-level filter (avg distinct values per trace > 1.2)
+    removes lifted trace-level metadata (loan amounts, patient ages,
+    etc.) that would otherwise pass the cardinality check.
     """
     spec = resolve_dataset(dataset, log_name)
     schema = discover_schema(spec.path)

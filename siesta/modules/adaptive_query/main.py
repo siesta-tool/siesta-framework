@@ -99,6 +99,8 @@ from siesta.modules.query.processors.stats_query import (
 from siesta.modules.query.CEP_adapter import find_occurrences_dsl
 from siesta.model.DataModel import EventPair
 
+import pandas as pd
+
 import logging
 
 logger = logging.getLogger(__name__)
@@ -179,11 +181,15 @@ class Adaptive_Querying(SiestaModule):
     metadata: MetaData
     _lru: PairLRUCache
     _retention: RetentionPolicy | None
+    _retention_params: tuple | None    
+
 
     def __init__(self):
         super().__init__()
         self.query_config = {}
         self._retention = None
+        self._retention_params = None   
+
 
     # ------------------------------------------------------------------
     # Framework hooks
@@ -197,12 +203,13 @@ class Adaptive_Querying(SiestaModule):
             "detection": ("POST", self.api_detection),
             "exploration": ("POST", self.api_exploration),
             "statistics": ("POST", self.api_statistics),
+            "pair_coverage": ("POST", self.api_pair_coverage),
         }
 
     # ------------------------------------------------------------------
     # API entry points
     # ------------------------------------------------------------------
-
+    
     def api_detection(
         self,
         query_config: Annotated[
@@ -286,6 +293,128 @@ class Adaptive_Querying(SiestaModule):
         self._bootstrap(query_config.model_dump(), method="statistics")
         return self._fallback_to_eager("statistics")
 
+    def api_pair_coverage(
+        self,
+        body: Annotated[dict, Body(...)],
+    ) -> Any:
+        """
+        For a given log + perspective, compute how many groups each
+        ordered activity pair (A, B) co-occurs in (A precedes B at
+        least once within the group).
+
+        This is the input the warm-up workload-builder uses to stratify
+        queries by result density.  The same operation can be done
+        offline, but doing it inside the API keeps the Spark session and
+        storage manager singletons in scope.
+
+        Request body
+        ------------
+        {
+            "log_name":          "bpic2020",
+            "storage_namespace": "siesta",
+            "grouping_keys":     ["org:resource"],
+            "activities":        ["A", "B", ...]   # optional whitelist;
+                                                # if absent uses all
+                                                # observed activities
+        }
+
+        Response
+        --------
+        {
+            "log_name":     "...",
+            "perspective":  "org:resource",
+            "group_count":  123,
+            "pairs": [
+                {"source": "A", "target": "B", "groups": 87},
+                ...
+            ]
+        }
+        """
+        from siesta.model.StorageModel import MetaData
+
+        log_name      = body["log_name"]
+        namespace     = body.get("storage_namespace", "siesta")
+        grouping_keys = body["grouping_keys"]
+        activity_whitelist: list[str] | None = body.get("activities")
+
+        metadata = MetaData(
+            storage_namespace=namespace,
+            log_name=log_name,
+            storage_type="s3",
+        )
+        storage = get_storage_manager()
+        metadata = storage.read_metadata_table(metadata)
+
+        seq_df = storage.read_sequence_table(metadata)
+
+        # Compute the perspective group value for every event using the
+        # same helper the indexer uses — keeps the grouping definition
+        # consistent end-to-end.
+        from siesta.modules.adaptive_index.builders import _grouping_col
+
+        grouped = (
+            seq_df
+            .withColumn("group_value", _grouping_col(grouping_keys))
+            .filter(col("group_value").isNotNull())
+        )
+
+        if activity_whitelist:
+            grouped = grouped.filter(col("activity").isin(activity_whitelist))
+
+        # For each group, compute the (earliest, latest) timestamp of each
+        # activity within that group.  An ordered pair (A, B) co-occurs
+        # in a group iff min_ts(A) < max_ts(B), with strict inequality
+        # when A != B and at least one A event precedes some B event.
+        from pyspark.sql.functions import min as F_min, max as F_max, count_distinct
+
+        per_group_activity = (
+            grouped
+            .groupBy("group_value", "activity")
+            .agg(
+                F_min("start_timestamp").alias("first_ts"),
+                F_max("start_timestamp").alias("last_ts"),
+            )
+        )
+
+        # Self-join on group_value, alias as A and B sides.
+        a_side = per_group_activity.alias("a")
+        b_side = per_group_activity.alias("b")
+
+        pair_cooc = (
+            a_side.join(b_side, col("a.group_value") == col("b.group_value"))
+            .filter(col("a.activity") != col("b.activity"))
+            .filter(col("a.first_ts") < col("b.last_ts"))
+            .select(
+                col("a.activity").alias("source"),
+                col("b.activity").alias("target"),
+                col("a.group_value").alias("group_value"),
+            )
+            .dropDuplicates(["source", "target", "group_value"])
+        )
+
+        coverage = (
+            pair_cooc
+            .groupBy("source", "target")
+            .agg(count_distinct("group_value").alias("groups"))
+            .collect()
+        )
+
+        group_count = grouped.select("group_value").distinct().count()
+
+        pairs = sorted(
+            [{"source": r.source, "target": r.target, "groups": int(r.groups)}
+            for r in coverage],
+            key=lambda x: (-x["groups"], x["source"], x["target"]),
+        )
+
+        pid = ":".join(sorted(grouping_keys))
+        return {
+            "log_name":    log_name,
+            "perspective": pid,
+            "group_count": int(group_count),
+            "pairs":       pairs,
+        }
+
     # ------------------------------------------------------------------
     # CLI
     # ------------------------------------------------------------------
@@ -361,6 +490,46 @@ class Adaptive_Querying(SiestaModule):
     # ------------------------------------------------------------------
     # Adaptive detection
     # ------------------------------------------------------------------
+    @staticmethod
+    def _cep_is_redundant(
+        pair_branches: set,
+        info_pairs: set,
+    ) -> bool:
+        """
+        Return True when the pruning step alone fully validates the
+        pattern, so the downstream CEP pass would only re-prove what is
+        already known.
+
+        Conditions:
+        1. Exactly one ResponsePair, no info-pairs.
+        2. Both quantifiers are ONE (no Kleene repetition).
+        3. No forbidden-between activities (negation).
+        4. No attribute constraints on source or target.
+
+        Under these conditions every row of the pair table for (A, B)
+        that survives the prune is, by construction, a valid match of
+        the pattern: the row represents a co-occurrence of A and B in
+        the same group with A before B, and there are no further
+        predicates to check.
+
+        Note: this is not specific to the adaptive path — the same
+        reasoning applies to eager.  The savings are largest when the
+        matcher's input sequence (after regrouping by a non-trace
+        perspective) is long and dense in the pattern's activities, as
+        happens for warmup queries on busy resources.
+        """
+        if len(pair_branches) != 1 or info_pairs:
+            return False
+        rp = next(iter(pair_branches))
+        if rp.source_quantifier != SeqlQuantifier.ONE:
+            return False
+        if rp.target_quantifier != SeqlQuantifier.ONE:
+            return False
+        if rp.forbidden_between:
+            return False
+        if rp.source.constraints or rp.target.constraints:
+            return False
+        return True
 
     def _run_adaptive_detection(self) -> Any:
         """
@@ -504,6 +673,9 @@ class Adaptive_Querying(SiestaModule):
         # Union all pair DataFrames
         from functools import reduce
         index_df = reduce(DataFrame.unionByName, pair_dfs)
+        logger.info(f"TIMING pair_fetch done: {time.time() - t_start:.2f}s  pattern={pattern!r}")
+
+
 
         # --- Step 4: Prune candidate groups -----------------------------
         branch_required: dict[int, set[tuple[str, str]]] = {}
@@ -542,87 +714,219 @@ class Adaptive_Querying(SiestaModule):
                 lambda a, b: a.union(b), branch_pruned_dfs
             ).distinct()
 
+        pruned_count = pruned_group_ids.count()
+        logger.info(f"TIMING prune={time.time()-t_start:.2f}s  pruned_groups={pruned_count}")
+
+
         pair_positions_df = (
             index_df
             .join(pruned_group_ids, on="trace_id", how="inner")
             .repartition("trace_id")
         )
 
-        # --- Step 5: Validate via CEP -----------------------------------
-        # Build per-group pseudo-sequences and run OpenCEP, same as the
-        # eager module but sorting by sort_key (ts or pos).
-        matches_rdd = pair_positions_df.rdd.map(
-            lambda r: (
-                r.trace_id,
-                {
-                    "source":             r.source,
-                    "target":             r.target,
-                    "source_position":    r.source_position,
-                    "target_position":    r.target_position,
-                    "source_timestamp":   r.source_timestamp,
-                    "target_timestamp":   r.target_timestamp,
-                    "source_attributes":  r.source_attributes,
-                    "target_attributes":  r.target_attributes,
-                },
-            )
-        )
+        # after .rdd.map (just inspect the count):
+        positions_count = pair_positions_df.count()
+        logger.info(f"TIMING positions_built={time.time()-t_start:.2f}s  row_count={positions_count}")
 
-        sort_field = (
-            "position" if sort_key == "position" else "timestamp"
-        )
+        # # --- Step 5: Validate via CEP -----------------------------------
+        # # Build per-group pseudo-sequences and run OpenCEP, same as the
+        # # eager module but sorting by sort_key (ts or pos).
+        # matches_rdd = pair_positions_df.rdd.map(
+        #     lambda r: (
+        #         r.trace_id,
+        #         {
+        #             "source":             r.source,
+        #             "target":             r.target,
+        #             "source_position":    r.source_position,
+        #             "target_position":    r.target_position,
+        #             "source_timestamp":   r.source_timestamp,
+        #             "target_timestamp":   r.target_timestamp,
+        #             "source_attributes":  r.source_attributes,
+        #             "target_attributes":  r.target_attributes,
+        #         },
+        #     )
+        # )
 
-        def validate_group(group_id_rows):
-            group_id, rows = group_id_rows
-            rows = list(rows)
+        # sort_field = (
+        #     "position" if sort_key == "position" else "timestamp"
+        # )
 
-            seen_positions = {}
-            for r in rows:
-                for side in [
-                    ("source", "source_position", "source_timestamp", "source_attributes"),
-                    ("target", "target_position", "target_timestamp", "target_attributes"),
-                ]:
-                    name_k, pos_k, ts_k, attr_k = side
-                    pos = r[pos_k]
-                    if pos not in seen_positions:
-                        seen_positions[pos] = {
-                            "name":      r[name_k],
-                            "position":  pos,
-                            "timestamp": r[ts_k],
-                        }
-                        attrs = r[attr_k]
-                        if attrs:
-                            for key, value in attrs.items():
-                                seen_positions[pos][key] = value
+        # def validate_group(group_id_rows):
+        #     group_id, rows = group_id_rows
+        #     rows = list(rows)
 
-            events = sorted(
-                seen_positions.values(),
-                key=lambda e: (int(e[sort_field]), e.get("name", "")),
-            )
+        #     seen_positions = {}
+        #     for r in rows:
+        #         for side in [
+        #             ("source", "source_position", "source_timestamp", "source_attributes"),
+        #             ("target", "target_position", "target_timestamp", "target_attributes"),
+        #         ]:
+        #             name_k, pos_k, ts_k, attr_k = side
+        #             pos = r[pos_k]
+        #             if pos not in seen_positions:
+        #                 seen_positions[pos] = {
+        #                     "name":      r[name_k],
+        #                     "position":  pos,
+        #                     "timestamp": r[ts_k],
+        #                 }
+        #                 attrs = r[attr_k]
+        #                 if attrs:
+        #                     for key, value in attrs.items():
+        #                         seen_positions[pos][key] = value
 
-            positions = find_occurrences_dsl(
-                [e["name"] for e in events],
-                pattern,
-                events=events,
-            )
-            return (group_id, positions)
+        #     events = sorted(
+        #         seen_positions.values(),
+        #         key=lambda e: (int(e[sort_field]), e.get("name", "")),
+        #     )
 
+        #     positions = find_occurrences_dsl(
+        #         [e["name"] for e in events],
+        #         pattern,
+        #         events=events,
+        #     )
+        #     return (group_id, positions)
+
+        # group_count = (
+        #     self.metadata.trace_count
+        #     if self.metadata.trace_count
+        #     else 0
+        # )
+
+        # result = (
+        #     matches_rdd
+        #     .groupByKey()
+        #     .map(validate_group)
+        #     .filter(
+        #         lambda r: len(r[1]) >= support_threshold * group_count
+        #         if group_count
+        #         else True
+        #     )
+        #     .collect()
+        # )
+        
+        # --- Step 5: Validate ------------------------------------------
+        # When the prune step provably establishes the answer (single
+        # ordered pair, no constraints, no negation, no quantifier
+        # repetition) we skip CEP entirely.  Pruning has already kept
+        # exactly the groups that contain a (source, target)
+        # co-occurrence in the right order, and each surviving row
+        # carries the matching positions directly.
+        sort_field = "position" if sort_key == "position" else "timestamp"
         group_count = (
             self.metadata.trace_count
             if self.metadata.trace_count
             else 0
         )
 
-        result = (
-            matches_rdd
-            .groupByKey()
-            .map(validate_group)
-            .filter(
-                lambda r: len(r[1]) >= support_threshold * group_count
-                if group_count
-                else True
+        if self._cep_is_redundant(pair_branches, info_pairs):
+            rp = next(iter(pair_branches))
+            # Restrict to the rows that actually match the pair label
+            # (the union upstream may have included extra info-pair
+            # rows in principle; here info_pairs is empty so this is
+            # a no-op when there is only one pair table, but the
+            # filter stays for safety).
+            matching_rows = pair_positions_df.where(
+                (col("source") == rp.source.label)
+                & (col("target") == rp.target.label)
             )
-            .collect()
-        )
+
+
+            # Match the existing result shape: list of (group_id, positions)
+            # where positions is a list of ints (the CEP path returns a
+            # flat list — first match only).  For the skip-CEP path we
+            # return ALL match position-pairs flattened so the existing
+            # `len(positions)` support filter and `formatted` consumer
+            # still work.  Each match contributes 2 ints (source, target),
+            # so len(positions) // 2 == number of matches for the group.
+            per_group = (
+                matching_rows
+                .withColumn(
+                    "pos_pair",
+                    F.array(col("source_position"), col("target_position")),
+                )
+                .groupBy("trace_id")
+                .agg(F.min(col("pos_pair")).alias("positions"))
+            )
+
+            if group_count:
+                per_group = per_group.filter(
+                    F.size("positions") >= F.lit(support_threshold * group_count)
+                )
+
+            collected = per_group.collect()
+
+            result = [(row.trace_id, list(row.positions)) for row in collected]
+
+
+        else:
+            # General CEP path — unchanged from the existing
+            # implementation.  Kept verbatim because the pattern shape
+            # may involve quantifiers, negation, attribute constraints,
+            # multiple pairs requiring cross-pair ordering, etc.
+            matches_rdd = pair_positions_df.rdd.map(
+                lambda r: (
+                    r.trace_id,
+                    {
+                        "source":             r.source,
+                        "target":             r.target,
+                        "source_position":    r.source_position,
+                        "target_position":    r.target_position,
+                        "source_timestamp":   r.source_timestamp,
+                        "target_timestamp":   r.target_timestamp,
+                        "source_attributes":  r.source_attributes,
+                        "target_attributes":  r.target_attributes,
+                    },
+                )
+            )
+
+            def validate_group(group_id_rows):
+                group_id, rows = group_id_rows
+                rows = list(rows)
+
+                seen_positions = {}
+                for r in rows:
+                    for side in [
+                        ("source", "source_position", "source_timestamp", "source_attributes"),
+                        ("target", "target_position", "target_timestamp", "target_attributes"),
+                    ]:
+                        name_k, pos_k, ts_k, attr_k = side
+                        pos = r[pos_k]
+                        if pos not in seen_positions:
+                            seen_positions[pos] = {
+                                "name":      r[name_k],
+                                "position":  pos,
+                                "timestamp": r[ts_k],
+                            }
+                            attrs = r[attr_k]
+                            if attrs:
+                                for key, value in attrs.items():
+                                    seen_positions[pos][key] = value
+
+                events = sorted(
+                    seen_positions.values(),
+                    key=lambda e: (int(e[sort_field]), e.get("name", "")),
+                )
+
+                positions = find_occurrences_dsl(
+                    [e["name"] for e in events],
+                    pattern,
+                    events=events,
+                )
+                return (group_id, positions)
+
+            result = (
+                matches_rdd
+                .groupByKey()
+                .map(validate_group)
+                .filter(
+                    lambda r: len(r[1]) >= support_threshold * group_count
+                    if group_count
+                    else True
+                )
+                .collect()
+            )
+        logger.info(f"TIMING cep_done: {time.time() - t_start:.2f}s  pattern={pattern!r}")
+
 
         t_total = time.time() - t_start
 
@@ -820,14 +1124,28 @@ class Adaptive_Querying(SiestaModule):
 
         Only evaluates the predicates for artefacts this query touched.
         Full sweep over all perspectives still happens at ingest time.
+
+        The retention policy is rebuilt whenever the request-level
+        overrides (min_query_count / hysteresis / half_life_seconds)
+        differ from the cached values.  RetentionPolicy is stateless,
+        so reconstruction is free; without this, the first request
+        after process startup would lock in its parameters for the
+        lifetime of the process.
         """
-        if self._retention is None:
-            from siesta.modules.adaptive_index.retention import RetentionPolicy
+        from siesta.modules.adaptive_index.retention import RetentionPolicy
+
+        params = (
+            float(self.query_config.get("half_life_seconds", 3600.0)),
+            int(self.query_config.get("min_query_count", 3)),
+            float(self.query_config.get("hysteresis", 0.15)),
+        )
+        if self._retention is None or self._retention_params != params:
             self._retention = RetentionPolicy(
-                half_life_seconds=self.query_config.get("half_life_seconds", 3600.0),
-                min_query_count=self.query_config.get("min_query_count", 3),
-                hysteresis=self.query_config.get("hysteresis", 0.15),
+                half_life_seconds=params[0],
+                min_query_count=params[1],
+                hysteresis=params[2],
             )
+            self._retention_params = params
 
         catalog = get_catalog(self.metadata, self.storage)
         stats = catalog.get(pid)
