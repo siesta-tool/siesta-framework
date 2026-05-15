@@ -324,7 +324,7 @@ class S3Manager(StorageManager):
         """
         
         key = destination_path
-        if key.contains("/"):
+        if "/" in key:
             key = key.split("/")[-1]
         key = f"{preprocess_config.get('log_name', 'default_log')}/batches/{key}"
             
