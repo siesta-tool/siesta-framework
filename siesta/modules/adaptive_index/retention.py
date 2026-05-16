@@ -129,9 +129,9 @@ class RetentionPolicy:
         if elapsed <= 0:
             return
         factor = math.exp(-elapsed * math.log(2) / self.half_life_seconds)
-        stats.l1_query_count = int(stats.l1_query_count * factor)
+        stats.l1_query_count = round(stats.l1_query_count * factor)
         stats.l1_total_savings_ms *= factor
-        stats.l2_pos_query_count = int(stats.l2_pos_query_count * factor)
+        stats.l2_pos_query_count = round(stats.l2_pos_query_count * factor)
         stats.l2_total_savings_ms *= factor
         stats.last_decay_ts = now
 
@@ -151,7 +151,7 @@ class RetentionPolicy:
         if elapsed <= 0:
             return
         factor = math.exp(-elapsed * math.log(2) / self.half_life_seconds)
-        ps.query_count = int(ps.query_count * factor)
+        ps.query_count = round(ps.query_count * factor)
         ps.total_savings_ms *= factor
         ps.last_decay_ts = now
 
@@ -259,7 +259,7 @@ class RetentionPolicy:
     # Eq. 3  Pair L3
     # ------------------------------------------------------------------
 
-    def should_persist_pair(self, pair_stats: PairStats) -> bool:
+    def should_persist_pair(self, ps: PairStats) -> bool:
         """
         Should pair (A, B) be promoted from ABSENT/TRANSIENT to PERSISTENT?
 
@@ -288,41 +288,55 @@ class RetentionPolicy:
         correct the decision at the next evaluation cycle if maintenance
         proves expensive.
         """
-        self._decay_pair(pair_stats)
+        self._decay_pair(ps)
 
-        # Gate 1 — demand
-        if pair_stats.query_count < self.min_query_count:
+        if ps.query_count < self.min_query_count:
+            logger.info(
+                f"should_persist_pair: SKIP demand gate "
+                f"query_count={ps.query_count:.2f} < min={self.min_query_count}"
+            )
             return False
-        if pair_stats.build_cost_ms <= 0.0:
+        if ps.build_cost_ms <= 0.0:
+            logger.info(
+                f"should_persist_pair: SKIP build_cost=0"
+            )
             return False
 
-        # Eager-promotion bypass: low min_query_count signals operator
-        # intent to promote on demand evidence alone.
         if self.min_query_count <= 1:
+            logger.info(
+                f"should_persist_pair: PROMOTE (bypass) "
+                f"query_count={ps.query_count:.2f}"
+            )
             return True
 
-        # Gate 2 — cost-function
-        mean_savings = pair_stats.total_savings_ms / pair_stats.query_count
+        mean_savings = ps.total_savings_ms / ps.query_count
         mean_maintenance = (
-            pair_stats.total_maintenance_ms / pair_stats.maintenance_batch_count
-            if pair_stats.maintenance_batch_count > 0
+            ps.total_maintenance_ms / ps.maintenance_batch_count
+            if ps.maintenance_batch_count > 0
             else 0.0
         )
-        # batches_per_query: expected number of ingest batches between
-        # consecutive queries — scales maintenance cost to the same
-        # query-count basis as utility.
         batches_per_query = (
-            pair_stats.maintenance_batch_count / pair_stats.query_count
-            if pair_stats.query_count > 0
+            ps.maintenance_batch_count / ps.query_count
+            if ps.query_count > 0
             else 0.0
         )
-
-        utility = pair_stats.query_count * mean_savings
+        utility = ps.query_count * mean_savings
         cost = (
-            pair_stats.build_cost_ms
-            + mean_maintenance * batches_per_query * pair_stats.query_count
+            ps.build_cost_ms
+            + mean_maintenance * batches_per_query * ps.query_count
         )
-        return utility > cost * (1 + self.hysteresis)
+        result = utility > cost * (1 + self.hysteresis)
+        logger.info(
+            f"should_persist_pair: {'PROMOTE' if result else 'SKIP cost gate'} "
+            f"query_count={ps.query_count:.2f} "
+            f"mean_savings={mean_savings:.1f}ms "
+            f"utility={utility:.1f}ms "
+            f"cost={cost:.1f}ms "
+            f"threshold={cost*(1+self.hysteresis):.1f}ms "
+            f"build_cost={ps.build_cost_ms:.1f}ms "
+            f"total_savings={ps.total_savings_ms:.1f}ms"
+        )
+        return result
 
     def should_demote_pair(self, pair_stats: PairStats) -> bool:
         """

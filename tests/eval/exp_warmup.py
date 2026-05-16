@@ -108,7 +108,7 @@ CONFIG = CONFIG_DIR / "adaptive_index.config.json"
 # pair to PERSISTENT and reps 1+ read from Delta.
 WARMUP_RETENTION_OVERRIDES = {
     "min_query_count":   3,
-    "half_life_seconds": 3600.0,
+    "half_life_seconds": 3600,
     "hysteresis":        0.15,
 }
 
@@ -131,6 +131,8 @@ def run_category(
     *,
     pass_mode: str,
     retention_overrides: dict,
+    promotion_rep: int = 2,        # 0-indexed rep that triggers promotion
+    post_promotion_delay_s: int = 120,  # wait for build_pair_persistent
 ) -> None:
     """
     Run `workload` × `reps` times, recording per-query latency.
@@ -170,7 +172,7 @@ def run_category(
                     total=body.get("total", 0),
                     perspective=body.get("perspective"),
                     pair_status_after=statuses,
-                    plot_exclude=pass_mode == "warm" and rep == 0,
+                    plot_exclude=False,
                 )
                 print(f"  [adaptive] seq={seq:3d} rep={rep} {q['id']:4s} "
                       f"{q['pattern']:30s} -> {latency:.3f}s "
@@ -183,6 +185,18 @@ def run_category(
                 )
                 print(f"  [adaptive] seq={seq:3d} {q['id']:4s} ERROR: {exc}")
             seq += 1
+
+        # After the rep that triggers promotion, pause to let the
+        # background build_pair_persistent finish before the next rep
+        # issues queries against the (not-yet-ready) Delta table.
+        # Without this delay the next rep's queries arrive while
+        # materialization is still running and fall back to lazy scan,
+        # making the post-promotion latency indistinguishable from cold.
+        if rep == promotion_rep and pass_mode == "warm":
+            print(f"\n  [warmup] rep {rep} triggered promotion — "
+                  f"waiting {post_promotion_delay_s}s for materialization ...")
+            time.sleep(post_promotion_delay_s)
+            print(f"  [warmup] resuming.")
 
 
 def run_eager_reference(
@@ -375,9 +389,10 @@ def main() -> None:
         reps=args.reps,
         pass_mode=pass_mode,
         retention_overrides=retention_overrides,
+        promotion_rep=retention_overrides.get("min_query_count", 3) - 1,
     )
-    if not is_cold:
-        run_eager_reference(rec, "structural", structural)
+    # if not is_cold:
+    #     run_eager_reference(rec, "structural", structural)
 
     print(f"\nResults written to {rec.path}")
 

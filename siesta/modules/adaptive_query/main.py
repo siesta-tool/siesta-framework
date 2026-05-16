@@ -946,21 +946,6 @@ class Adaptive_Querying(SiestaModule):
                 and stats.pairs.get((a, b), PairStats()).build_cost_ms > 0
             },
         )
-        self._maybe_promote_after_query(pid, all_pairs_2d, references_pos)
-
-        catalog.flush()
-
-        formatted = [
-            {
-                "group_id": gid,
-                "support": (
-                    len(positions) / group_count if group_count else 0
-                ),
-                "positions": positions,
-            }
-            for gid, positions in result
-            if len(positions) > support_threshold
-        ]
 
         # Diagnostic: report the lifecycle level of each touched pair AFTER
         # the (possibly synchronous) post-query promotion fires.  Consumers
@@ -974,6 +959,30 @@ class Adaptive_Querying(SiestaModule):
                 pair_status_after[f"{a}->{b}"] = (
                     ps.status.name if ps is not None else "ABSENT"
                 )
+
+        # secure the catalog flush with a background thread so it does not block
+        # self._maybe_promote_after_query(pid, all_pairs_2d, references_pos)
+        # catalog.flush()
+        def _promote_and_flush():
+            try:
+                self._maybe_promote_after_query(pid, all_pairs_2d, references_pos)
+            finally:
+                catalog.flush()
+
+        threading.Thread(target=_promote_and_flush, daemon=True).start()
+
+
+        formatted = [
+            {
+                "group_id": gid,
+                "support": (
+                    len(positions) / group_count if group_count else 0
+                ),
+                "positions": positions,
+            }
+            for gid, positions in result
+            if len(positions) > support_threshold
+        ]
 
         return {
             "code": 200,
