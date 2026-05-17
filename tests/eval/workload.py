@@ -518,6 +518,196 @@ def build_result_bearing_workload(
 
 
 # ---------------------------------------------------------------------------
+# Shared-structure workload (phase 2 of 6.3.1)
+# ---------------------------------------------------------------------------
+
+def build_shared_structure_workload(
+    ctx: WorkloadContext,
+    *,
+    n_hot_pairs: int = 5,
+    n_cold_pairs: int = 8,
+    reps_per_hot_pair: int = 4,
+    reps_per_cold_pair: int = 1,
+    min_perspective_cardinality: int = 8,
+    rng_seed: int = 0,
+) -> list[dict]:
+    """
+    Build a workload that demonstrates demand-driven materialisation
+    across a realistic query stream.
+
+    All patterns are 2-activity ("A B") so the skip-CEP path fires on
+    every query.  Variety comes from WHICH pairs are queried and HOW
+    OFTEN, not from pattern complexity.
+
+    For each perspective in ctx.perspectives that has at least
+    `min_perspective_cardinality` groups:
+
+      1. Fetch pair coverage, sort by group_count descending.
+      2. Pick `n_hot_pairs` from the top — pairs that cover the most
+         groups, so every query returns meaningful results.
+      3. Pick `n_cold_pairs` from further down — pairs with lower
+         coverage, representing infrequent demand.
+      4. Emit `reps_per_hot_pair` query records for each hot pair and
+         `reps_per_cold_pair` for each cold pair.
+      5. Interleave hot and cold deterministically so the stream looks
+         realistic — hot queries are spread through the stream, not
+         bunched at the start.
+
+    The resulting stream looks like:
+
+        seq=0   (A,B) HOT  rep 1  → lazy scan  ~20s   ABSENT
+        seq=1   (X,Y) COLD rep 1  → lazy scan  ~20s   ABSENT
+        seq=2   (C,D) HOT  rep 1  → lazy scan  ~20s   ABSENT
+        seq=3   (A,B) HOT  rep 2  → LRU hit    ~4s    TRANSIENT
+        seq=4   (C,D) HOT  rep 2  → LRU hit    ~4s    TRANSIENT
+        seq=5   (A,B) HOT  rep 3  → LRU hit    ~4s    TRANSIENT ← cost gate fires
+        seq=6   (C,D) HOT  rep 3  → LRU hit    ~4s    TRANSIENT ← cost gate fires
+        ...
+        seq=10  (A,B) HOT  rep 4  → Delta read ~5s    PERSISTENT
+        seq=11  (X,Y) COLD rep 1  → lazy scan  ~20s   ABSENT    ← never promoted
+
+    HOT pairs accumulate query_count across their reps, cross the
+    min_query_count threshold, and get promoted to PERSISTENT.
+    COLD pairs appear only once, stay at ABSENT or TRANSIENT, and
+    serve as a within-stream control showing that the system does NOT
+    blindly promote everything.
+
+    Each query record carries:
+      - tags:           ["HOT"] or ["COLD"]
+      - shared_pair:    "A->B" — the pair this query targets
+      - group_coverage: from pair_coverage
+      - hot_rep:        which repetition of this pair (1-indexed)
+                        so the plotter can show the per-pair learning curve
+    """
+    import random
+
+    queries: list[dict] = []
+    counter = itertools.count(1)
+    rng = random.Random(rng_seed)
+
+    for gk in ctx.perspectives:
+        try:
+            cov = fetch_pair_coverage(
+                ctx.log_name,
+                gk,
+                activities=ctx.activities,
+            )
+        except Exception as exc:
+            print(f"  [workload] skipping perspective {gk}: {exc}")
+            continue
+
+        group_count = cov["group_count"]
+        if group_count < min_perspective_cardinality:
+            print(
+                f"  [workload] skipping perspective {gk}: "
+                f"only {group_count} groups (< {min_perspective_cardinality})"
+            )
+            continue
+
+        pairs = cov["pairs"]   # sorted by groups desc
+        if not pairs:
+            print(f"  [workload] skipping perspective {gk}: no co-occurring pairs")
+            continue
+
+        n_hot  = min(n_hot_pairs,  len(pairs))
+        # Pick cold pairs from the bottom of the sorted list (fewest groups).
+        # Ensure no overlap with hot pairs.
+        n_cold = min(n_cold_pairs, max(0, len(pairs) - n_hot))
+
+        hot_pairs  = pairs[:n_hot]
+        cold_pairs = pairs[len(pairs) - n_cold:] if n_cold else []
+
+        print(
+            f"  [workload] perspective {gk}: "
+            f"group_count={group_count}  "
+            f"hot={n_hot} (top coverage)  cold={n_cold} (bottom coverage)"
+        )
+
+        # Build per-hot-pair and per-cold-pair query lists before
+        # interleaving, so we can shuffle within each group independently.
+
+        # Hot pair queries: reps_per_hot_pair copies of each, in
+        # round-robin order across pairs so the stream looks like
+        #   pair0-rep1, pair1-rep1, pair2-rep1, pair0-rep2, ...
+        # rather than all reps of pair0, then all of pair1, etc.
+        hot_rounds: list[list[dict]] = []
+        for rep_idx in range(reps_per_hot_pair):
+            round_queries: list[dict] = []
+            for pair in hot_pairs:
+                a, b = pair["source"], pair["target"]
+                q = _q(
+                    f"H{next(counter)}", _pat2(a, b),
+                    log_name=ctx.log_name, gkeys=gk,
+                    category="structural",
+                    tags=["HOT"],
+                )
+                q["shared_pair"]    = f"{a}->{b}"
+                q["group_coverage"] = pair["groups"]
+                q["hot_rep"]        = rep_idx + 1
+                round_queries.append(q)
+            # Shuffle the order of pairs within each round so consecutive
+            # rounds don't always hit the same pair first.
+            rng.shuffle(round_queries)
+            hot_rounds.append(round_queries)
+
+        # Cold pair queries: one copy each, shuffled.
+        cold_queries: list[dict] = []
+        for pair in cold_pairs:
+            a, b = pair["source"], pair["target"]
+            for _ in range(reps_per_cold_pair):
+                q = _q(
+                    f"C{next(counter)}", _pat2(a, b),
+                    log_name=ctx.log_name, gkeys=gk,
+                    category="structural",
+                    tags=["COLD"],
+                )
+                q["shared_pair"]    = f"{a}->{b}"
+                q["group_coverage"] = pair["groups"]
+                q["hot_rep"]        = 1
+                cold_queries.append(q)
+        rng.shuffle(cold_queries)
+
+        # Interleave: spread cold queries evenly across the hot rounds.
+        # Strategy: insert cold queries between hot rounds.
+        perspective_queries: list[dict] = []
+        cold_per_gap = max(1, len(cold_queries) // max(1, reps_per_hot_pair + 1))
+
+        cold_idx = 0
+        for round_idx, round_qs in enumerate(hot_rounds):
+            # Insert a slice of cold queries before this hot round.
+            slice_end = min(cold_idx + cold_per_gap, len(cold_queries))
+            perspective_queries.extend(cold_queries[cold_idx:slice_end])
+            cold_idx = slice_end
+            # Then all hot queries for this round.
+            perspective_queries.extend(round_qs)
+
+            # After the 3rd round (index 2), every hot pair has been
+            # queried 3 times and the cost gate has been crossed.
+            # The background worker needs time to finish
+            # build_pair_persistent for each pair before the 4th round
+            # starts reading from Delta.  Insert a sleep sentinel so
+            # run_category pauses here.
+            # Budget: n_hot_pairs x ~20s per build, serialised = ~100s.
+            # 120s gives a comfortable margin.
+            if round_idx == 2:
+                perspective_queries.append({
+                    "id":            "__sleep__",
+                    "sleep_seconds": 120,
+                    "log_name":      ctx.log_name,
+                    "pattern":       "",
+                    "grouping_keys": gk,
+                    "tags":          ["__sentinel__"],
+                })
+
+        # Append any remaining cold queries at the end.
+        perspective_queries.extend(cold_queries[cold_idx:])
+
+        queries.extend(perspective_queries)
+
+    return queries
+
+
+# ---------------------------------------------------------------------------
 # Convenience: derive all four workloads from the configured dataset
 # ---------------------------------------------------------------------------
 

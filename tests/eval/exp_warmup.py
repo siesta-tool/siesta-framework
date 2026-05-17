@@ -107,8 +107,8 @@ CONFIG = CONFIG_DIR / "adaptive_index.config.json"
 # eager-promotion bypass in retention.py so rep 0 promotes every touched
 # pair to PERSISTENT and reps 1+ read from Delta.
 WARMUP_RETENTION_OVERRIDES = {
-    "min_query_count":   3,
-    "half_life_seconds": 3600,
+    "min_query_count":   1,
+    "half_life_seconds": 3600.0,
     "hysteresis":        0.15,
 }
 
@@ -131,8 +131,6 @@ def run_category(
     *,
     pass_mode: str,
     retention_overrides: dict,
-    promotion_rep: int = 2,        # 0-indexed rep that triggers promotion
-    post_promotion_delay_s: int = 120,  # wait for build_pair_persistent
 ) -> None:
     """
     Run `workload` × `reps` times, recording per-query latency.
@@ -147,6 +145,17 @@ def run_category(
     seq = 0
     for rep in range(reps):
         for q in workload:
+            # Sentinel: pause for background materialisation to finish.
+            # Inserted by build_shared_structure_workload after the round
+            # that crosses the cost gate.  Not a real query — just sleep.
+            if q.get("id") == "__sleep__":
+                secs = q.get("sleep_seconds", 120)
+                print(f"\n  [warmup] sleeping {secs}s for background "
+                      f"materialisation to complete ...")
+                time.sleep(secs)
+                print(f"  [warmup] resuming.\n")
+                continue
+
             try:
                 body, latency = timed_query(
                     log_name=q["log_name"],
@@ -167,12 +176,14 @@ def run_category(
                     grouping_keys=q["grouping_keys"],
                     bucket=(q.get("tags") or [None])[0],
                     group_coverage=q.get("group_coverage"),
+                    shared_pair=q.get("shared_pair"),
+                    hot_rep=q.get("hot_rep"),
                     has_constraints="[" in q["pattern"],
                     latency_s=latency,
                     total=body.get("total", 0),
                     perspective=body.get("perspective"),
                     pair_status_after=statuses,
-                    plot_exclude=False,
+                    plot_exclude=pass_mode == "warm" and rep == 0,
                 )
                 print(f"  [adaptive] seq={seq:3d} rep={rep} {q['id']:4s} "
                       f"{q['pattern']:30s} -> {latency:.3f}s "
@@ -185,18 +196,6 @@ def run_category(
                 )
                 print(f"  [adaptive] seq={seq:3d} {q['id']:4s} ERROR: {exc}")
             seq += 1
-
-        # After the rep that triggers promotion, pause to let the
-        # background build_pair_persistent finish before the next rep
-        # issues queries against the (not-yet-ready) Delta table.
-        # Without this delay the next rep's queries arrive while
-        # materialization is still running and fall back to lazy scan,
-        # making the post-promotion latency indistinguishable from cold.
-        if rep == promotion_rep and pass_mode == "warm":
-            print(f"\n  [warmup] rep {rep} triggered promotion — "
-                  f"waiting {post_promotion_delay_s}s for materialization ...")
-            time.sleep(post_promotion_delay_s)
-            print(f"  [warmup] resuming.")
 
 
 def run_eager_reference(
@@ -296,6 +295,12 @@ def main() -> None:
                          "synthetic all-pairs structural workload.  Requires "
                          "the eager sequence table, so only usable on the "
                          "warm pass.  Use --queries-from for the cold pass.")
+    ap.add_argument("--shared-structure", action="store_true",
+                    help="Phase 2 workload: hot pairs repeated across distinct "
+                         "query positions, cold pairs appearing once.  "
+                         "Demonstrates demand-driven materialisation across a "
+                         "realistic query stream without exact repetition.  "
+                         "Use --reps 1 with this mode.")
     ap.add_argument("--queries-from", default=None, metavar="JSONL",
                     help="Load the query set from an existing warm-pass JSONL "
                          "instead of rebuilding it.  Use this for the cold "
@@ -377,6 +382,18 @@ def main() -> None:
             "--queries-from tests/eval/results/6_3_1_warmup_warm.jsonl for "
             "the cold pass."
         )
+    elif args.shared_structure and not is_cold:
+        from tests.eval.workload import build_shared_structure_workload
+        print("\nFetching pair coverage and building shared-structure workload ...")
+        structural = build_shared_structure_workload(workloads.context)
+        print(f"  built {len(structural)} queries "
+              f"(includes 1 sleep sentinel per perspective)")
+    elif args.shared_structure and is_cold:
+        ap.error(
+            "--shared-structure requires the eager sequence table which is only "
+            "built during the warm pass.  Run the warm pass first, then use "
+            "--queries-from for the cold pass."
+        )
     else:
         structural = workloads.structural
 
@@ -389,10 +406,9 @@ def main() -> None:
         reps=args.reps,
         pass_mode=pass_mode,
         retention_overrides=retention_overrides,
-        promotion_rep=retention_overrides.get("min_query_count", 3) - 1,
     )
-    # if not is_cold:
-    #     run_eager_reference(rec, "structural", structural)
+    if not is_cold:
+        run_eager_reference(rec, "structural", structural)
 
     print(f"\nResults written to {rec.path}")
 

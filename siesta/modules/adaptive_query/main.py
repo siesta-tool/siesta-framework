@@ -52,6 +52,7 @@ import time
 from collections import OrderedDict
 from pathlib import Path
 from typing import Annotated, Any, Dict, List, Optional, Tuple
+import queue
 
 from fastapi import Body
 from pydantic import BaseModel, ConfigDict, Field
@@ -189,6 +190,13 @@ class Adaptive_Querying(SiestaModule):
         self.query_config = {}
         self._retention = None
         self._retention_params = None   
+        # Per-perspective promotion queues and worker threads.
+        # Each perspective gets one worker thread that serialises
+        # build_pair_persistent calls, preventing concurrent MERGE
+        # conflicts on the shared last_checked_table.
+        self._promotion_queues:  dict[str, queue.Queue] = {}
+        self._promotion_workers: dict[str, threading.Thread] = {}
+        self._promotion_lock = threading.Lock()
 
 
     # ------------------------------------------------------------------
@@ -969,7 +977,7 @@ class Adaptive_Querying(SiestaModule):
             finally:
                 catalog.flush()
 
-        threading.Thread(target=_promote_and_flush, daemon=True).start()
+        self._get_promotion_worker(pid).put(_promote_and_flush)
 
 
         formatted = [
@@ -1127,6 +1135,41 @@ class Adaptive_Querying(SiestaModule):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+    def _get_promotion_worker(self, pid: str) -> queue.Queue:
+        """
+        Return the promotion queue for perspective `pid`, creating a
+        background worker thread on first access.
+
+        The worker drains the queue sequentially, ensuring that
+        build_pair_persistent calls for the same perspective never
+        run concurrently and cannot conflict on last_checked_table.
+        """
+        with self._promotion_lock:
+            if pid not in self._promotion_queues:
+                q: queue.Queue = queue.Queue()
+                self._promotion_queues[pid] = q
+
+                def _worker(q=q):
+                    while True:
+                        fn = q.get()
+                        if fn is None:   # sentinel — shutdown
+                            break
+                        try:
+                            fn()
+                        except Exception as exc:
+                            logger.error(
+                                f"Promotion worker for '{pid}' failed: {exc}",
+                                exc_info=True,
+                            )
+                        finally:
+                            q.task_done()
+
+                t = threading.Thread(target=_worker, daemon=True, name=f"promote-{pid}")
+                t.start()
+                self._promotion_workers[pid] = t
+
+            return self._promotion_queues[pid]
+    
     def _maybe_promote_after_query(self, pid, pairs_touched, references_pos):
         """
         Lightweight per-pair retention check after each query.

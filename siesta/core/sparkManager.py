@@ -98,7 +98,8 @@ def startup(config: Dict[str, Any] = {}) -> None:
             .config("spark.hadoop.fs.s3a.multipart.size", "104857600") \
             .config("spark.jars.packages", packages) \
             .config("spark.sql.adaptive.enabled", "true") \
-            .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
+            .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
+            .config("spark.sql.execution.pyspark.udf.faulthandler.enabled", "true")
 
         if os.getenv("SPARK_IVY_DIR"):
             builder = builder.config("spark.jars.ivy", os.getenv("SPARK_IVY_DIR"))
