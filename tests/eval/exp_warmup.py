@@ -1,83 +1,57 @@
 """
 tests/eval/exp_warmup.py
 
-Experiment 6.3.1 — Query performance under adaptive indexing.
+Experiment 6.3.1 — Warm-up curve for adaptive perspective indexing.
 
 Goal
 ----
-Show how query latency evolves as the adaptive system warms up from
-cold (everything at L0, ABSENT) through to warm (frequent pairs at
-L3 PERSISTENT).
+Show that query latency drops as the adaptive system observes demand
+and materialises frequently-queried pairs under each perspective.
 
-Two passes
-----------
-COLD pass  (--no-promote-on-first):
-    min_query_count=3.  rep 0 measures the lazy-scan path against an
-    empty catalog.  No promotion fires during the measured rep.
-    Default --reps 1: only rep 0 is informative for the cold curve.
-    Eager reference queries are skipped, but the eager ingest still
-    runs because the adaptive system reads from the eager sequence
-    table on demand.
+Design
+------
+A single query stream, run once.  The stream contains:
 
-WARM pass  (default):
-    min_query_count=1 plus the eager-promotion bypass in
-    retention.py::should_persist_pair.  Promotion fires at the end of
-    rep 0, so rep 1 reads from the materialised per-perspective
-    PairsIndex on Delta.  Default --reps 5: rep 0 captures the
-    lazy-scan + sync-build cost (marked plot_exclude=True), reps 1-4
-    verify the L3 plateau.
+  - HOT pairs: high-coverage pairs that appear reps_per_hot_pair times
+    in the stream (default 4).  By their 3rd appearance the cost gate
+    fires and the pair is promoted to PERSISTENT in the background.
+    Their 4th appearance reads from the materialised Delta table.
 
-The intended plot combines both files:
-  - rep 0 from the cold file  (pure lazy scan, no build on hot path)
-  - reps 1-4 from the warm file (pure Delta reads)
-  rep 0 of the warm file carries plot_exclude=True because its latency
-  includes the synchronous build_pair_persistent cost.
+  - COLD pairs: low-coverage pairs that appear once.  They stay at
+    ABSENT or TRANSIENT throughout, serving as an in-stream control
+    that shows the system does NOT blindly promote everything.
 
-Ingest model
-------------
-Only the eager indexer is invoked.  It builds the shared sequence_table,
-activity_index, last_checked_table, pairs_index, and count_table.  The
-adaptive system reads from the eager sequence_table on demand:
-  * perspectives are auto-declared at L0 on first query
-  * the PerspectiveCatalog initialises itself when first accessed
-  * promote_to_l1 reads sequence_table directly
+All patterns are 2-activity ("A B") — skip-CEP eligible, no CEP
+blowup risk.  Patterns are drawn from observed pair co-occurrences
+under each perspective (via the /pair_coverage endpoint), so every
+query returns at least one result.
 
-`ingest_adaptive` is deliberately NOT called.  Its `run` endpoint
-re-executes `build_sequence_table` against the same path, which
-combined with `update_event_positions` poisons the existing table:
-positions of the second ingest are offset by the trace_metadata max,
-so the MERGE inserts every row a second time and doubles the data.
-`clear_existing=True` on the eager ingest ensures we start each run
-from a clean slate.
+Perspectives are filtered to event-level attributes with at least
+`min_perspective_cardinality` groups (see eval_common.discover_schema).
 
-Workload
---------
-With --result-bearing the workload is built from observed pair
-co-occurrences in the eager sequence table.  Pairs are stratified into
-DENSE / SPARSE / SINGLETON buckets so the warmup curve covers the full
-spectrum of result density.  Perspectives with fewer than
-`min_perspective_cardinality` groups are skipped.
+A sleep sentinel is inserted after the round that crosses the
+min_query_count threshold, giving the background materialisation
+worker time to finish before the final round reads from Delta.
 
-Without --result-bearing the synthetic all-pairs structural workload
-is used (useful for smoke tests).
+The resulting plot is:
+  x-axis = query position in the stream (seq)
+  y-axis = query latency (seconds)
+  color  = HOT / COLD
+  shape  = pair_status at query time (ABSENT / TRANSIENT / PERSISTENT)
 
-Eager comparison
-----------------
-The eager detector answers "which traces match" under trace_id grouping.
-It is run once per query as a reference floor (system="eager_trace").
-It is NOT a like-for-like baseline — the adaptive system answers a
-more expressive question (which perspective groups match).  The paper
-should plot it with a clear legend caveat.
+Expected curve: HOT queries start at ~15-25s (lazy scan), drop to
+~3s (LRU/TRANSIENT), then drop further to ~1-2s (Delta/PERSISTENT).
+COLD queries stay at ~15-25s throughout.
 
 Output
 ------
-results/6_3_1_warmup_cold.jsonl  (cold pass)
-results/6_3_1_warmup_warm.jsonl  (warm pass)
+results/6_3_1_warmup.jsonl
 
-Each line is a JSON record:
-  {"event": "query", "system": "adaptive", ...,
-   "pair_status_after": {...}, "plot_exclude": bool}
-  {"event": "query", "system": "eager_trace", ...}
+Each line:
+  {"event": "query", "system": "adaptive", "seq": N,
+   "qid": "H1", "bucket": "HOT", "shared_pair": "A->B",
+   "hot_rep": 2, "latency_s": 3.21, "total": 113,
+   "pair_status_after": {"A->B": "TRANSIENT"}, ...}
 """
 
 from __future__ import annotations
@@ -88,184 +62,100 @@ import sys
 import time
 from pathlib import Path
 
-# Allow running as a script from the repo root.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tests.eval.eval_common import (
     CONFIG_DIR,
     Recorder, health_check,
     ingest_eager,
-    timed_query, detect_eager,
+    timed_query,
     resolve_dataset,
 )
-from tests.eval.workload import build_workloads
+from tests.eval.workload import build_workloads, build_shared_structure_workload
 
 
 CONFIG = CONFIG_DIR / "adaptive_index.config.json"
 
-# Retention overrides for the warm pass.  min_query_count=1 triggers the
-# eager-promotion bypass in retention.py so rep 0 promotes every touched
-# pair to PERSISTENT and reps 1+ read from Delta.
-WARMUP_RETENTION_OVERRIDES = {
-    "min_query_count":   1,
-    "half_life_seconds": 3600.0,
-    "hysteresis":        0.15,
-}
-
-COLD_RETENTION_OVERRIDES = {
+# Retention overrides.  min_query_count=3 means the system needs to see
+# a pair queried 3 times before promotion fires.  This is the real
+# adaptive decision logic — not a bypass.
+RETENTION_OVERRIDES = {
     "min_query_count":   3,
     "half_life_seconds": 3600.0,
-    "hysteresis":        0.15,
+    "hysteresis":        0.0,
 }
 
 
 # ---------------------------------------------------------------------------
-# Query runners
+# Runner
 # ---------------------------------------------------------------------------
 
-def run_category(
+def run_stream(
     rec: Recorder,
-    category: str,
     workload: list[dict],
-    reps: int,
     *,
-    pass_mode: str,
     retention_overrides: dict,
 ) -> None:
     """
-    Run `workload` × `reps` times, recording per-query latency.
+    Run the query stream once, recording per-query latency.
 
-    Each record carries `plot_exclude=True` for rep 0 of the warm pass,
-    because that rep's latency includes the synchronous
-    build_pair_persistent cost and is not representative of either the
-    cold or the warm steady state.
+    Handles __sleep__ sentinels by pausing — these are not real queries
+    and are not recorded in the JSONL.
     """
-    print(f"\n── adaptive {category} — {len(workload)} queries × {reps} reps ──")
+    real_count = sum(1 for q in workload if q["id"] != "__sleep__")
+    print(f"\n── query stream: {real_count} queries ──")
 
     seq = 0
-    for rep in range(reps):
-        for q in workload:
-            # Sentinel: pause for background materialisation to finish.
-            # Inserted by build_shared_structure_workload after the round
-            # that crosses the cost gate.  Not a real query — just sleep.
-            if q.get("id") == "__sleep__":
-                secs = q.get("sleep_seconds", 120)
-                print(f"\n  [warmup] sleeping {secs}s for background "
-                      f"materialisation to complete ...")
-                time.sleep(secs)
-                print(f"  [warmup] resuming.\n")
-                continue
-
-            try:
-                body, latency = timed_query(
-                    log_name=q["log_name"],
-                    pattern=q["pattern"],
-                    grouping_keys=q["grouping_keys"],
-                    retention_overrides=retention_overrides,
-                )
-                statuses = body.get("pair_status_after") or {}
-                summary  = ",".join(f"{k}={v}" for k, v in statuses.items())
-                rec.emit(
-                    "query",
-                    system="adaptive",
-                    category=category,
-                    rep=rep,
-                    seq=seq,
-                    qid=q["id"],
-                    pattern=q["pattern"],
-                    grouping_keys=q["grouping_keys"],
-                    bucket=(q.get("tags") or [None])[0],
-                    group_coverage=q.get("group_coverage"),
-                    shared_pair=q.get("shared_pair"),
-                    hot_rep=q.get("hot_rep"),
-                    has_constraints="[" in q["pattern"],
-                    latency_s=latency,
-                    total=body.get("total", 0),
-                    perspective=body.get("perspective"),
-                    pair_status_after=statuses,
-                    plot_exclude=pass_mode == "warm" and rep == 0,
-                )
-                print(f"  [adaptive] seq={seq:3d} rep={rep} {q['id']:4s} "
-                      f"{q['pattern']:30s} -> {latency:.3f}s "
-                      f"total={body.get('total')} [{summary}]")
-            except Exception as exc:
-                rec.emit(
-                    "query_error",
-                    system="adaptive", category=category,
-                    rep=rep, seq=seq, qid=q["id"], error=str(exc),
-                )
-                print(f"  [adaptive] seq={seq:3d} {q['id']:4s} ERROR: {exc}")
-            seq += 1
-
-
-def run_eager_reference(
-    rec: Recorder,
-    category: str,
-    workload: list[dict],
-) -> None:
-    """
-    Run each query once through the case-centric eager detector.
-
-    Reference point only — answers a different question (which traces
-    match) under a different grouping (trace_id).  See module docstring.
-    """
-    print(f"\n── eager reference {category} ──")
     for q in workload:
-        t0 = time.perf_counter()
+        # Sleep sentinel — pause for background materialisation.
+        if q.get("id") == "__sleep__":
+            secs = q.get("sleep_seconds", 120)
+            print(f"\n  [sleep] waiting {secs}s for background "
+                  f"materialisation to complete ...")
+            time.sleep(secs)
+            print(f"  [sleep] resuming.\n")
+            continue
+
         try:
-            body    = detect_eager(log_name=q["log_name"], pattern=q["pattern"])
-            latency = time.perf_counter() - t0
+            body, latency = timed_query(
+                log_name=q["log_name"],
+                pattern=q["pattern"],
+                grouping_keys=q["grouping_keys"],
+                retention_overrides=retention_overrides,
+            )
+            statuses = body.get("pair_status_after") or {}
+            summary  = ",".join(f"{k}={v}" for k, v in statuses.items())
+            tag      = (q.get("tags") or [None])[0]
+
             rec.emit(
                 "query",
-                system="eager_trace", category=category, rep=0, qid=q["id"],
+                system="adaptive",
+                seq=seq,
+                qid=q["id"],
                 pattern=q["pattern"],
+                grouping_keys=q["grouping_keys"],
+                bucket=tag,
+                shared_pair=q.get("shared_pair"),
+                hot_rep=q.get("hot_rep"),
+                group_coverage=q.get("group_coverage"),
                 has_constraints="[" in q["pattern"],
                 latency_s=latency,
                 total=body.get("total", 0),
+                perspective=body.get("perspective"),
+                pair_status_after=statuses,
             )
-            print(f"  [eager_trace] {q['id']:4s} {q['pattern']:30s} -> "
-                  f"{latency:.3f}s total={body.get('total')}")
+            print(f"  seq={seq:3d} {q['id']:<6s} [{tag or '?':<4s}] "
+                  f"rep={q.get('hot_rep', '?')}  "
+                  f"{q['pattern']:30s} -> {latency:.2f}s  "
+                  f"total={body.get('total')} [{summary}]")
         except Exception as exc:
-            rec.emit("query_error", system="eager_trace", category=category,
-                     qid=q["id"], error=str(exc))
-            print(f"  [eager_trace] {q['id']:4s} ERROR: {exc}")
+            rec.emit(
+                "query_error",
+                seq=seq, qid=q["id"], error=str(exc),
+            )
+            print(f"  seq={seq:3d} {q['id']:<6s} ERROR: {exc}")
 
-
-# ---------------------------------------------------------------------------
-# Workload helpers
-# ---------------------------------------------------------------------------
-
-def _load_workload_from_jsonl(path: Path) -> list[dict]:
-    """
-    Reconstruct the structural workload from an existing warm JSONL so
-    the cold pass uses the exact same query set without re-running pair
-    coverage (which requires the eager sequence table to already exist).
-    """
-    queries: list[dict] = []
-    seen_ids: set[str] = set()
-    with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            r = json.loads(line)
-            if (
-                r.get("event") == "query"
-                and r.get("system") == "adaptive"
-                and r.get("rep") == 0
-                and r.get("qid") not in seen_ids
-            ):
-                seen_ids.add(r["qid"])
-                queries.append({
-                    "id":             r["qid"],
-                    "log_name":       r.get("log_name", ""),
-                    "pattern":        r["pattern"],
-                    "grouping_keys":  r["grouping_keys"],
-                    "category":       r.get("category", "structural"),
-                    "tags":           [r["bucket"]] if r.get("bucket") else [],
-                    "group_coverage": r.get("group_coverage"),
-                })
-    return queries
+        seq += 1
 
 
 # ---------------------------------------------------------------------------
@@ -274,57 +164,27 @@ def _load_workload_from_jsonl(path: Path) -> list[dict]:
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Experiment 6.3.1 — Query performance under adaptive indexing.",
+        description="Experiment 6.3.1 — Warm-up curve for adaptive "
+                    "perspective indexing.",
     )
     ap.add_argument("--dataset",  default=None,
                     help="Path to the dataset file (.xes or .csv).")
     ap.add_argument("--log-name", default=None,
                     help="Log name used as the storage key.")
-    ap.add_argument("--reps", type=int, default=None,
-                    help="Passes per workload.  Defaults to 1 for the cold "
-                         "pass and 5 for the warm pass.")
-    ap.add_argument("--no-promote-on-first", action="store_true",
-                    help="COLD pass mode: use min_query_count=3 so no "
-                         "promotion fires during the measured rep.")
-    ap.add_argument("--out-suffix", default=None,
-                    help="Override the JSONL filename suffix.  Defaults to "
-                         "'cold' or 'warm' based on pass mode.")
-    ap.add_argument("--result-bearing", action="store_true",
-                    help="Build the workload from observed pair co-occurrences "
-                         "(DENSE/SPARSE/SINGLETON buckets) instead of the "
-                         "synthetic all-pairs structural workload.  Requires "
-                         "the eager sequence table, so only usable on the "
-                         "warm pass.  Use --queries-from for the cold pass.")
-    ap.add_argument("--shared-structure", action="store_true",
-                    help="Phase 2 workload: hot pairs repeated across distinct "
-                         "query positions, cold pairs appearing once.  "
-                         "Demonstrates demand-driven materialisation across a "
-                         "realistic query stream without exact repetition.  "
-                         "Use --reps 1 with this mode.")
-    ap.add_argument("--queries-from", default=None, metavar="JSONL",
-                    help="Load the query set from an existing warm-pass JSONL "
-                         "instead of rebuilding it.  Use this for the cold "
-                         "pass so both passes share the exact same queries.")
+    ap.add_argument("--out-suffix", default="warmup",
+                    help="JSONL filename suffix (default: warmup).")
     ap.add_argument("--skip-ingest", action="store_true",
-                    help="Skip the eager ingest call.  Use when the dataset "
-                         "is already ingested in MinIO and you want to iterate "
-                         "on queries without re-parsing the XES file.")
+                    help="Skip the eager ingest.  Use when the dataset "
+                         "is already in MinIO from a previous run.")
+    ap.add_argument("--n-hot", type=int, default=5,
+                    help="Number of hot pairs per perspective (default: 5).")
+    ap.add_argument("--n-cold", type=int, default=8,
+                    help="Number of cold pairs per perspective (default: 8).")
+    ap.add_argument("--hot-reps", type=int, default=4,
+                    help="Times each hot pair appears in the stream (default: 4).")
+    ap.add_argument("--sleep", type=int, default=120,
+                    help="Seconds to sleep after the promotion round (default: 120).")
     args = ap.parse_args()
-
-    # ── resolve pass mode ────────────────────────────────────────────────
-    is_cold = args.no_promote_on_first
-
-    if args.reps is None:
-        args.reps = 1 if is_cold else 5
-
-    if is_cold:
-        retention_overrides = dict(COLD_RETENTION_OVERRIDES)
-        suffix    = args.out_suffix or "cold"
-        pass_mode = "cold"
-    else:
-        retention_overrides = dict(WARMUP_RETENTION_OVERRIDES)
-        suffix    = args.out_suffix or "warm"
-        pass_mode = "warm"
 
     # ── dataset / context ────────────────────────────────────────────────
     spec      = resolve_dataset(args.dataset, args.log_name)
@@ -333,11 +193,41 @@ def main() -> None:
     print(f"Dataset : {spec.path} (log_name={spec.log_name})")
     print(f"  activities   = {workloads.context.activities}")
     print(f"  perspectives = {workloads.context.perspectives}")
-    print(f"  PASS         = {pass_mode}  (overrides: {retention_overrides})")
+    print(f"  retention    = {RETENTION_OVERRIDES}")
 
-    # ── health + recorder ────────────────────────────────────────────────
+    # ── health check ─────────────────────────────────────────────────────
     health_check()
-    out_name = f"6_3_1_warmup_{suffix}.jsonl"
+
+    # ── ingest ───────────────────────────────────────────────────────────
+    if args.skip_ingest:
+        print("\nSkipping ingest (--skip-ingest).")
+    else:
+        print("\nIngesting (eager, clear_existing=True) ...")
+        ingest_eager(spec.log_name, spec.path, CONFIG, clear_existing=True)
+        print("Ingest complete.")
+    time.sleep(2)
+
+    # ── workload ─────────────────────────────────────────────────────────
+    print("\nFetching pair coverage and building query stream ...")
+    stream = build_shared_structure_workload(
+        workloads.context,
+        n_hot_pairs=args.n_hot,
+        n_cold_pairs=args.n_cold,
+        reps_per_hot_pair=args.hot_reps,
+        sleep_seconds=args.sleep,
+    )
+
+    if not stream:
+        print("ERROR: no queries generated.  Check perspective cardinality "
+              "and pair coverage.")
+        sys.exit(1)
+
+    real_count  = sum(1 for q in stream if q["id"] != "__sleep__")
+    sleep_count = sum(1 for q in stream if q["id"] == "__sleep__")
+    print(f"  {real_count} queries + {sleep_count} sleep sentinel(s)")
+
+    # ── recorder ─────────────────────────────────────────────────────────
+    out_name = f"6_3_1_{args.out_suffix}.jsonl"
     rec = Recorder("6.3.1", out_name)
     rec.emit(
         "dataset",
@@ -345,70 +235,11 @@ def main() -> None:
         log_name=spec.log_name,
         activities=workloads.context.activities,
         perspectives=workloads.context.perspectives,
-        retention_overrides=retention_overrides,
-        pass_mode=pass_mode,
+        retention_overrides=RETENTION_OVERRIDES,
     )
 
-    # ── ingest ───────────────────────────────────────────────────────────
-    # Only eager ingest runs.  See module docstring "Ingest model" for why
-    # ingest_adaptive is intentionally skipped.  clear_existing=True wipes
-    # all tables under the log_name so we start clean every run.
-    if args.skip_ingest:
-        print("\nSkipping ingest (--skip-ingest).")
-    else:
-        print("\nIngesting (eager, clear_existing=True) ...")
-        ingest_eager(spec.log_name, spec.path, CONFIG, clear_existing=True)
-    rec.emit("ingest_complete", log_name=spec.log_name)
-    time.sleep(2)
-
-    # ── workload construction ─────────────────────────────────────────────
-    # Done AFTER ingest so the eager sequence_table exists for pair_coverage.
-    if args.queries_from:
-        queries_path = Path(args.queries_from)
-        if not queries_path.exists():
-            ap.error(f"--queries-from: file not found: {queries_path}")
-        print(f"\nLoading workload from {queries_path} ...")
-        structural = _load_workload_from_jsonl(queries_path)
-        print(f"  loaded {len(structural)} queries")
-    elif args.result_bearing and not is_cold:
-        from tests.eval.workload import build_result_bearing_workload
-        print("\nFetching pair coverage and building result-bearing workload ...")
-        structural = build_result_bearing_workload(workloads.context)
-        print(f"  built {len(structural)} queries")
-    elif args.result_bearing and is_cold:
-        ap.error(
-            "--result-bearing requires the eager sequence table which is only "
-            "built during the warm pass.  Run the warm pass first, then use "
-            "--queries-from tests/eval/results/6_3_1_warmup_warm.jsonl for "
-            "the cold pass."
-        )
-    elif args.shared_structure and not is_cold:
-        from tests.eval.workload import build_shared_structure_workload
-        print("\nFetching pair coverage and building shared-structure workload ...")
-        structural = build_shared_structure_workload(workloads.context)
-        print(f"  built {len(structural)} queries "
-              f"(includes 1 sleep sentinel per perspective)")
-    elif args.shared_structure and is_cold:
-        ap.error(
-            "--shared-structure requires the eager sequence table which is only "
-            "built during the warm pass.  Run the warm pass first, then use "
-            "--queries-from for the cold pass."
-        )
-    else:
-        structural = workloads.structural
-
-    print(f"\n  structural workload : {len(structural)} queries "
-          f"× {args.reps} reps = {len(structural) * args.reps} total")
-
-    # ── run ───────────────────────────────────────────────────────────────
-    run_category(
-        rec, "structural", structural,
-        reps=args.reps,
-        pass_mode=pass_mode,
-        retention_overrides=retention_overrides,
-    )
-    if not is_cold:
-        run_eager_reference(rec, "structural", structural)
+    # ── run ──────────────────────────────────────────────────────────────
+    run_stream(rec, stream, retention_overrides=RETENTION_OVERRIDES)
 
     print(f"\nResults written to {rec.path}")
 

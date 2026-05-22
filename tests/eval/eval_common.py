@@ -209,9 +209,10 @@ def _select_perspectives(
     Result is sorted by cardinality ascending so the workload builder
     picks representatives across the full group-size range.
     """
+    _PERSPECTIVE_PREFIXES = {"org:", "lifecycle:", "concept:"}
     candidates: list[tuple[str, int]] = []
     for k in values:
-        if k in numeric_keys:
+        if k in numeric_keys and not any(k.startswith(p) for p in _PERSPECTIVE_PREFIXES):
             continue
         n_dist = len(distinct_counts[k])
         if not (cardinality_floor <= n_dist <= cardinality_cap):

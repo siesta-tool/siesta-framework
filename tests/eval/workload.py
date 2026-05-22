@@ -432,7 +432,7 @@ def build_result_bearing_workload(
                   "Almost-empty result, but non-trivial."
 
     Perspectives below `min_perspective_cardinality` are skipped:
-    below 8 groups, the DENSE/SPARSE/SINGLETON thresholds collapse
+    below 6 groups, the DENSE/SPARSE/SINGLETON thresholds collapse
     (e.g. with 5 groups, SPARSE = [0, 1] groups, indistinguishable
     from SINGLETON).  For meaningful stratification prefer >= 20.
 
@@ -528,7 +528,8 @@ def build_shared_structure_workload(
     n_cold_pairs: int = 8,
     reps_per_hot_pair: int = 4,
     reps_per_cold_pair: int = 1,
-    min_perspective_cardinality: int = 8,
+    min_perspective_cardinality: int = 5,
+    sleep_seconds: int = 120,
     rng_seed: int = 0,
 ) -> list[dict]:
     """
@@ -590,7 +591,7 @@ def build_shared_structure_workload(
             cov = fetch_pair_coverage(
                 ctx.log_name,
                 gk,
-                activities=ctx.activities,
+                # activities=ctx.activities,
             )
         except Exception as exc:
             print(f"  [workload] skipping perspective {gk}: {exc}")
@@ -692,7 +693,7 @@ def build_shared_structure_workload(
             if round_idx == 2:
                 perspective_queries.append({
                     "id":            "__sleep__",
-                    "sleep_seconds": 120,
+                    "sleep_seconds": sleep_seconds,
                     "log_name":      ctx.log_name,
                     "pattern":       "",
                     "grouping_keys": gk,
