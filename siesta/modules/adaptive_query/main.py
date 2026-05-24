@@ -75,6 +75,7 @@ from siesta.modules.adaptive_index.builders import (
     build_pair_transient,
     promote_to_l1,
     promote_to_l2,
+    _get_perspective_seq_df,
     _perspective_pair_path,
 )
 from siesta.modules.adaptive_index.catalog import get_catalog
@@ -640,6 +641,7 @@ class Adaptive_Querying(SiestaModule):
                     lookback=lookback,
                     lookback_mode=lookback_mode,
                     candidate_group_ids=[],  # full scan
+                    grouping_keys=grouping_keys,
                     metadata=self.metadata,
                     storage=self.storage,
                     has_pos=has_pos,
@@ -1054,23 +1056,25 @@ class Adaptive_Querying(SiestaModule):
         # follow pattern_suffix.  Check both persisted pairs and the
         # activity index for candidate targets.
         spark = get_spark_session()
-        from siesta.modules.adaptive_index.builders import (
-            _perspective_sequence_path,
-        )
+        has_pos = stats.level >= PerspectiveLevel.L2_POS_ESTABLISHED
 
-        seq_path = _perspective_sequence_path(self.metadata, pid)
         try:
-            seq_df = spark.read.format("delta").load(seq_path)
+            seq_df = _get_perspective_seq_df(
+                pid=pid,
+                grouping_keys=grouping_keys,
+                metadata=self.metadata,
+                storage=self.storage,
+                has_pos=has_pos,
+            )
         except Exception:
             return {
                 "code": 500,
                 "error": (
-                    f"Sequence table for perspective '{pid}' not found."
+                    f"Sequence data for perspective '{pid}' not available."
                 ),
             }
 
-        # Candidate targets: all activities that appear after
-        # pattern_suffix in any group.
+        # Candidate targets: all activities that appear in this perspective's groups.
         candidates = (
             seq_df
             .filter(col("activity") != pattern_suffix)
@@ -1228,7 +1232,9 @@ class Adaptive_Querying(SiestaModule):
                     t0 = time.time()
                     has_pos = stats.level >= PerspectiveLevel.L2_POS_ESTABLISHED
                     build_pair_persistent(
-                        pid=pid, act_a=a, act_b=b, lookback=stats.lookback, lookback_mode=stats.lookback_mode,
+                        pid=pid, act_a=a, act_b=b,
+                        lookback=stats.lookback, lookback_mode=stats.lookback_mode,
+                        grouping_keys=stats.grouping_keys,
                         metadata=self.metadata, storage=self.storage,
                         has_pos=has_pos,
                     )

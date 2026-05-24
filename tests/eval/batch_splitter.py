@@ -61,6 +61,7 @@ import os
 import random
 import re
 import sys
+import xml.etree.ElementTree as ET
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -71,63 +72,60 @@ from typing import Iterator
 # XES reader (minimal — extracts trace_id, activity, timestamp, attributes)
 # ---------------------------------------------------------------------------
 
+_NS_RE       = re.compile(r"^\{[^}]+\}")
+_XES_ATTR_TAGS = {"string", "date", "int", "float", "boolean", "id"}
+
+
+def _strip_ns(tag: str) -> str:
+    return _NS_RE.sub("", tag)
+
+
 def _iter_xes(path: Path) -> Iterator[dict]:
     """
-    Yield one dict per event from an XES file.  Reads line-by-line so
-    large files are not loaded into memory.
+    Yield one dict per event from an XES file using ET.iterparse.
 
-    Recognised patterns (case-insensitive):
-        <trace>  ...  </trace>  — outer trace envelope
-        <string key="concept:name" value="..."/>  — trace ID or activity
-        <date   key="time:timestamp" value="..."/>
-        other <string/> or <int/> or <float/> keys -> attribute columns
+    Handles namespace-qualified tags, multi-line attribute elements, and
+    key/value in either order — all formats the old line-by-line regex
+    parser silently rejected.
     """
-    _TRACE_START = re.compile(r'<trace\b', re.I)
-    _TRACE_END   = re.compile(r'</trace>', re.I)
-    _EVENT_START = re.compile(r'<event\b', re.I)
-    _EVENT_END   = re.compile(r'</event>', re.I)
-    _ATTR        = re.compile(
-        r'<(?:string|int|float|boolean|id)\s+key="([^"]+)"\s+value="([^"]*)"',
-        re.I,
-    )
-    _DATE        = re.compile(r'<date\s+key="([^"]+)"\s+value="([^"]*)"', re.I)
-
     trace_id: str = ""
     in_event: bool = False
-    event_buf: dict = {}
+    cur_attrs: dict = {}
 
-    with path.open(encoding="utf-8", errors="replace") as f:
-        for line in f:
-            if _TRACE_START.search(line):
-                trace_id = ""
-                in_event = False
-            elif _TRACE_END.search(line):
-                trace_id = ""
-                in_event = False
-            elif _EVENT_START.search(line):
-                in_event = True
-                event_buf = {}
-            elif _EVENT_END.search(line):
-                if in_event and "activity" in event_buf and "timestamp" in event_buf:
-                    event_buf["trace_id"] = trace_id
-                    yield dict(event_buf)
-                in_event = False
-                event_buf = {}
-            else:
-                # Attribute line — applies to trace header or event body.
-                m = _ATTR.search(line) or _DATE.search(line)
-                if m:
-                    key, val = m.group(1), m.group(2)
-                    if key == "concept:name":
-                        if not in_event:
-                            trace_id = val
-                        else:
-                            event_buf["activity"] = val
-                    elif key == "time:timestamp":
-                        event_buf["timestamp"] = val
-                    else:
-                        if in_event:
-                            event_buf[key] = val
+    for ev, elem in ET.iterparse(str(path), events=("start", "end")):
+        tag = _strip_ns(elem.tag)
+
+        if ev == "end" and tag == "trace":
+            trace_id = ""
+            in_event = False
+            elem.clear()
+
+        elif ev == "start" and tag == "event":
+            in_event = True
+            cur_attrs = {}
+
+        elif ev == "end" and tag == "event":
+            if "activity" in cur_attrs and "timestamp" in cur_attrs:
+                cur_attrs["trace_id"] = trace_id
+                yield dict(cur_attrs)
+            in_event = False
+            cur_attrs = {}
+            elem.clear()
+
+        elif ev == "end" and tag in _XES_ATTR_TAGS:
+            k = elem.attrib.get("key")
+            v = elem.attrib.get("value")
+            if k is None or v is None:
+                continue
+            if k == "concept:name":
+                if not in_event:
+                    trace_id = v
+                else:
+                    cur_attrs["activity"] = v
+            elif k == "time:timestamp":
+                cur_attrs["timestamp"] = v
+            elif in_event:
+                cur_attrs[k] = v
 
 
 def _iter_csv(path: Path) -> Iterator[dict]:

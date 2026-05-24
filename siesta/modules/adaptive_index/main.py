@@ -21,6 +21,8 @@ from siesta.modules.adaptive_index.builders import (
     incremental_update_persistent_pairs,
     promote_to_l1,
     promote_to_l2,
+    _perspective_positions_path,
+    _perspective_seq_metadata_path,
 )
 from siesta.modules.adaptive_index.catalog import evict_catalog, get_catalog
 from siesta.modules.adaptive_index.retention import RetentionPolicy
@@ -802,24 +804,11 @@ class Adaptive_Indexing(SiestaModule):
                 and self._retention.should_demote_l1(stats)
             ):
                 logger.info(f"{self.name}: demoting '{pid}' L1->L0.")
-                # Drop the per-perspective sequence table. Future queries that
-                # touch this perspective will rebuild it via L0->L1 promotion.
-                try:
-                    from siesta.modules.adaptive_index.builders import _perspective_sequence_path
-                    seq_path = _perspective_sequence_path(self.metadata, pid)
-                    spark = get_spark_session()
-                    spark.sql(f"DROP TABLE IF EXISTS delta.`{seq_path}`")
-                    # Reset L1-specific stats so subsequent re-promotion starts clean.
-                    stats.l1_build_cost_ms = 0.0
-                    stats.l1_maintenance_ms_per_batch = 0.0
-                    # Note: we do NOT reset l1_query_count - that's the workload signal
-                    # that drives re-promotion.
-                    self._catalog.set_level(pid, PerspectiveLevel.L0_DECLARED)
-                except Exception as exc:
-                    logger.error(
-                        f"{self.name}: L1 demotion failed for '{pid}': {exc}",
-                        exc_info=True,
-                    )
+                # L1 no longer materialises a per-perspective sequence table,
+                # so there is nothing to drop.  Just reset stats and level.
+                stats.l1_build_cost_ms = 0.0
+                stats.l1_maintenance_ms_per_batch = 0.0
+                self._catalog.set_level(pid, PerspectiveLevel.L0_DECLARED)
 
             # ---- L2 -> L1 demotion ----
             elif (
@@ -827,13 +816,15 @@ class Adaptive_Indexing(SiestaModule):
                 and self._retention.should_demote_l2(stats)
             ):
                 logger.info(f"{self.name}: demoting '{pid}' L2->L1.")
-                # Stop maintaining pos. Existing per-pair indices keep their pos
-                # data but it goes stale; the query planner falls back to ts-sort.
+                # Drop the compact positions overlay and the sequence metadata
+                # table.  The query planner will fall back to timestamp ordering.
                 try:
-                    from siesta.modules.adaptive_index.builders import _perspective_seq_metadata_path
-                    meta_path = _perspective_seq_metadata_path(self.metadata, pid)
                     spark = get_spark_session()
-                    spark.sql(f"DROP TABLE IF EXISTS delta.`{meta_path}`")
+                    for path in (
+                        _perspective_positions_path(self.metadata, pid),
+                        _perspective_seq_metadata_path(self.metadata, pid),
+                    ):
+                        spark.sql(f"DROP TABLE IF EXISTS delta.`{path}`")
                     stats.l2_build_cost_ms = 0.0
                     stats.l2_maintenance_ms_per_batch = 0.0
                     self._catalog.set_level(pid, PerspectiveLevel.L1_POS_FREE)
@@ -862,6 +853,7 @@ class Adaptive_Indexing(SiestaModule):
                                 storage=self.storage,
                                 lookback=stats.lookback,
                                 lookback_mode=stats.lookback_mode,
+                                grouping_keys=stats.grouping_keys,
                                 has_pos=(
                                     stats.level
                                     >= PerspectiveLevel.L2_POS_ESTABLISHED
