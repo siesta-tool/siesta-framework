@@ -15,6 +15,7 @@ from pyspark.sql import SparkSession, functions as F
 from siesta.modules.compare.ngrams import discover_ngrams, save_ngram_results, create_network
 from siesta.modules.compare.dm import discover_rare_rules, discover_targeted_rules, save_dm_results
 from siesta.modules.compare.loops import discover_loops, save_loops_results, create_loops_html
+from siesta.modules.compare.time_bottleneck import discover_time_bottlenecks, save_time_bottleneck_results
 from siesta.modules.mine.ordered import discover_ordered
 import logging
 
@@ -53,10 +54,11 @@ class Comparing(SiestaModule):
 
     def register_routes(self) -> SiestaModule.ApiRoutes | None:
         return {
-            "ngrams":         ("POST", self.api_ngrams),
-            "rare_rules":     ("POST", self.api_rare_rules),
-            "targeted_rules": ("POST", self.api_targeted_rules),
-            "loops":          ("POST", self.api_loops),
+            "ngrams":            ("POST", self.api_ngrams),
+            "rare_rules":        ("POST", self.api_rare_rules),
+            "targeted_rules":    ("POST", self.api_targeted_rules),
+            "loops":             ("POST", self.api_loops),
+            "time_bottleneck":   ("POST", self.api_time_bottleneck),
         }
 
     def startup(self):
@@ -325,6 +327,74 @@ class Comparing(SiestaModule):
                 logger.error(f"Failed to parse loops results from {output_path}.")
                 return f"Cannot parse results. Check logs and {output_path} for details."
 
+    def api_time_bottleneck(self, comparator_config: Annotated[ComparatorConfig, Body(
+        openapi_examples={
+            "default": {
+                "summary": "Detect time bottlenecks with default settings",
+                "value": {
+                    "log_name": "example_log",
+                    "storage_namespace": "siesta",
+                    "method_params": {
+                        "threshold": 3.0,
+                        "work_start": None,
+                        "work_end": None,
+                    },
+                    "separating_key": "activity",
+                    "separating_groups": [["fail", "error"]],
+                    "support_threshold": 0.0,
+                },
+            },
+        }
+    )]) -> Any | None:
+        """Detect time bottlenecks in process traces per separating group.
+
+        A bottleneck is an activity transition A→B whose effective
+        working-hours duration within a trace exceeds
+        ``global_mean + threshold × global_std``.  Global mean and std are
+        computed across **all** transitions in the log; results are reported
+        separately for each label group defined by ``separating_groups``.
+
+        Working hours are derived automatically from the globally earliest and
+        latest time-of-day observed in the log (weekends excluded).  Both
+        bounds can be overridden via ``method_params``.
+
+        **Request body (`ComparatorConfig`):**
+        - `log_name` *(str)* – name of the indexed log.
+        - `storage_namespace` *(str)* – storage namespace.
+        - `method_params` *(object)* – method-specific options:
+            - `threshold` *(float, default: `3.0`)* – number of std deviations
+              above the global mean that defines a bottleneck.
+            - `work_start` *(str or null, e.g. `"08:00:00"`)* – working-day
+              start time (HH:MM:SS).  Auto-derived from data when omitted.
+            - `work_end` *(str or null, e.g. `"17:00:00"`)* – working-day end
+              time (HH:MM:SS).  Auto-derived from data when omitted.
+        - `separating_key` *(str)* – column used to label traces into groups.
+        - `separating_groups` *(list[list[str]])* – group definitions,
+          e.g. `[["fail", "error"]]`.  When empty, all traces form one group.
+        - `support_threshold` *(float [0,1], default: `0.0`)* – unused;
+          kept for interface consistency.
+        """
+        self.siesta_config = get_system_config()
+        self.storage = get_storage_manager()
+
+        config = comparator_config.model_dump()
+        config["method"] = "time_bottleneck"
+        try:
+            self._load_comparator_config(config)
+        except Exception as e:
+            logger.exception(f"Error loading comparator config: {e}")
+            return {"code": 400, "message": f"Invalid config: {e}"}
+
+        self.compare(caller="api")
+
+        logger.info(f"Completed. Results available at {self.comparator_config['output_path']}.")
+        with open(self.comparator_config["output_path"], "r") as fh:
+            try:
+                return json.load(fh)
+            except Exception:
+                logger.error(f"Failed to parse time_bottleneck results from {self.comparator_config['output_path']}.")
+                return f"Cannot parse results. Check logs and {self.comparator_config['output_path']} for details."
+
     # ------------------------------------------------------------------
     # Shared helpers
     # ------------------------------------------------------------------
@@ -361,7 +431,8 @@ class Comparing(SiestaModule):
         method = self.comparator_config.get("method", "ngrams")
         params = self.comparator_config.get("method_params", {})
 
-        target_activities = self.comparator_config.get("separating_groups", [[]])[0]
+        sep_groups = self.comparator_config.get("separating_groups") or []
+        target_activities = sep_groups[0] if sep_groups else []
         trace_labels = (
             all_events_df
             .withColumn("label", F.when(F.col("activity").isin(target_activities), 1).otherwise(0))
@@ -436,5 +507,29 @@ class Comparing(SiestaModule):
                 with open(html_path, "w", encoding="utf-8") as fh:
                     fh.write(create_loops_html(result))
                 logger.info(f"Loops visualisation written to {html_path}.")
+
+        elif method == "time_bottleneck":
+            from datetime import time as dtime
+
+            def _parse_time(s: str | None) -> dtime | None:
+                if not s:
+                    return None
+                try:
+                    parts = str(s).split(":")
+                    return dtime(int(parts[0]), int(parts[1]), int(parts[2]) if len(parts) > 2 else 0)
+                except Exception:
+                    logger.warning(f"Could not parse time '{s}'; deriving from data.")
+                    return None
+
+            result = discover_time_bottlenecks(
+                events_df=all_events_df,
+                trace_labels=trace_labels,
+                threshold=float(params.get("threshold", 3.0)),
+                work_start=_parse_time(params.get("work_start")),
+                work_end=_parse_time(params.get("work_end")),
+            )
+
+            self.comparator_config["output_path"] += ".json"
+            save_time_bottleneck_results(result, self.comparator_config["output_path"])
 
         all_events_df.unpersist()
