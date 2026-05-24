@@ -171,6 +171,8 @@ class PerspectiveCatalog:
         self._storage  = storage
         self._metadata = metadata
         self._lock     = threading.RLock()
+        self._delta_write_lock = threading.Lock()
+
 
         # Primary state store: perspective_id -> PerspectiveStats
         self._cache: dict[str, PerspectiveStats] = {}
@@ -527,16 +529,17 @@ class PerspectiveCatalog:
         self, spark: SparkSession, path: str
     ) -> None:
         """Create an empty Delta catalog table at path."""
-        empty = spark.createDataFrame([], schema=CATALOG_SCHEMA)
-        (
-            empty.write
-            .format("delta")
-            .mode("overwrite")
-            .save(path)
-        )
-        logger.info(
-            f"PerspectiveCatalog: initialised empty catalog at {path}."
-        )
+        with self._delta_write_lock:
+            empty = spark.createDataFrame([], schema=CATALOG_SCHEMA)
+            (
+                empty.write
+                .format("delta")
+                .mode("overwrite")
+                .save(path)
+            )
+            logger.info(
+                f"PerspectiveCatalog: initialised empty catalog at {path}."
+            )
 
     def _persist_one(self, pid: str) -> None:
         """
@@ -559,34 +562,37 @@ class PerspectiveCatalog:
         row = _stats_to_row(pid, stats)
         new_df = spark.createDataFrame([row], schema=CATALOG_SCHEMA)
 
-        try:
-            from delta.tables import DeltaTable
-            dt = DeltaTable.forPath(spark, path)
-            (
-                dt.alias("existing")
-                .merge(
-                    new_df.alias("incoming"),
-                    "existing.perspective_id = incoming.perspective_id",
-                )
-                .whenMatchedUpdateAll()
-                .whenNotMatchedInsertAll()
-                .execute()
-            )
-        except Exception as exc:
-            # If the table disappeared between the load and this write
-            # (e.g. clear_existing was called), recreate it.
-            logger.warning(
-                f"PerspectiveCatalog: MERGE failed for '{pid}' "
-                f"({exc}), attempting table recreation."
-            )
+        with self._delta_write_lock:
             try:
-                self._initialise_delta_table(spark, path)
-                new_df.write.format("delta").mode("append").save(path)
-            except Exception as exc2:
-                logger.error(
-                    f"PerspectiveCatalog: could not persist '{pid}': {exc2}",
-                    exc_info=True,
+                from delta.tables import DeltaTable
+                dt = DeltaTable.forPath(spark, path)
+                (
+                    dt.alias("existing")
+                    .merge(
+                        new_df.alias("incoming"),
+                        "existing.perspective_id = incoming.perspective_id",
+                    )
+                    .whenMatchedUpdateAll()
+                    .whenNotMatchedInsertAll()
+                    .execute()
                 )
+            except Exception as exc:
+                # If the table disappeared between the load and this write
+                # (e.g. clear_existing was called), recreate it.
+                logger.warning(
+                    f"PerspectiveCatalog: MERGE failed for '{pid}' "
+                    f"({exc}), attempting table recreation."
+                )
+                try:
+                    self._initialise_delta_table(spark, path)
+                    new_df.write.format("delta").mode("append").save(path)
+                except Exception as exc2:
+                    logger.error(
+                        f"PerspectiveCatalog: could not persist '{pid}': {exc2}",
+                        exc_info=True,
+                    )
+    
+    
     def get_pair_status(
         self, pid: str, act_a: str, act_b: str
     ) -> Optional[PairStatus]:
