@@ -156,11 +156,10 @@ def save_loops_results(result: Dict[str, Any], output_path: str, fmt: str = "jso
     Raises:
         ValueError: If *fmt* is not ``"json"`` or ``"csv"``.
     """
+    with open(output_path.rsplit(".", 1)[0] + ".json", "w", encoding="utf-8") as fh:
+        json.dump(result, fh, indent=2)
     if fmt == "json":
-        with open(output_path, "w", encoding="utf-8") as fh:
-            json.dump(result, fh, indent=2)
         logger.info("Loops results written as JSON to %s", output_path)
-
     elif fmt == "csv":
         _save_csv(result, output_path)
         logger.info("Loops results written as CSV to %s", output_path)
@@ -281,7 +280,7 @@ def create_loops_html(input: "str | Dict[str, Any]") -> str:
     if isinstance(input, str):
         import pandas as _pd
 
-        df = _pd.read_csv(input)
+        df = _pd.read_csv(input.rsplit(".", 1)[0] + ".json")
         df.columns = df.columns.str.strip()
 
         df["scope"] = df["scope"].astype(str).str.strip()

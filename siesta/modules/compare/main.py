@@ -290,6 +290,8 @@ class Comparing(SiestaModule):
             - `output_format` *(str, default: `\"json\"`)* - `\"json\"` or `\"csv\"`.
             - `include_trace_ids` *(bool, default: `true`)* - include the
               ``trace_ids`` list in every loop entry.
+            - `vis` *(bool, default: `false`)* - whether to generate an HTML
+              visualisation of the loops.
         - `separating_key` *(str, default: `\"activity\"`)* - column used to
           label traces into groups.
         - `separating_groups` *(list[list[str]])* - group definitions, e.g.
