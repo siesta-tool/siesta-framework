@@ -226,3 +226,10 @@ nginx.conf
 
 **/eval/results*
 **/tests/eval/results/**
+
+.mr_session
+fig*
+*output*
+*.csv
+*.pdf
+siesta/modules/compare/time_bottlenecks.json

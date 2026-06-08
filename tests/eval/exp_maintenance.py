@@ -153,6 +153,7 @@ def _count_events(path: Path) -> int:
 def fetch_all_coverage(
     log_name: str,
     perspectives: list[list[str]],
+    activities: list[str]
 ) -> dict[tuple, list[dict]]:
     """
     Call /pair_coverage for each perspective.
@@ -165,7 +166,7 @@ def fetch_all_coverage(
     for gk in perspectives:
         key = tuple(gk)
         try:
-            cov = fetch_pair_coverage(log_name, gk)
+            cov = fetch_pair_coverage(log_name, gk, activities=activities)
             pairs = cov.get("pairs", [])
             result[key] = sorted(pairs, key=lambda p: -p["groups"])
         except Exception as exc:
@@ -387,10 +388,24 @@ def run_adaptive_workload(
     workload: list[dict],
     schema_combos: int,
     perspectives: list[list[str]],
+    promotion_sleep_s: int = 0,
 ) -> None:
     """
     Bootstrap and run the adaptive indexer, interleaving a workload slice
     before each incremental batch to drive retention promotions.
+
+    Warm-up phase (mirrors the eager baseline's force-promote + sleep):
+    All workload queries are issued once against batch 0 before any
+    measurement batch starts.  This drives L3 promotions for every
+    (perspective, pair) in the workload footprint.  A subsequent sleep
+    of `promotion_sleep_s` seconds lets the async build workers finish
+    before batch 1 arrives, ensuring maintenance_s reflects only
+    incremental update cost — not L3 build cost.
+
+    Per-batch query slices are still issued before each ingest to
+    maintain retention scores above the decay threshold (preventing
+    demotion), but since all pairs are already at L3 after the warm-up,
+    those slices trigger no new builds.
     """
     n_batches = len(batch_paths)
     print(f"\n── Adaptive / '{workload_label}' ──")
@@ -412,6 +427,35 @@ def run_adaptive_workload(
     rec.emit("footprint", workload=workload_label, log_name=log_name, **fp)
     print(f"  footprint: {fp['queried_combos']}/{fp['schema_combos']} "
           f"({fp['ratio']:.0%})")
+
+    # ── Warm-up: promote all workload pairs to L3 before measurement ───────
+    # Issue every query in the workload once.  With min_query_count=1 each
+    # unique (perspective, pair) is immediately eligible for L3 promotion
+    # after its first touch, so this single pass is enough.
+    print(f"  Warm-up: issuing all {len(workload)} queries to drive "
+          f"{fp['queried_combos']} L3 promotions …")
+    t_wu = time.perf_counter()
+    n_warmup = 0
+    for q in workload:
+        try:
+            timed_query(
+                log_name=q["log_name"],
+                pattern=q["pattern"],
+                grouping_keys=q["grouping_keys"],
+                retention_overrides=RETENTION_OVERRIDES,
+            )
+            n_warmup += 1
+        except Exception as exc:
+            rec.emit("query_error", system="adaptive", workload=workload_label,
+                     log_name=log_name, batch=0, qid=q["id"], error=str(exc))
+    print(f"  {n_warmup} warm-up queries done in {time.perf_counter()-t_wu:.1f}s")
+
+    # Sleep so async L3 build workers finish before batch 1 is ingested.
+    # Uses the same promotion_sleep_s as the eager baseline — the per-pair
+    # build cost is identical regardless of which system triggered it.
+    if promotion_sleep_s > 0:
+        print(f"  Sleeping {promotion_sleep_s}s for async L3 builds to complete …")
+        time.sleep(promotion_sleep_s)
 
     for batch_idx, batch_path in enumerate(batch_paths[1:], start=1):
         slice_ = queries_per_batch(workload, batch_idx - 1, n_batches - 1)
@@ -507,7 +551,7 @@ def run_dataset(
                                     for gk in perspectives]},
         clear_existing=True,
     )
-    coverage      = fetch_all_coverage(log_name, perspectives)
+    coverage      = fetch_all_coverage(log_name, perspectives, activities=ctx.activities)
     schema_combos = schema_combos_from_coverage(coverage)
     print(f"  Real (perspective, pair) combos: {schema_combos}")
 
@@ -552,7 +596,8 @@ def run_dataset(
     # ── Adaptive runs ──────────────────────────────────────────────────────
     for label, wl in [("skewed", skewed_wl), ("uniform", uniform_wl)]:
         run_adaptive_workload(rec, log_name, batch_paths, label, wl,
-                              schema_combos, perspectives)
+                              schema_combos, perspectives,
+                              promotion_sleep_s=promotion_sleep_s)
 
     print(f"\nResults → {rec.path}")
 
@@ -586,9 +631,14 @@ def main() -> None:
     ap.add_argument("--n-hot-pairs",      type=int,   default=2,
                     help="Number of hot pairs per perspective (default 2).")
     ap.add_argument("--max-perspectives", type=int,   default=4)
-    ap.add_argument("--promotion-sleep",  type=int,   default=120,
-                    help="Seconds to wait for async L3 promotions to finish "
-                         "before running baseline batches (default 120).")
+    ap.add_argument("--promotion-sleep",  type=int,   default=300,
+                    help="Seconds to wait for async L3 builds to complete "
+                         "after force-promoting all pairs (eager) and after "
+                         "the warm-up query pass (adaptive).  Applied "
+                         "symmetrically so maintenance_s measures only "
+                         "incremental update cost, not build cost.  "
+                         "Rule of thumb: schema_combos * ~3s / n_workers. "
+                         "(default 300).")
 
     args = ap.parse_args()
 

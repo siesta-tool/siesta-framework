@@ -406,13 +406,20 @@ def _parse_rows(config: EventConfig, df: DataFrame) -> DataFrame:
     position_source = config.field_mappings.get('position')
     activity_source = config.field_mappings.get('activity')
     timestamp_field = next(iter(config.timestamp_fields), None)
-    timestamp_source = config.field_mappings.get(timestamp_field) if timestamp_field else "None"
+    timestamp_source = config.field_mappings.get(timestamp_field) if timestamp_field else None
+    # Fallback: if the mapped column name is absent, try the field name itself
+    # (e.g. config maps "start_timestamp" → "timestamp" but CSV has "start_timestamp")
+    if timestamp_source is not None and timestamp_source not in df.columns:
+        if timestamp_field and timestamp_field in df.columns:
+            timestamp_source = timestamp_field
 
     has_position_col = position_source is not None and position_source in df.columns
     has_timestamp_col = timestamp_source is not None and timestamp_source in df.columns
 
     # Preserve original row order as stable tiebreaker
-    df = df.dropDuplicates([trace_id_source, activity_source, timestamp_source]).withColumn("_row_idx", monotonically_increasing_id())
+    dedup_cols = [c for c in [trace_id_source, activity_source, timestamp_source]
+                  if c is not None and c in df.columns]
+    df = df.dropDuplicates(dedup_cols).withColumn("_row_idx", monotonically_increasing_id())
 
     if has_timestamp_col:
         order_col = F.col(timestamp_source).cast("timestamp")

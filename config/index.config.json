@@ -17,9 +17,9 @@
     "csv": {
       "activity": "activity",
       "trace_id": "trace_id",
-      "position": "position",
+      "position": null,
       "start_timestamp": "timestamp",
-      "attributes" : ["resource", "cost"]
+      "attributes" : ["*"]
     },
     "json": {
         "activity": "activity",

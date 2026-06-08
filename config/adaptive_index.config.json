@@ -19,7 +19,7 @@
       "trace_id": "trace_id",
       "position": null,
       "start_timestamp": "timestamp",
-      "attributes": ["resource", "role", "cost", "lifecycle"]
+      "attributes": ["*"]
     }
   },
   "trace_level_fields": ["trace_id"],

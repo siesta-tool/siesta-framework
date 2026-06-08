@@ -1,0 +1,86 @@
+networks:
+  flink-net:
+    driver: bridge
+
+services:
+
+  jobmanager:
+    image: flink:1.20-java17
+    container_name: siesta_flink_jm
+    command: jobmanager
+    networks:
+      - flink-net
+    ports:
+      - "8081:8081"
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: jobmanager
+        jobmanager.rpc.port: 6123
+        jobmanager.memory.process.size: 2048m
+        rest.port: 8081
+        rest.bind-address: 0.0.0.0
+        rest.address: jobmanager
+        execution.runtime-mode: BATCH
+    volumes:
+      - ../../datasets:/data:ro       # source logs, read-only
+      - ./flink_data:/flink_data  # converted CSVs, writable
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8081/overview"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+
+  taskmanager:
+    image: flink:1.20-java17
+    container_name: siesta_flink_tm
+    command: taskmanager
+    networks:
+      - flink-net
+    depends_on:
+      jobmanager:
+        condition: service_healthy
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: jobmanager
+        jobmanager.rpc.port: 6123
+        taskmanager.memory.process.size: 4096m
+        taskmanager.numberOfTaskSlots: 4
+        execution.runtime-mode: BATCH
+    volumes:
+      - ../../datasets:/data:ro
+      - ./flink_data:/flink_data
+
+  sql-gateway:
+    image: flink:1.20-java17
+    container_name: siesta_flink_gw
+    networks:
+      - flink-net
+    command: >
+      bash -c "
+        ln -sf /opt/flink/opt/flink-sql-gateway-*.jar /opt/flink/lib/ &&
+        /opt/flink/bin/sql-gateway.sh start-foreground
+      "
+    ports:
+      - "8083:8083"
+    depends_on:
+      jobmanager:
+        condition: service_healthy
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: jobmanager
+        jobmanager.rpc.port: 6123
+        rest.address: jobmanager
+        rest.port: 8081
+        sql-gateway.endpoint.rest.address: 0.0.0.0
+        sql-gateway.endpoint.rest.port: 8083
+        execution.runtime-mode: BATCH
+    volumes:
+      - ../../datasets:/data:ro
+      - ./flink_data:/flink_data  # gateway reads converted CSVs from here
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8083/v1/info"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s

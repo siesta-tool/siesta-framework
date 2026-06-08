@@ -45,7 +45,11 @@ class LoopDetectionConfig(BaseModel):
     support_threshold: float | None = Field(None, description="Min support fraction [0,1]; null = no filtering")
     filter_out: bool = Field(False, description="When true, keeps rare loops (support ≤ threshold)")
     top_k: int | None = Field(None, description="Keep only the k most-supported loops; null = all")
-    trace_based: bool = Field(False, description="Add trace_ids list to each loop entry (only when grouping by trace_id)")
+    trace_based: bool = Field(False, description="When true, add a trace_occurrences dict ({trace_id: count}) to each entry (only when grouping by trace_id)")
+    detect_repeated_patterns: bool = Field(False, description="Also detect contiguous subsequences that repeat ≥ min_repetitions times within a trace")
+    min_pattern_length: int = Field(2, description="Minimum length (activities) of a repeated pattern to report")
+    max_pattern_length: int = Field(10, description="Maximum length (activities) of a repeated pattern to report")
+    min_repetitions: int = Field(2, description="Minimum in-trace occurrences required for a repeated pattern to be reported")
     output_path: str = Field("output/example_log", description="Local path prefix for the output file")
 
 
@@ -276,27 +280,41 @@ class Analysing(SiestaModule):
                 "filter_out": False,
                 "top_k": None,
                 "trace_based": False,
+                "detect_repeated_patterns": False,
+                "min_pattern_length": 2,
+                "max_pattern_length": 10,
+                "min_repetitions": 2,
             },
         },
     })]) -> Any:
-        """Detect self-loops and non-self-loops in an indexed event log.
+        """Detect self-loops, non-self-loops, and optionally repeated patterns.
 
         A **self-loop** is an activity immediately followed by itself.
         A **non-self-loop** is a minimal cycle A -> … -> A where A does not appear in the body.
+        A **repeated pattern** is a contiguous subsequence that appears at least
+        ``min_repetitions`` times within the same trace (enabled with
+        ``detect_repeated_patterns=true``).
 
-        Returns JSON with `self_loops` and `non_self_loops` arrays. Each entry contains the
-        activity pattern and its support fraction across groups.
+        Returns JSON with ``self_loops``, ``non_self_loops``, and ``repeated_patterns``
+        arrays.  Each entry contains the pattern string, its support fraction across
+        groups, the absolute group count, and — when ``trace_based=true`` — a
+        ``trace_occurrences`` dict mapping each containing trace ID to its
+        in-trace occurrence count.
 
         **Config fields:**
         - `log_name` *(str)* - name of the indexed log. **Required.**
         - `storage_namespace` *(str, default: `"siesta"`)* - storage namespace.
         - `grouping_key` *(str | list | null, default: `null`)* - attribute key(s) to group by. `null` = `trace_id`.
         - `grouping_value` *(str | list | dict | null, default: `null`)* - restrict to specific group values.
-        - `min_timestamp` *(str | null, default: `null`)* - lower bound on `start_timestamp` as ISO 8601 with millisecond precision (e.g. `"2024-01-15T10:30:45.123Z"`). Events before this datetime are excluded.
-        - `support_threshold` *(float [0,1] | null, default: `null`)* - keep loops with support ≥ threshold. `null` = no filtering.
-        - `filter_out` *(bool, default: `false`)* - when `true`, keeps loops with support ≤ threshold (rare loops).
-        - `top_k` *(int | null, default: `null`)* - keep only the k most-supported loops. `null` = all.
-        - `trace_based` *(bool, default: `false`)* - add a `trace_ids` list to each loop entry (only when grouping by `trace_id`).
+        - `min_timestamp` *(str | null, default: `null`)* - lower bound on `start_timestamp` (ISO 8601 with ms, e.g. `"2024-01-15T10:30:45.123Z"`).
+        - `support_threshold` *(float [0,1] | null, default: `null`)* - keep patterns with support ≥ threshold. `null` = no filtering.
+        - `filter_out` *(bool, default: `false`)* - when `true`, keeps patterns with support ≤ threshold (rare patterns).
+        - `top_k` *(int | null, default: `null`)* - keep only the k most-supported patterns per type. `null` = all.
+        - `trace_based` *(bool, default: `false`)* - add a `trace_occurrences` dict `{trace_id: count}` to each entry (only when grouping by `trace_id`).
+        - `detect_repeated_patterns` *(bool, default: `false`)* - also detect contiguous subsequences that repeat ≥ `min_repetitions` times within a trace.
+        - `min_pattern_length` *(int, default: `2`)* - minimum length of a repeated pattern.
+        - `max_pattern_length` *(int, default: `10`)* - maximum length of a repeated pattern.
+        - `min_repetitions` *(int, default: `2`)* - minimum in-trace occurrences to report a repeated pattern.
         """
         logger.info(f"{self.name} running loop_detection via API.")
         self.siesta_config = get_system_config()
@@ -530,12 +548,17 @@ class Analysing(SiestaModule):
             filter_out=self.analyser_config.get("filter_out", False),
             top_k=self.analyser_config.get("top_k"),
             trace_based=self.analyser_config.get("trace_based", False),
+            detect_repeated_patterns=self.analyser_config.get("detect_repeated_patterns", False),
+            min_pattern_length=self.analyser_config.get("min_pattern_length", 2),
+            max_pattern_length=self.analyser_config.get("max_pattern_length", 10),
+            min_repetitions=self.analyser_config.get("min_repetitions", 2),
         )
 
         events_df.unpersist()
         logger.info(
-            f"Completed. Found {len(result['self_loops'])} self-loop type(s) and "
-            f"{len(result['non_self_loops'])} non-self-loop type(s)."
+            f"Completed. Found {len(result['self_loops'])} self-loop type(s), "
+            f"{len(result['non_self_loops'])} non-self-loop type(s), and "
+            f"{len(result['repeated_patterns'])} repeated pattern type(s)."
         )
 
         if caller == "cli":

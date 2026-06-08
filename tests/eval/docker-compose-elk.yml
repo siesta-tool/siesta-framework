@@ -1,0 +1,29 @@
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+    container_name: siesta_elk
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false   # no TLS / auth — dev only
+      - xpack.license.self_generated.type=basic
+      - ES_JAVA_OPTS=-Xms8g -Xmx8g    # tune to your RAM; 4g for large logs
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -11
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    ports:
+      - "9200:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health | grep -qv '\"status\":\"red\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  esdata:
+    driver: local

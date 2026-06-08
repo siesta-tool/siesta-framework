@@ -18,35 +18,67 @@ def discover_loops(
     trace_labels: DataFrame,
     trace_count: int,
     support_threshold: float = 0.0,
-    include_trace_ids: bool = True,
+    include_trace_occurrences: bool = True,
+    detect_repeated_patterns: bool = False,
+    min_pattern_length: int = 2,
+    max_pattern_length: int = 10,
+    min_repetitions: int = 2,
 ) -> Dict[str, Any]:
-    """Detect self-loops and minimal non-self-loops in three comparison scopes.
+    """Detect self-loops, non-self-loops, and repeated patterns in three scopes.
 
     Args:
-        events_df:          Sequence table DataFrame (activity, trace_id, position, start_timestamp, attributes).
-        trace_labels:       DataFrame with columns ``trace_id`` and ``label`` (integer 0 / 1 produced by the comparator's 
-                            separating_key logic).
-        trace_count:        Total number of distinct traces in the log (``metadata.trace_count``).
-        support_threshold:  Fraction [0, 1].  Loops whose ``trace_ids`` list has ``<= support_threshold * trace_count`` entries
-                            are removed.  Default 0.0 keeps every loop that appears in at least one trace.
-        include_trace_ids:  When *True* (default) each loop entry contains a ``trace_ids`` list.  When *False* the list is
-                            stripped but ``support_count`` is still present.
+        events_df:                  Sequence table DataFrame.
+        trace_labels:               DataFrame with columns ``trace_id`` and
+                                    ``label`` (integer 0 / 1).
+        trace_count:                Total distinct traces (``metadata.trace_count``).
+        support_threshold:          Fraction [0, 1].  Patterns whose
+                                    ``support_count`` is <=
+                                    ``support_threshold * trace_count`` are
+                                    removed.  Default 0.0 keeps every pattern
+                                    that appears in at least one trace.
+        include_trace_occurrences:  When *True* (default) each entry contains a
+                                    ``trace_occurrences`` dict mapping trace IDs
+                                    to their in-trace occurrence count.  When
+                                    *False* the dict is stripped but all support
+                                    fields are still present.
+        detect_repeated_patterns:   Forward to ``compute_loop_detection``.
+                                    When *True*, also detect contiguous
+                                    subsequences that appear ≥ ``min_repetitions``
+                                    times within a single trace.
+        min_pattern_length:         Minimum length of a repeated pattern.
+        max_pattern_length:         Maximum length of a repeated pattern.
+        min_repetitions:            Minimum in-trace occurrences to report.
 
     Returns:
         Dictionary with keys ``"global"``, ``"per_label"``, and
-        ``"exclusive"``.  Each value is a dict with ``"self_loops"`` and
-        ``"non_self_loops"`` lists.  Every loop entry contains:
+        ``"exclusive"``.  Each value is a dict with ``"self_loops"``,
+        ``"non_self_loops"``, and ``"repeated_patterns"`` lists.
+        Every entry contains:
 
-        * ``pattern``       activity name or ``"A -> B ->  -> A"`` string.
-        * ``support_count`` number of traces in which the loop was found.
-        * ``trace_ids``     sorted list of those trace IDs (omitted when *include_trace_ids* is *False*).
+        * ``pattern``             activity name or ``"A -> B -> ... -> A"``.
+        * ``support``             fraction of traces containing the pattern [0, 1].
+        * ``support_count``       absolute number of traces containing it.
+        * ``trace_occurrences``   ``{trace_id: occurrence_count}`` (omitted when
+                                  *include_trace_occurrences* is *False*).
+        * ``support_per_label``   *(global scope only)* dict mapping each label
+                                  string to ``{"support": float,
+                                  "support_count": int}`` within that label.
+                                  Labels where the pattern is absent carry
+                                  ``{"support": 0.0, "support_count": 0}``.
     """
+    _loop_kwargs = dict(
+        trace_based=True,
+        detect_repeated_patterns=detect_repeated_patterns,
+        min_pattern_length=min_pattern_length,
+        max_pattern_length=max_pattern_length,
+        min_repetitions=min_repetitions,
+    )
 
     # ------------------------------------------------------------------
     # Global scope
     # ------------------------------------------------------------------
     logger.info("discover_loops: computing global scope ")
-    global_raw = compute_loop_detection(events_df, trace_based=True)
+    global_raw = compute_loop_detection(events_df, **_loop_kwargs)
     global_result = _annotate_support_count(global_raw)
 
 
@@ -73,18 +105,24 @@ def discover_loops(
         lv_str = str(lv)
         logger.info("discover_loops:\tlabel=%s", lv_str)
         label_events = events_with_label.filter(F.col("label") == lv).drop("label")
-        raw = compute_loop_detection(label_events, trace_based=True)
+        raw = compute_loop_detection(label_events, **_loop_kwargs)
         result = _annotate_support_count(raw)
         per_label[lv_str] = result
 
         patterns: set = set()
-        for entry in result["self_loops"]:
-            patterns.add(("self_loop", entry["pattern"]))
-        for entry in result["non_self_loops"]:
-            patterns.add(("non_self_loop", entry["pattern"]))
+        for list_key, loop_type in _ALL_LOOP_LIST_KEYS:
+            for entry in result.get(list_key, []):
+                patterns.add((loop_type, entry["pattern"]))
         per_label_patterns[lv_str] = patterns
 
     events_with_label.unpersist()
+
+    # ------------------------------------------------------------------
+    # Enrich global entries with per-label support breakdown
+    # (done pre-threshold so the breakdown always reflects actual rates)
+    # ------------------------------------------------------------------
+    logger.info("discover_loops: enriching global entries with per-label support")
+    global_result = _enrich_global_with_per_label(global_result, per_label)
 
     # ------------------------------------------------------------------
     # Exclusive scope  (loops in label L but absent from all others)
@@ -101,14 +139,11 @@ def discover_loops(
         exclusive_set = per_label_patterns[lv_str] - other_patterns
 
         exclusive[lv_str] = {
-            "self_loops": [
-                e for e in per_label[lv_str]["self_loops"]
-                if ("self_loop", e["pattern"]) in exclusive_set
-            ],
-            "non_self_loops": [
-                e for e in per_label[lv_str]["non_self_loops"]
-                if ("non_self_loop", e["pattern"]) in exclusive_set
-            ],
+            list_key: [
+                e for e in per_label[lv_str].get(list_key, [])
+                if (loop_type, e["pattern"]) in exclusive_set
+            ]
+            for list_key, loop_type in _ALL_LOOP_LIST_KEYS
         }
 
     # ------------------------------------------------------------------
@@ -126,12 +161,12 @@ def discover_loops(
     }
 
     # ------------------------------------------------------------------
-    # Optionally strip trace_ids from entries
+    # Optionally strip trace_occurrences from entries
     # ------------------------------------------------------------------
-    if not include_trace_ids:
-        global_result = _strip_trace_ids(global_result)
-        per_label = {lv_str: _strip_trace_ids(res) for lv_str, res in per_label.items()}
-        exclusive = {lv_str: _strip_trace_ids(res) for lv_str, res in exclusive.items()}
+    if not include_trace_occurrences:
+        global_result = _strip_trace_occurrences(global_result)
+        per_label   = {lv_str: _strip_trace_occurrences(res) for lv_str, res in per_label.items()}
+        exclusive   = {lv_str: _strip_trace_occurrences(res) for lv_str, res in exclusive.items()}
 
     return {
         "global": global_result,
@@ -174,24 +209,74 @@ def save_loops_results(result: Dict[str, Any], output_path: str, fmt: str = "jso
 # Private helpers
 # ---------------------------------------------------------------------------
 
-def _annotate_support_count(raw: Dict[str, Any]) -> Dict[str, Any]:
-    """Add a ``support_count`` field (= len(trace_ids)) to every loop entry.
+# All three loop-list keys used consistently across every helper.
+_ALL_LOOP_LIST_KEYS = [
+    ("self_loops",        "self_loop"),
+    ("non_self_loops",    "non_self_loop"),
+    ("repeated_patterns", "repeated_pattern"),
+]
 
-    ``compute_loop_detection`` is always called with ``trace_based=True`` so
-    every entry already carries a ``trace_ids`` list.  We derive
-    ``support_count`` here before any stripping happens.
+
+def _annotate_support_count(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Project the three loop lists out of the raw ``compute_loop_detection``
+    result, discarding top-level ``total_groups`` / ``grouping_key``.
+
+    ``compute_loop_detection`` already emits ``support`` (fraction) and
+    ``support_count`` (absolute count) on every entry.
     """
-    def _add(loops: list) -> list:
+    return {
+        list_key: list(raw.get(list_key, []))
+        for list_key, _ in _ALL_LOOP_LIST_KEYS
+    }
+
+
+def _enrich_global_with_per_label(
+    global_result: Dict[str, Any],
+    per_label: Dict[str, Dict],
+) -> Dict[str, Any]:
+    """Add a ``support_per_label`` dict to every entry in *global_result*.
+
+    For each pattern the dict maps every label string to::
+
+        {"support": <fraction within that label's traces>,
+         "support_count": <absolute count within that label's traces>}
+
+    Labels in which the pattern was not found carry
+    ``{"support": 0.0, "support_count": 0}``.  Enrichment is performed
+    on *pre-threshold* per-label data so the breakdown always reflects
+    actual rates.
+    """
+    label_values: List[str] = list(per_label.keys())
+
+    # Build lookup: (loop_type, pattern) -> {lv_str -> {support, support_count}}
+    lookup: Dict[tuple, Dict[str, Any]] = {}
+    for lv_str, label_res in per_label.items():
+        for list_key, loop_type in _ALL_LOOP_LIST_KEYS:
+            for entry in label_res.get(list_key, []):
+                key = (loop_type, entry["pattern"])
+                if key not in lookup:
+                    lookup[key] = {}
+                lookup[key][lv_str] = {
+                    "support":       entry["support"],
+                    "support_count": entry["support_count"],
+                }
+
+    _ZERO = {"support": 0.0, "support_count": 0}
+
+    def _add(loops: list, loop_type: str) -> list:
         out = []
         for entry in loops:
             e = dict(entry)
-            e["support_count"] = len(e.get("trace_ids", []))
+            e["support_per_label"] = {
+                lv: lookup.get((loop_type, entry["pattern"]), {}).get(lv, _ZERO)
+                for lv in label_values
+            }
             out.append(e)
         return out
 
     return {
-        "self_loops": _add(raw.get("self_loops", [])),
-        "non_self_loops": _add(raw.get("non_self_loops", [])),
+        list_key: _add(global_result.get(list_key, []), loop_type)
+        for list_key, loop_type in _ALL_LOOP_LIST_KEYS
     }
 
 
@@ -203,55 +288,60 @@ def _apply_threshold(
         return [e for e in loops if e.get("support_count", 0) > min_count]
 
     return {
-        "self_loops": _filter(result["self_loops"]),
-        "non_self_loops": _filter(result["non_self_loops"]),
+        list_key: _filter(result.get(list_key, []))
+        for list_key, _ in _ALL_LOOP_LIST_KEYS
     }
 
 
-def _strip_trace_ids(result: Dict[str, Any]) -> Dict[str, Any]:
-    """Remove ``trace_ids`` from every loop entry, keeping ``support_count``."""
+def _strip_trace_occurrences(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Remove ``trace_occurrences`` from every entry, keeping all support fields."""
     def _strip(loops: list) -> list:
-        return [{k: v for k, v in e.items() if k != "trace_ids"} for e in loops]
+        return [{k: v for k, v in e.items() if k != "trace_occurrences"} for e in loops]
 
     return {
-        "self_loops": _strip(result["self_loops"]),
-        "non_self_loops": _strip(result["non_self_loops"]),
+        list_key: _strip(result.get(list_key, []))
+        for list_key, _ in _ALL_LOOP_LIST_KEYS
     }
 
 
 def _save_csv(result: Dict[str, Any], output_path: str) -> None:
     """Flatten the nested loops result into a CSV with a consistent schema.
 
-    Columns (always present, even when trace_ids were stripped):
-
-      scope          "global" | "per_label" | "exclusive"
-      label          label value string; empty string for global scope
-      loop_type      "self_loop" | "non_self_loop"
-      pattern        activity name or "A -> B ->  -> A"
-      support_count  number of traces containing this loop
-      trace_ids      JSON-encoded sorted list; empty string when not included
+    Columns:
+      scope                  "global" | "per_label" | "exclusive"
+      label                  label value string; empty string for global scope
+      loop_type              "self_loop" | "non_self_loop" | "repeated_pattern"
+      pattern                activity name or "A -> B -> ... -> A"
+      support                fraction of traces containing this pattern
+      support_count          number of traces containing this pattern
+      support_per_label      JSON-encoded per-label breakdown (global scope only)
+      trace_occurrences      JSON-encoded {trace_id: count} dict; empty when stripped
     """
-    FIELDNAMES = ["scope", "label", "loop_type", "pattern", "support_count", "trace_ids"]
-
-    _LOOP_TYPE_KEYS = [
-        ("self_loops", "self_loop"),
-        ("non_self_loops", "non_self_loop"),
+    FIELDNAMES = [
+        "scope", "label", "loop_type", "pattern",
+        "support", "support_count", "support_per_label", "trace_occurrences",
     ]
 
     rows: List[Dict[str, Any]] = []
 
     def _collect(scope: str, label_str: str, loops_dict: Dict[str, Any]) -> None:
-        for list_key, type_str in _LOOP_TYPE_KEYS:
+        for list_key, type_str in _ALL_LOOP_LIST_KEYS:
             for entry in loops_dict.get(list_key, []):
                 row: Dict[str, Any] = {
-                    "scope": scope,
-                    "label": label_str,
-                    "loop_type": type_str,
-                    "pattern": entry["pattern"],
-                    "support_count": entry.get("support_count", ""),
-                    "trace_ids": (
-                        json.dumps(entry["trace_ids"])
-                        if "trace_ids" in entry
+                    "scope":             scope,
+                    "label":             label_str,
+                    "loop_type":         type_str,
+                    "pattern":           entry["pattern"],
+                    "support":           entry.get("support", ""),
+                    "support_count":     entry.get("support_count", ""),
+                    "support_per_label": (
+                        json.dumps(entry["support_per_label"])
+                        if "support_per_label" in entry
+                        else ""
+                    ),
+                    "trace_occurrences": (
+                        json.dumps(entry["trace_occurrences"])
+                        if "trace_occurrences" in entry
                         else ""
                     ),
                 }
@@ -283,15 +373,25 @@ def create_loops_html(input: "str | Dict[str, Any]") -> str:
         df = _pd.read_csv(input.rsplit(".", 1)[0] + ".json")
         df.columns = df.columns.str.strip()
 
-        df["scope"] = df["scope"].astype(str).str.strip()
-        df["label"] = df["label"].fillna("").astype(str).str.strip()
+        df["scope"]     = df["scope"].astype(str).str.strip()
+        df["label"]     = df["label"].fillna("").astype(str).str.strip()
         df["loop_type"] = df["loop_type"].astype(str).str.strip()
-        df["pattern"] = df["pattern"].astype(str).str.strip()
+        df["pattern"]   = df["pattern"].astype(str).str.strip()
 
+        df["support"] = (
+            _pd.to_numeric(df.get("support", _pd.Series(dtype=float)), errors="coerce")
+            .fillna(0.0)
+        )
         df["support_count"] = (
             _pd.to_numeric(df["support_count"], errors="coerce")
             .fillna(0)
             .astype(int)
+        )
+        df["support_per_label"] = df.get("support_per_label", "").fillna("").apply(
+            lambda v: json.loads(v) if isinstance(v, str) and v.strip() else {}
+        )
+        df["trace_occurrences"] = df.get("trace_occurrences", "").fillna("").apply(
+            lambda v: json.loads(v) if isinstance(v, str) and v.strip() else {}
         )
 
         rows = df.to_dict(orient="records")
@@ -302,17 +402,20 @@ def create_loops_html(input: "str | Dict[str, Any]") -> str:
 
         def _collect(scope: str, label: str, loops_dict: dict):
             for lk, lt in [
-                ("self_loops", "self_loop"),
-                ("non_self_loops", "non_self_loop"),
+                ("self_loops",        "self_loop"),
+                ("non_self_loops",    "non_self_loop"),
+                ("repeated_patterns", "repeated_pattern"),
             ]:
                 for entry in loops_dict.get(lk, []):
                     rows.append({
-                        "scope": scope,
-                        "label": label,
-                        "loop_type": lt,
-                        "pattern": entry["pattern"],
-                        "support_count": int(entry.get("support_count", 0)),
-                        "trace_ids": entry.get("trace_ids", []),
+                        "scope":              scope,
+                        "label":              label,
+                        "loop_type":          lt,
+                        "pattern":            entry["pattern"],
+                        "support":            round(float(entry.get("support", 0.0)), 6),
+                        "support_count":      int(entry.get("support_count", 0)),
+                        "support_per_label":  entry.get("support_per_label", {}),
+                        "trace_occurrences":  entry.get("trace_occurrences", {}),
                     })
 
         _collect("global", "", result.get("global", {}))
@@ -440,7 +543,20 @@ header h1 {{
 table {{
   width: 100%;
   border-collapse: collapse;
+  table-layout: fixed;
 }}
+
+/* ── Column widths ─────────────────────────────────────────────────────────
+   Percentages must sum to 100.  Adjust to taste; the trace-occurrences
+   column gets the largest share because its <details> content is rich.   */
+th:nth-child(1) {{ width:  7%; }}   /* Scope              */
+th:nth-child(2) {{ width:  5%; }}   /* Label              */
+th:nth-child(3) {{ width:  9%; }}   /* Type               */
+th:nth-child(4) {{ width: 18%; }}   /* Pattern            */
+th:nth-child(5) {{ width:  7%; }}   /* Count              */
+th:nth-child(6) {{ width:  7%; }}   /* Support %          */
+th:nth-child(7) {{ width: 17%; }}   /* Per-label support  */
+th:nth-child(8) {{ width: 30%; }}   /* Trace occurrences  */
 
 thead {{
   position: sticky;
@@ -463,6 +579,20 @@ td {{
   padding: 11px 12px;
   border-bottom: 1px solid #1f2330;
   font-size: 0.8rem;
+  /* prevent short cells from blowing up the column */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}}
+
+/* cells whose content must wrap */
+td.pattern,
+td.trace-box,
+td.per-label-cell {{
+  white-space: normal;
+  overflow: visible;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }}
 
 tr:hover {{
@@ -475,6 +605,7 @@ tr:hover {{
   border-radius: 999px;
   font-size: 0.72rem;
   font-weight: 600;
+  white-space: nowrap;
 }}
 
 .self_loop {{
@@ -487,9 +618,9 @@ tr:hover {{
   color: #4C9BE8;
 }}
 
-.pattern {{
-  font-family: Consolas, monospace;
-  color: #a6adc8;
+.repeated_pattern {{
+  background: rgba(166,227,161,0.15);
+  color: #a6e3a1;
 }}
 
 .support-bar {{
@@ -509,12 +640,9 @@ tr:hover {{
   padding: 30px;
   text-align: center;
   color: #6c7086;
+}}
 
 .trace-box {{
-  max-width: 500px;
-  white-space: normal;
-  overflow-wrap: anywhere;
-  word-break: break-word;
   color: #a6adc8;
   line-height: 1.4;
   font-family: Consolas, monospace;
@@ -555,6 +683,7 @@ tr:hover {{
       <option value="all">All</option>
       <option value="self_loop">Self Loop</option>
       <option value="non_self_loop">Non Self Loop</option>
+      <option value="repeated_pattern">Repeated Pattern</option>
     </select>
   </div>
 
@@ -572,8 +701,10 @@ tr:hover {{
         <th onclick="sortBy('label')">Label</th>
         <th onclick="sortBy('loop_type')">Type</th>
         <th onclick="sortBy('pattern')">Pattern</th>
-        <th onclick="sortBy('support_count')">Support</th>
-        <th>Trace IDs</th>
+        <th onclick="sortBy('support_count')">Count</th>
+        <th onclick="sortBy('support')">Support %</th>
+        <th>Per-label support</th>
+        <th>Trace occurrences</th>
       </tr>
     </thead>
     <tbody id="tableBody"></tbody>
@@ -596,173 +727,137 @@ function escapeHtml(str) {{
 }}
 
 function switchScope(scope, btn) {{
-
   currentScope = scope;
-
-  document.querySelectorAll('.tab')
-    .forEach(t => t.classList.remove('active'));
-
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   btn.classList.add('active');
-
   render();
 }}
 
 function sortBy(field) {{
-
   if (currentSort === field) {{
     sortAsc = !sortAsc;
   }} else {{
     currentSort = field;
     sortAsc = true;
   }}
-
   render();
 }}
 
 function render() {{
 
-  const minSupport = parseInt(
-    document.getElementById('supportSlider').value
-  );
-
-  const search = document.getElementById('searchInput')
-    .value
-    .toLowerCase()
-    .trim();
-
+  const minSupport = parseInt(document.getElementById('supportSlider').value);
+  const search     = document.getElementById('searchInput').value.toLowerCase().trim();
   const typeFilter = document.getElementById('typeFilter').value;
 
   let rows = ALL_ROWS.filter(r => {{
-
-    if (currentScope !== 'all' && r.scope !== currentScope)
-      return false;
-
-    if (r.support_count < minSupport)
-      return false;
-
-    if (typeFilter !== 'all' && r.loop_type !== typeFilter)
-      return false;
-
-    if (search && !r.pattern.toLowerCase().includes(search))
-      return false;
-
+    if (currentScope !== 'all' && r.scope !== currentScope) return false;
+    if (r.support_count < minSupport)                        return false;
+    if (typeFilter !== 'all' && r.loop_type !== typeFilter)  return false;
+    if (search && !r.pattern.toLowerCase().includes(search)) return false;
     return true;
   }});
 
   rows.sort((a, b) => {{
-
     let av = a[currentSort];
     let bv = b[currentSort];
-
-    if (typeof av === 'string')
-      av = av.toLowerCase();
-
-    if (typeof bv === 'string')
-      bv = bv.toLowerCase();
-
-    if (av < bv)
-      return sortAsc ? -1 : 1;
-
-    if (av > bv)
-      return sortAsc ? 1 : -1;
-
+    if (typeof av === 'string') av = av.toLowerCase();
+    if (typeof bv === 'string') bv = bv.toLowerCase();
+    if (av < bv) return sortAsc ? -1 : 1;
+    if (av > bv) return sortAsc ?  1 : -1;
     return 0;
   }});
 
   const tbody = document.getElementById('tableBody');
 
   if (!rows.length) {{
-
     tbody.innerHTML = `
       <tr>
-        <td colspan="6" class="empty">
-          No rows match the current filters.
-        </td>
-      </tr>
-    `;
-
+        <td colspan="8" class="empty">No rows match the current filters.</td>
+      </tr>`;
     document.getElementById('rowsBadge').textContent = '0 rows';
-
     return;
   }}
 
   tbody.innerHTML = rows.map(r => {{
 
-    const pct = Math.max(
-      3,
-      (r.support_count / {max_support}) * 100
-    );
+    const pct = Math.max(3, (r.support_count / {max_support}) * 100);
+
+    const supportPct = (typeof r.support === 'number')
+      ? (r.support * 100).toFixed(2) + '%'
+      : '-';
+
+    // Per-label support cell
+    const spl     = r.support_per_label || {{}};
+    const splKeys  = Object.keys(spl);
+    const splHtml  = splKeys.length === 0
+      ? '<span style="color:#6c7086">—</span>'
+      : splKeys.map(lv => {{
+          const d  = spl[lv] || {{}};
+          const sc = d.support_count ?? 0;
+          const sp = typeof d.support === 'number'
+            ? (d.support * 100).toFixed(1) + '%'
+            : '-';
+          return `<div style="font-size:.74rem;margin-bottom:3px">` +
+                 `<span style="color:#6c7086">label ${{escapeHtml(lv)}}:</span> ` +
+                 `<b>${{sc}}</b> <span style="color:#a6adc8">(${{sp}})</span></div>`;
+        }}).join('');
+
+    // Trace occurrences cell
+    const toMap   = r.trace_occurrences || {{}};
+    const toKeys  = Object.keys(toMap);
+    const toCount = toKeys.length;
+    const toInner = toCount === 0
+      ? '<span style="color:#6c7086">—</span>'
+      : toKeys
+          .sort((a, b) => String(a).localeCompare(String(b)))
+          .map(tid =>
+            `<div>` +
+            `<span style="color:#89b4fa">${{escapeHtml(String(tid))}}</span>` +
+            ` &times; ${{toMap[tid]}}</div>`
+          ).join('');
 
     return `
       <tr>
-
         <td>${{escapeHtml(r.scope)}}</td>
-
         <td>${{escapeHtml(r.label || '-')}}</td>
-
         <td>
           <span class="type-pill ${{r.loop_type}}">
-            ${{r.loop_type.replace('_', ' ')}}
+            ${{r.loop_type.replace(/_/g, ' ')}}
           </span>
         </td>
-
-        <td class="pattern">
-          ${{escapeHtml(r.pattern)}}
-        </td>
-
+        <td class="pattern">${{escapeHtml(r.pattern)}}</td>
         <td>
           <div><b>${{r.support_count}}</b></div>
-
           <div class="support-bar">
             <div class="support-fill" style="width:${{pct}}%"></div>
           </div>
         </td>
-
-<td class="trace-box">
-
-  <details>
-    <summary style="
-      cursor:pointer;
-      color:#89b4fa;
-      user-select:none;
-    ">
-      Show trace IDs (${{(r.trace_ids || []).length}})
-    </summary>
-
-    <div style="
-      margin-top:6px;
-      padding:8px;
-      background:#181825;
-      border:1px solid #313244;
-      border-radius:6px;
-      max-height:220px;
-      overflow:auto;
-    ">
-      ${{escapeHtml(JSON.stringify(r.trace_ids || [], null, 2))}}
-    </div>
-  </details>
-
-</td>
-
-      </tr>
-    `;
+        <td style="color:#cba6f7;font-weight:600">${{supportPct}}</td>
+        <td class="per-label-cell">${{splHtml}}</td>
+        <td class="trace-box">
+          <details>
+            <summary style="cursor:pointer;color:#89b4fa;user-select:none">
+              Show ${{toCount}} trace${{toCount === 1 ? '' : 's'}}
+            </summary>
+            <div style="margin-top:6px;padding:8px;background:#181825;
+                        border:1px solid #313244;border-radius:6px;
+                        max-height:220px;overflow:auto">
+              ${{toInner}}
+            </div>
+          </details>
+        </td>
+      </tr>`;
   }}).join('');
 
-  document.getElementById('rowsBadge').textContent =
-    rows.length + ' rows';
+  document.getElementById('rowsBadge').textContent = rows.length + ' rows';
 }}
 
-document.getElementById('supportSlider')
-  .addEventListener('input', function() {{
-    document.getElementById('supportValue').textContent = this.value;
-    render();
-  }});
-
-document.getElementById('searchInput')
-  .addEventListener('input', render);
-
-document.getElementById('typeFilter')
-  .addEventListener('change', render);
+document.getElementById('supportSlider').addEventListener('input', function() {{
+  document.getElementById('supportValue').textContent = this.value;
+  render();
+}});
+document.getElementById('searchInput').addEventListener('input', render);
+document.getElementById('typeFilter').addEventListener('change', render);
 
 render();
 
@@ -776,6 +871,7 @@ render();
     )
 
     return html
+
 
 def create_loops_html_old(input: "str | Dict[str, Any]") -> str:
     """Render loop-detection results as a self-contained interactive HTML page.

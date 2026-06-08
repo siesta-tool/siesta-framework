@@ -172,6 +172,10 @@ def _grouping_col(grouping_keys: List[str]):
         else:
             parts.append(col("attributes")[key].cast(StringType()))
 
+    # Empty grouping_keys → case_id perspective: group by trace_id
+    if len(parts) == 0:
+        return col("trace_id").cast(StringType()).alias("group_value")
+
     if len(parts) == 1:
         return parts[0].alias("group_value")
 

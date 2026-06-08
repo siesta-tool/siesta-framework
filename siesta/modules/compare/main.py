@@ -259,7 +259,11 @@ class Comparing(SiestaModule):
                     "storage_namespace": "siesta",
                     "method_params": {
                         "output_format": "json",
-                        "include_trace_ids": True,
+                        "include_trace_occurrences": True,
+                        "detect_repeated_patterns": False,
+                        "min_pattern_length": 2,
+                        "max_pattern_length": 10,
+                        "min_repetitions": 2,
                     },
                     "separating_key": "activity",
                     "separating_groups": [],
@@ -268,20 +272,22 @@ class Comparing(SiestaModule):
             },
         }
     )]) -> Any | None:
-        """Detect self-loops and minimal non-self-loops in three comparison scopes.
+        """Detect self-loops, non-self-loops, and repeated patterns in three comparison scopes.
 
-        Runs loop detection (self-loops and minimal non-self-loops) in three
-        complementary scopes and returns all results in a single response:
+        Runs loop detection in three complementary scopes and returns all results
+        in a single response:
 
         * **global** - detection over the entire event log, equivalent to the
           analyser's ``loop_detection`` with ``trace_based=True``.
         * **per_label** - detection restricted to the traces belonging to each
           label group defined by ``separating_key`` / ``separating_groups``.
-        * **exclusive** - for every label group, the loops that occur in that
+        * **exclusive** - for every label group, the patterns that occur in that
           group's traces but in *no* other group.
 
-        Each loop entry carries ``pattern``, ``support_count`` (number of
-        traces containing it), and optionally ``trace_ids``.
+        Each entry carries ``pattern``, ``support`` (fraction), ``support_count``
+        (absolute trace count), and optionally ``trace_occurrences``
+        (``{trace_id: occurrence_count}``).  Global-scope entries additionally
+        carry ``support_per_label`` breaking down support per label group.
 
         Results are written to a file and the parsed contents are returned.
 
@@ -290,16 +296,24 @@ class Comparing(SiestaModule):
         - `storage_namespace` *(str, default: `\"siesta\"`)* - storage namespace.
         - `method_params` *(object)* - method-specific options:
             - `output_format` *(str, default: `\"json\"`)* - `\"json\"` or `\"csv\"`.
-            - `include_trace_ids` *(bool, default: `true`)* - include the
-              ``trace_ids`` list in every loop entry.
-            - `vis` *(bool, default: `false`)* - whether to generate an HTML
-              visualisation of the loops.
+            - `include_trace_occurrences` *(bool, default: `true`)* - include the
+              ``trace_occurrences`` dict ``{trace_id: count}`` in every entry.
+            - `detect_repeated_patterns` *(bool, default: `false`)* - also detect
+              contiguous subsequences that repeat ≥ ``min_repetitions`` times
+              within a single trace.
+            - `min_pattern_length` *(int, default: `2`)* - minimum length of a
+              repeated pattern.
+            - `max_pattern_length` *(int, default: `10`)* - maximum length of a
+              repeated pattern.
+            - `min_repetitions` *(int, default: `2`)* - minimum in-trace
+              occurrences to report a repeated pattern.
+            - `vis` *(bool, default: `false`)* - generate an HTML visualisation.
         - `separating_key` *(str, default: `\"activity\"`)* - column used to
           label traces into groups.
         - `separating_groups` *(list[list[str]])* - group definitions, e.g.
           `[[\"fail\", \"error\"]]`.
         - `support_threshold` *(float [0, 1], default: `0.0`)* - keep only
-          loops whose ``support_count`` exceeds
+          patterns whose ``support_count`` exceeds
           ``support_threshold * trace_count``.
         """
         self.siesta_config = get_system_config()
@@ -494,7 +508,11 @@ class Comparing(SiestaModule):
                 trace_labels=trace_labels,
                 trace_count=self.metadata.trace_count,
                 support_threshold=self.comparator_config.get("support_threshold", 0.0),
-                include_trace_ids=params.get("include_trace_ids", True),
+                include_trace_occurrences=params.get("include_trace_occurrences", True),
+                detect_repeated_patterns=params.get("detect_repeated_patterns", False),
+                min_pattern_length=params.get("min_pattern_length", 2),
+                max_pattern_length=params.get("max_pattern_length", 10),
+                min_repetitions=params.get("min_repetitions", 2),
             )
 
             self.comparator_config["output_path"] += f".{fmt}"

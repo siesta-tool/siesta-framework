@@ -58,7 +58,7 @@ services:
     ports:
       - '7077:7077'
       - '8085:8085'
-      - '8081:8081'
+      - '8084:8081'
     # Uncomment for docker swarm
     # deploy:
     #   replicas: 1
@@ -77,8 +77,8 @@ services:
     environment:
         - SPARK_MODE=worker
         - SPARK_MASTER_URL=spark://spark-master:7077
-        - SPARK_WORKER_MEMORY=12G
-        - SPARK_WORKER_CORES=12
+        - SPARK_WORKER_MEMORY=10G
+        - SPARK_WORKER_CORES=6
         - SPARK_RPC_AUTHENTICATION_ENABLED=no
         - SPARK_RPC_ENCRYPTION_ENABLED=no
         - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
@@ -108,8 +108,8 @@ services:
     environment:
         - SPARK_MODE=worker
         - SPARK_MASTER_URL=spark://spark-master:7077
-        - SPARK_WORKER_MEMORY=12G
-        - SPARK_WORKER_CORES=12
+        - SPARK_WORKER_MEMORY=10G
+        - SPARK_WORKER_CORES=6
         - SPARK_RPC_AUTHENTICATION_ENABLED=no
         - SPARK_RPC_ENCRYPTION_ENABLED=no
         - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
@@ -117,9 +117,9 @@ services:
         - SPARK_USER=spark
         - SPARK_SUBMIT_OPTS=-Dlog4j.configurationFile=/opt/spark/conf/log4j2.properties
         - PYSPARK_PYTHON=/opt/bitnami/python/bin/python3
-        - SPARK_WORKER_WEBUI_PORT=8083
+        - SPARK_WORKER_WEBUI_PORT=9084
     ports:
-      - '8083:8083'
+      - '9084:9084'
     networks:
       - siesta-net
 
