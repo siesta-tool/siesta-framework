@@ -99,6 +99,7 @@ def startup(config: Dict[str, Any] = {}) -> None:
             .config("spark.jars.packages", packages) \
             .config("spark.sql.adaptive.enabled", "true") \
             .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
+            .config("spark.sql.adaptive.coalescePartitions.minPartitionNum", "6") \
             .config("spark.sql.execution.pyspark.udf.faulthandler.enabled", "true")
 
         if os.getenv("SPARK_IVY_DIR"):

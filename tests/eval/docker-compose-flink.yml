@@ -22,8 +22,8 @@ services:
         rest.address: jobmanager
         execution.runtime-mode: BATCH
     volumes:
-      - ../../datasets:/data:ro       # source logs, read-only
-      - ./flink_data:/flink_data  # converted CSVs, writable
+      - /mnt/datasets:/data:ro       # source logs, read-only
+      - /home/balaktsis/Projects/siesta-framework/tests/eval/flink_data:/opt/flink/flink_data  # converted CSVs, writable
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8081/overview"]
       interval: 10s
@@ -48,8 +48,8 @@ services:
         taskmanager.numberOfTaskSlots: 4
         execution.runtime-mode: BATCH
     volumes:
-      - ../../datasets:/data:ro
-      - ./flink_data:/flink_data
+      - /mnt/datasets:/data:ro
+      - /home/balaktsis/Projects/siesta-framework/tests/eval/flink_data:/opt/flink/flink_data
 
   sql-gateway:
     image: flink:1.20-java17
@@ -76,8 +76,8 @@ services:
         sql-gateway.endpoint.rest.port: 8083
         execution.runtime-mode: BATCH
     volumes:
-      - ../../datasets:/data:ro
-      - ./flink_data:/flink_data  # gateway reads converted CSVs from here
+      - /mnt/datasets:/data:ro
+      - /home/balaktsis/Projects/siesta-framework/tests/eval/flink_data:/opt/flink/flink_data  # gateway reads converted CSVs from here
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8083/v1/info"]
       interval: 10s

@@ -89,6 +89,7 @@ from siesta.modules.query.parse_seql import (
 )
 from siesta.modules.query.processors.detection_query import (
     build_exact_pair_predicate,
+    build_pair_attr_predicate,
     detect as eager_detect,
     process_detection_query as eager_process_detection,
 )
@@ -510,16 +511,22 @@ class Adaptive_Querying(SiestaModule):
         already known.
 
         Conditions:
-        1. Exactly one ResponsePair, no info-pairs.
+        1. Exactly one ResponsePair.
         2. Both quantifiers are ONE (no Kleene repetition).
         3. No forbidden-between activities (negation).
-        4. No attribute constraints on source or target.
+        4. Every attribute constraint is pushable as a Spark column
+           predicate (see build_pair_attr_predicate).  When the pair df
+           has already been filtered by that predicate, the surviving rows
+           satisfy the full constraint set, so CEP would only re-prove it.
+        5. The only info-pairs are the self-pairs of this pair's own
+           endpoints — those exist purely to feed attribute values to CEP
+           and are made redundant by the predicate pushdown.
 
-        Under these conditions every row of the pair table for (A, B)
-        that survives the prune is, by construction, a valid match of
-        the pattern: the row represents a co-occurrence of A and B in
-        the same group with A before B, and there are no further
-        predicates to check.
+        Under these conditions every row of the (attribute-filtered) pair
+        table for (A, B) that survives the prune is, by construction, a
+        valid match of the pattern: the row represents a co-occurrence of
+        A and B in the same group with A before B, satisfying all declared
+        attribute constraints, and there are no further predicates to check.
 
         Note: this is not specific to the adaptive path — the same
         reasoning applies to eager.  The savings are largest when the
@@ -527,7 +534,7 @@ class Adaptive_Querying(SiestaModule):
         perspective) is long and dense in the pattern's activities, as
         happens for warmup queries on busy resources.
         """
-        if len(pair_branches) != 1 or info_pairs:
+        if len(pair_branches) != 1:
             return False
         rp = next(iter(pair_branches))
         if rp.source_quantifier != SeqlQuantifier.ONE:
@@ -536,9 +543,158 @@ class Adaptive_Querying(SiestaModule):
             return False
         if rp.forbidden_between:
             return False
+
+        # Attribute constraints are tolerated only when every one of them
+        # can be pushed down as a Spark column predicate.
         if rp.source.constraints or rp.target.constraints:
-            return False
+            _, all_pushable = build_pair_attr_predicate(rp)
+            if not all_pushable:
+                return False
+
+        # The only acceptable info-pairs are the constrained endpoints'
+        # self-pairs ((A,A) / (B,B)); anything else (e.g. negation anchors)
+        # genuinely needs CEP.
+        if info_pairs:
+            allowed_self = {
+                (rp.source.label, rp.source.label),
+                (rp.target.label, rp.target.label),
+            }
+            for p in info_pairs:
+                if (p[0], p[1]) not in allowed_self:
+                    return False
         return True
+
+    def _fast_path_mode(self, pattern, pair_branches, info_pairs):
+        """
+        Decide how the pattern can be answered without the Python CEP engine.
+
+        Returns (mode, ordered_labels):
+          "single" — exactly one responded pair; handled by the single-pair
+                     skip-CEP path (min position-pair per group).
+          "chain"  — a linear sequence of >= 2 DISTINCT positive activities,
+                     all with the ONE quantifier, no negation, and every
+                     attribute constraint pushable as a Spark predicate.
+                     Answered by joining CONSECUTIVE pair tables on the shared
+                     intermediate position (Step 5 chain join) — fully native,
+                     no per-group Python validation.
+          "cep"    — anything else (Kleene quantifiers, negation, OR branches,
+                     repeated labels, non-pushable constraints): the general
+                     CEP path is required.
+        ordered_labels is the positive activity sequence (only for "chain").
+
+        Why a chain join is correct for "chain"
+        ---------------------------------------
+        Pairwise STNM existence is NOT sufficient for a multi-activity match:
+        the pruning count (pair_count == #required) can pass even when no
+        single increasing position sequence exists (different pair instances
+        use different occurrences of a shared activity).  Joining consecutive
+        pair tables on  prev.target_position == next.source_position  stitches
+        the pairs through the SAME intermediate event, so a surviving row is a
+        genuine increasing chain v0 < v1 < ... < v_{k-1} — exactly the STNM
+        eventually-follows semantics the CEP engine would compute.
+        """
+        # No negation, no Kleene repetition, single OR-branch.
+        if any(rp.forbidden_between for rp in pair_branches):
+            return "cep", []
+        if any(rp.source_quantifier != SeqlQuantifier.ONE
+               or rp.target_quantifier != SeqlQuantifier.ONE
+               for rp in pair_branches):
+            return "cep", []
+        if len({rp.branch_id for rp in pair_branches}) > 1:
+            return "cep", []
+
+        # Every attribute constraint must be pushable as a column predicate.
+        for rp in pair_branches:
+            if rp.source.constraints or rp.target.constraints:
+                _, all_pushable = build_pair_attr_predicate(rp)
+                if not all_pushable:
+                    return "cep", []
+
+        # One responded pair → existing, tested single-pair fast path.
+        if self._cep_is_redundant(pair_branches, info_pairs):
+            return "single", []
+
+        # Multi-pair: require a linear sequence of DISTINCT positive activities
+        # with no quantifiers (repeated labels would make the position-stitch
+        # join ambiguous, so those fall back to CEP).
+        acts = [a for a in split_pattern_to_list(pattern) if not a.get("negated")]
+        labels = [a["label"] for a in acts]
+        if len(labels) < 2 or len(set(labels)) != len(labels):
+            return "cep", []
+        if any(a.get("quantifier") for a in acts):
+            return "cep", []
+
+        # info-pairs must only be the constrained activities' self-pairs;
+        # the attribute pushdown makes those redundant.  Anything else
+        # (e.g. negation anchors) requires CEP.
+        allowed_self = {(l, l) for l in labels}
+        for p in info_pairs:
+            if (p[0], p[1]) not in allowed_self:
+                return "cep", []
+
+        return "chain", labels
+
+    def _chain_join_result(self, index_df, ordered_labels,
+                           support_threshold, group_count):
+        """
+        Answer a linear-sequence pattern by joining the CONSECUTIVE pair
+        tables in `index_df` on the shared intermediate position.
+
+        index_df is assumed to already be attribute-filtered (constraints
+        pushed down) and to contain the consecutive pair rows
+        (v_i, v_{i+1}) for the ordered activity labels.
+
+        Returns the same shape as the other paths: a list of
+        (group_id, positions) where positions is the flattened, ascending
+        list of matched positions [p0, p1, ..., p_{k-1}] for one match
+        (the lexicographically smallest — i.e. earliest — per group).
+        """
+        v0, v1 = ordered_labels[0], ordered_labels[1]
+        chain = (
+            index_df
+            .where((col("source") == v0) & (col("target") == v1))
+            .select(
+                col("trace_id"),
+                col("source_position").alias("p0"),
+                col("target_position").alias("p1"),
+            )
+        )
+        # Stitch each subsequent consecutive pair on the shared position so
+        # the result is a single strictly-increasing chain of positions.
+        for idx in range(2, len(ordered_labels)):
+            a, b = ordered_labels[idx - 1], ordered_labels[idx]
+            nxt = (
+                index_df
+                .where((col("source") == a) & (col("target") == b))
+                .select(
+                    col("trace_id").alias("_tid"),
+                    col("source_position").alias("_src"),
+                    col("target_position").alias(f"p{idx}"),
+                )
+            )
+            chain = (
+                chain.join(
+                    nxt,
+                    (chain["trace_id"] == nxt["_tid"])
+                    & (chain[f"p{idx - 1}"] == nxt["_src"]),
+                    "inner",
+                )
+                .drop("_tid", "_src")
+            )
+
+        pos_cols = [f"p{i}" for i in range(len(ordered_labels))]
+        per_group = (
+            chain
+            .withColumn("positions", F.array(*[col(c) for c in pos_cols]))
+            .groupBy("trace_id")
+            .agg(F.min("positions").alias("positions"))
+        )
+        if group_count:
+            per_group = per_group.filter(
+                F.size("positions") >= F.lit(support_threshold * group_count)
+            )
+        collected = per_group.collect()
+        return [(row.trace_id, list(row.positions)) for row in collected]
 
     def _run_adaptive_detection(self) -> Any:
         """
@@ -591,7 +747,26 @@ class Adaptive_Querying(SiestaModule):
         all_responded = {
             (rp.source.label, rp.target.label) for rp in pair_branches
         }
-        all_pairs_2d = all_responded | {(p[0], p[1]) for p in info_pairs}
+
+        # Decide the execution mode (single-pair skip / multi-pair chain join
+        # / CEP) up front so we fetch exactly the pairs each path needs.
+        mode, ordered_labels = self._fast_path_mode(
+            pattern, pair_branches, info_pairs
+        )
+        if mode == "chain":
+            # Only the consecutive pairs (v_i, v_{i+1}) are needed to stitch
+            # the chain — avoid lazy scans for the non-consecutive responded
+            # pairs and for the self info-pairs (made redundant by pushdown).
+            all_pairs_2d = {
+                (ordered_labels[i], ordered_labels[i + 1])
+                for i in range(len(ordered_labels) - 1)
+            }
+        elif mode == "single":
+            # Self info-pairs ((A,A)/(B,B)) only fed attributes to CEP and are
+            # redundant under predicate pushdown — don't pay to materialise them.
+            all_pairs_2d = set(all_responded)
+        else:
+            all_pairs_2d = all_responded | {(p[0], p[1]) for p in info_pairs}
 
         # --- Step 3: Fetch pairs per source -----------------------------
         pair_dfs: list[DataFrame] = []
@@ -685,58 +860,87 @@ class Adaptive_Querying(SiestaModule):
         index_df = reduce(DataFrame.unionByName, pair_dfs)
         logger.info(f"TIMING pair_fetch done: {time.time() - t_start:.2f}s  pattern={pattern!r}")
 
-
+        # --- Attribute predicate pushdown -------------------------------
+        # The pair index stores each endpoint's attributes
+        # (source_attributes / target_attributes MapType columns).  If the
+        # single responded pair carries attribute constraints expressible as
+        # Spark column predicates, filter the index now so prune, position
+        # extraction and the skip-CEP path all operate on rows that already
+        # satisfy the constraints.  This is what lets attribute-constrained
+        # queries use the fast DataFrame path (and benefit from PERSISTENT
+        # pairs) instead of shipping every (A,B) co-occurrence to the Python
+        # CEP validator.  Each predicate is scoped to its own pair's rows
+        # (other pairs' rows pass through untouched), so multi-pair patterns
+        # get every pushable constraint applied to the correct pair table.
+        for rp_c in pair_branches:
+            if not (rp_c.source.constraints or rp_c.target.constraints):
+                continue
+            attr_pred, _ = build_pair_attr_predicate(rp_c)
+            if attr_pred is not None:
+                is_pair_row = (
+                    (col("source") == rp_c.source.label)
+                    & (col("target") == rp_c.target.label)
+                )
+                index_df = index_df.where((~is_pair_row) | attr_pred)
+                logger.info(
+                    f"{self.name}: pushed down attribute predicate for "
+                    f"pair ({rp_c.source.label},{rp_c.target.label})"
+                )
 
         # --- Step 4: Prune candidate groups -----------------------------
-        branch_required: dict[int, set[tuple[str, str]]] = {}
-        for rp in pair_branches:
-            if (
-                rp.source_quantifier == SeqlQuantifier.STAR
-                or rp.target_quantifier == SeqlQuantifier.STAR
-            ):
-                continue
-            branch_required.setdefault(rp.branch_id, set()).add(
-                (rp.source.label, rp.target.label)
-            )
+        # The chain join (Step 5) computes its result directly from index_df,
+        # so the prune + position-materialisation actions below are only built
+        # for the single-pair skip path and the general CEP path.
+        pair_positions_df = None
+        if mode != "chain":
+            branch_required: dict[int, set[tuple[str, str]]] = {}
+            for rp in pair_branches:
+                if (
+                    rp.source_quantifier == SeqlQuantifier.STAR
+                    or rp.target_quantifier == SeqlQuantifier.STAR
+                ):
+                    continue
+                branch_required.setdefault(rp.branch_id, set()).add(
+                    (rp.source.label, rp.target.label)
+                )
 
-        branch_pruned_dfs = []
-        for bid, required_2d in branch_required.items():
-            if not required_2d:
-                continue
-            branch_pred = build_exact_pair_predicate(required_2d)
-            branch_pruned = (
+            branch_pruned_dfs = []
+            for bid, required_2d in branch_required.items():
+                if not required_2d:
+                    continue
+                branch_pred = build_exact_pair_predicate(required_2d)
+                branch_pruned = (
+                    index_df
+                    .where(branch_pred)
+                    .dropDuplicates(["trace_id", "source", "target"])
+                    .groupBy("trace_id")
+                    .agg(F.count("*").alias("pair_count"))
+                    .filter(col("pair_count") == len(required_2d))
+                    .select("trace_id")
+                )
+                branch_pruned_dfs.append(branch_pruned)
+
+            if not branch_pruned_dfs:
+                pruned_group_ids = index_df.select("trace_id").distinct()
+            elif len(branch_pruned_dfs) == 1:
+                pruned_group_ids = branch_pruned_dfs[0].distinct()
+            else:
+                pruned_group_ids = reduce(
+                    lambda a, b: a.union(b), branch_pruned_dfs
+                ).distinct()
+
+            pruned_count = pruned_group_ids.count()
+            logger.info(f"TIMING prune={time.time()-t_start:.2f}s  pruned_groups={pruned_count}")
+
+            pair_positions_df = (
                 index_df
-                .where(branch_pred)
-                .dropDuplicates(["trace_id", "source", "target"])
-                .groupBy("trace_id")
-                .agg(F.count("*").alias("pair_count"))
-                .filter(col("pair_count") == len(required_2d))
-                .select("trace_id")
+                .join(pruned_group_ids, on="trace_id", how="inner")
+                .repartition("trace_id")
             )
-            branch_pruned_dfs.append(branch_pruned)
 
-        if not branch_pruned_dfs:
-            pruned_group_ids = index_df.select("trace_id").distinct()
-        elif len(branch_pruned_dfs) == 1:
-            pruned_group_ids = branch_pruned_dfs[0].distinct()
-        else:
-            pruned_group_ids = reduce(
-                lambda a, b: a.union(b), branch_pruned_dfs
-            ).distinct()
-
-        pruned_count = pruned_group_ids.count()
-        logger.info(f"TIMING prune={time.time()-t_start:.2f}s  pruned_groups={pruned_count}")
-
-
-        pair_positions_df = (
-            index_df
-            .join(pruned_group_ids, on="trace_id", how="inner")
-            .repartition("trace_id")
-        )
-
-        # after .rdd.map (just inspect the count):
-        positions_count = pair_positions_df.count()
-        logger.info(f"TIMING positions_built={time.time()-t_start:.2f}s  row_count={positions_count}")
+            # after .rdd.map (just inspect the count):
+            positions_count = pair_positions_df.count()
+            logger.info(f"TIMING positions_built={time.time()-t_start:.2f}s  row_count={positions_count}")
 
         # # --- Step 5: Validate via CEP -----------------------------------
         # # Build per-group pseudo-sequences and run OpenCEP, same as the
@@ -828,7 +1032,14 @@ class Adaptive_Querying(SiestaModule):
             else 0
         )
 
-        if self._cep_is_redundant(pair_branches, info_pairs):
+        if mode == "chain":
+            # Multi-activity linear sequence: stitch consecutive pair tables
+            # on shared positions (native joins, no Python CEP).
+            result = self._chain_join_result(
+                index_df, ordered_labels, support_threshold, group_count
+            )
+
+        elif mode == "single":
             rp = next(iter(pair_branches))
             # Restrict to the rows that actually match the pair label
             # (the union upstream may have included extra info-pair

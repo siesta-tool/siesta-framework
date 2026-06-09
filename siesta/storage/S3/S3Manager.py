@@ -507,17 +507,29 @@ class S3Manager(StorageManager):
             metadata: MetaData object containing the metadata
         """        
         try:
-            delta_table = DeltaTable.forPath(self.spark, metadata.sequence_table_path)
-            delta_table.alias("existing").merge(
-                events_df.alias("new"),
-                "existing.trace_id = new.trace_id "
-                "AND existing.activity = new.activity "
-                "AND existing.position = new.position"
-            ).whenMatchedUpdateAll() \
-             .whenNotMatchedInsertAll() \
-             .execute()
+            # Repartition to match executor cores so the SequenceTable is stored
+            # as multiple files. Without this, optimizeWrite bins all 262k events
+            # into a single ~128 MB file, forcing every ABSENT scan to use 1 core.
+            num_partitions = max(self.spark.sparkContext.defaultParallelism, 4)
+            events_df = events_df.repartition(num_partitions)
 
-            logger.info(f"S3 Manager wrote to sequence table")
+            delta_table = DeltaTable.forPath(self.spark, metadata.sequence_table_path)
+            # Disable optimizeWrite for this write so Delta preserves the partition
+            # count set above. Restore it afterwards so pair-table writes stay compact.
+            self.spark.conf.set("spark.databricks.delta.optimizeWrite.enabled", "false")
+            try:
+                delta_table.alias("existing").merge(
+                    events_df.alias("new"),
+                    "existing.trace_id = new.trace_id "
+                    "AND existing.activity = new.activity "
+                    "AND existing.position = new.position"
+                ).whenMatchedUpdateAll() \
+                 .whenNotMatchedInsertAll() \
+                 .execute()
+            finally:
+                self.spark.conf.set("spark.databricks.delta.optimizeWrite.enabled", "true")
+
+            logger.info(f"S3 Manager wrote to sequence table ({num_partitions} partitions)")
 
             # Update metadata object
             ts_agg = events_df.agg(
