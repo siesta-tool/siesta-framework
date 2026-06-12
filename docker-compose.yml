@@ -14,6 +14,9 @@ services:
     environment:
       - SIESTA_PROJECT_ROOT=/workspace
       - SIESTA_CONFIG=${SIESTA_CONFIG:-/workspace/config/siesta.docker.config.json}
+      - SIESTA_PYTHON_BIN=python3.12
+      - PYSPARK_PYTHON=python3.12
+      - PYSPARK_DRIVER_PYTHON=python3.12
       - HADOOP_USER_NAME=spark
       - SPARK_USER=spark
       - MPLCONFIGDIR=/tmp/matplotlib
@@ -21,16 +24,17 @@ services:
     volumes:
       - .:/workspace
       - spark-ivy-cache:/tmp/.ivy2
-      - siesta-output:/workspace/output
+      - ./output:/workspace/output
     depends_on:
       - spark-master
       - spark-worker
       - minio
-      - kafka
+      # - kafka
     networks:
       - siesta-net
     ports:
       - '8000:8000'
+      - '4040:4040'
 
   spark-master:
     container_name: spark-master
@@ -51,14 +55,16 @@ services:
       - RESULTS_PATH=/tmp/output/
       - SPARK_MASTER_WEBUI_PORT=8085
       - SPARK_SUBMIT_OPTS=-Dlog4j.configurationFile=/opt/spark/conf/log4j2.properties
-      - PYSPARK_PYTHON=/opt/bitnami/python/bin/python3
+      - PYSPARK_PYTHON=python3.12
+    command: >
+      /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+      --host spark-master --port 7077 --webui-port 8085
     networks:
       - siesta-net
     ports:
       - '7077:7077'
       - '8085:8085'
-      - '4040:4040'
-      - '8081:8081'
+      - '8084:8081'
     # Uncomment for docker swarm
     # deploy:
     #   replicas: 1
@@ -77,16 +83,19 @@ services:
     environment:
         - SPARK_MODE=worker
         - SPARK_MASTER_URL=spark://spark-master:7077
-        - SPARK_WORKER_MEMORY=8G
-        - SPARK_WORKER_CORES=12
+        - SPARK_WORKER_MEMORY=10G
+        - SPARK_WORKER_CORES=6
         - SPARK_RPC_AUTHENTICATION_ENABLED=no
         - SPARK_RPC_ENCRYPTION_ENABLED=no
         - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
         - SPARK_SSL_ENABLED=no
         - SPARK_USER=spark
         - SPARK_SUBMIT_OPTS=-Dlog4j.configurationFile=/opt/spark/conf/log4j2.properties
-        - PYSPARK_PYTHON=/opt/bitnami/python/bin/python3
+        - PYSPARK_PYTHON=python3.12
         - SPARK_WORKER_WEBUI_PORT=8082
+    command: >
+      /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker
+      spark://spark-master:7077 --webui-port 8082
     ports:
       - '8082:8082'
     networks:
@@ -108,18 +117,21 @@ services:
     environment:
         - SPARK_MODE=worker
         - SPARK_MASTER_URL=spark://spark-master:7077
-        - SPARK_WORKER_MEMORY=8G
-        - SPARK_WORKER_CORES=12
+        - SPARK_WORKER_MEMORY=10G
+        - SPARK_WORKER_CORES=6
         - SPARK_RPC_AUTHENTICATION_ENABLED=no
         - SPARK_RPC_ENCRYPTION_ENABLED=no
         - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
         - SPARK_SSL_ENABLED=no
         - SPARK_USER=spark
         - SPARK_SUBMIT_OPTS=-Dlog4j.configurationFile=/opt/spark/conf/log4j2.properties
-        - PYSPARK_PYTHON=/opt/bitnami/python/bin/python3
-        - SPARK_WORKER_WEBUI_PORT=8083
+        - PYSPARK_PYTHON=python3.12
+        - SPARK_WORKER_WEBUI_PORT=9084
+    command: >
+      /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker
+      spark://spark-master:7077 --webui-port 9084
     ports:
-      - '8083:8083'
+      - '9084:9084'
     networks:
       - siesta-net
 
@@ -196,9 +208,9 @@ services:
     #     constraints:
     #       - 'node.labels.host == node-name-4'
 
+
 volumes:
   minio-data: {}
   kafka_data: {}
   zookeeper_data: {}
-  siesta-output: {}
   spark-ivy-cache: {}
