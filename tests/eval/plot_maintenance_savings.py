@@ -95,9 +95,9 @@ PAL = {
     "grey":   "#7F7F7F",
 }
 
-PERSP_STACK  = [PAL["blue"], PAL["orange"], PAL["green"],
-                PAL["red"],  PAL["purple"], PAL["brown"]]
-ADAPTIVE_COL = PAL["green"]
+PERSP_STACK  = [PAL["pink"],   PAL["brown"],  PAL["purple"],
+                PAL["orange"], PAL["blue"],   PAL["red"]]
+ADAPTIVE_COL = PAL["green"]   # green now belongs exclusively to adaptive
 
 _DATASET_ORDER   = ["bpic2011", "bpic2012", "bpic2015", "bpic2017", "bpic2018"]
 _DATASET_COLOURS = [PAL["blue"], PAL["orange"], PAL["red"],
@@ -243,14 +243,14 @@ def plot_per_batch_single(log_name: str, records: list[dict],
     # ── Savings annotation (axis-coord → stays inside) ────────────────
     if s and s.get("savings_ratio") is not None:
         sr  = s["savings_ratio"] * 100
-        ann = f"{pretty_name(log_name)} — savings {sr:.1f}%"
-        ax.annotate(ann,
-                    xy=(0.5, 0.97), xycoords="axes fraction",
-                    ha="center", va="top", fontsize=7.5,
-                    color="#222222",
-                    bbox=dict(boxstyle="round,pad=0.25",
-                              facecolor="white", edgecolor="#cccccc",
-                              alpha=0.9, linewidth=0.4))
+        # ann = f"{pretty_name(log_name)}"
+        # ax.annotate(ann,
+        #             xy=(0.5, 0.97), xycoords="axes fraction",
+        #             ha="center", va="top", fontsize=7.5,
+        #             color="#222222",
+        #             bbox=dict(boxstyle="round,pad=0.25",
+        #                       facecolor="white", edgecolor="#cccccc",
+        #                       alpha=0.9, linewidth=0.4))
 
     fig.tight_layout()
     fig.savefig(str(output), format="pdf")

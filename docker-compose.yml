@@ -14,6 +14,9 @@ services:
     environment:
       - SIESTA_PROJECT_ROOT=/workspace
       - SIESTA_CONFIG=${SIESTA_CONFIG:-/workspace/config/siesta.docker.config.json}
+      - SIESTA_PYTHON_BIN=python3.12
+      - PYSPARK_PYTHON=python3.12
+      - PYSPARK_DRIVER_PYTHON=python3.12
       - HADOOP_USER_NAME=spark
       - SPARK_USER=spark
       - MPLCONFIGDIR=/tmp/matplotlib
@@ -52,7 +55,10 @@ services:
       - RESULTS_PATH=/tmp/output/
       - SPARK_MASTER_WEBUI_PORT=8085
       - SPARK_SUBMIT_OPTS=-Dlog4j.configurationFile=/opt/spark/conf/log4j2.properties
-      - PYSPARK_PYTHON=/opt/bitnami/python/bin/python3
+      - PYSPARK_PYTHON=python3.12
+    command: >
+      /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+      --host spark-master --port 7077 --webui-port 8085
     networks:
       - siesta-net
     ports:
@@ -85,8 +91,11 @@ services:
         - SPARK_SSL_ENABLED=no
         - SPARK_USER=spark
         - SPARK_SUBMIT_OPTS=-Dlog4j.configurationFile=/opt/spark/conf/log4j2.properties
-        - PYSPARK_PYTHON=/opt/bitnami/python/bin/python3
+        - PYSPARK_PYTHON=python3.12
         - SPARK_WORKER_WEBUI_PORT=8082
+    command: >
+      /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker
+      spark://spark-master:7077 --webui-port 8082
     ports:
       - '8082:8082'
     networks:
@@ -116,8 +125,11 @@ services:
         - SPARK_SSL_ENABLED=no
         - SPARK_USER=spark
         - SPARK_SUBMIT_OPTS=-Dlog4j.configurationFile=/opt/spark/conf/log4j2.properties
-        - PYSPARK_PYTHON=/opt/bitnami/python/bin/python3
+        - PYSPARK_PYTHON=python3.12
         - SPARK_WORKER_WEBUI_PORT=9084
+    command: >
+      /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker
+      spark://spark-master:7077 --webui-port 9084
     ports:
       - '9084:9084'
     networks:
@@ -195,6 +207,7 @@ services:
     #   placement:
     #     constraints:
     #       - 'node.labels.host == node-name-4'
+
 
 volumes:
   minio-data: {}

@@ -73,6 +73,7 @@ from siesta.model.PerspectiveModel import (
 from siesta.model.StorageModel import MetaData
 from siesta.modules.adaptive_index.builders import (
     build_pair_transient,
+    build_pairs_transient_batched,
     promote_to_l1,
     promote_to_l2,
     _get_perspective_seq_df,
@@ -614,12 +615,14 @@ class Adaptive_Querying(SiestaModule):
         if self._cep_is_redundant(pair_branches, info_pairs):
             return "single", []
 
-        # Multi-pair: require a linear sequence of DISTINCT positive activities
-        # with no quantifiers (repeated labels would make the position-stitch
-        # join ambiguous, so those fall back to CEP).
+        # Multi-pair: require a linear sequence of positive activities with no
+        # Kleene quantifiers.  Repeated labels are fine: the createTuples fix
+        # ensures every source occurrence is stored with its first-target
+        # position, so the consecutive-pair position stitch is valid even when
+        # the same activity label appears multiple times in the chain.
         acts = [a for a in split_pattern_to_list(pattern) if not a.get("negated")]
         labels = [a["label"] for a in acts]
-        if len(labels) < 2 or len(set(labels)) != len(labels):
+        if len(labels) < 2:
             return "cep", []
         if any(a.get("quantifier") for a in acts):
             return "cep", []
@@ -768,85 +771,115 @@ class Adaptive_Querying(SiestaModule):
         else:
             all_pairs_2d = all_responded | {(p[0], p[1]) for p in info_pairs}
 
-        # --- Step 3: Fetch pairs per source -----------------------------
+        # --- Step 3: Fetch pairs (batched) -------------------------------
+        # Statuses are resolved in-memory first; I/O is then issued per
+        # TIER, not per pair:
+        #   PERSISTENT -> per-pair Delta loads in a thread pool.  load()
+        #                 is driver-side snapshot resolution (MinIO log
+        #                 listing + replay, ~0.3-1 s each); serialising
+        #                 C(n,2) of them dominated warm latency.  The
+        #                 data scan itself stays lazy in the single
+        #                 downstream union job.
+        #   TRANSIENT  -> LRU, no Spark action (unchanged).
+        #   ABSENT     -> ONE shared SequenceTable scan for all absent
+        #                 pairs via build_pairs_transient_batched.
+        # All per-pair bookkeeping (LRU put, promotion, build-cost
+        # recording) is preserved.
         pair_dfs: list[DataFrame] = []
         lazy_costs: Dict[Tuple[str, str], float] = {}
         spark = get_spark_session()
-
+        lru = get_lru_cache(self.metadata)
+ 
+        persistent_pairs: list[Tuple[str, str]] = []
+        absent_pairs:     list[Tuple[str, str]] = []
+ 
         for (act_a, act_b) in all_pairs_2d:
             pair_status = catalog.get_pair_status(pid, act_a, act_b)
-
+ 
             if pair_status == PairStatus.PERSISTENT:
-                # L3: read from per-pair Delta table
-                pair_path = _perspective_pair_path(
-                    self.metadata, pid, act_a, act_b
-                )
-                try:
-                    df = spark.read.format("delta").load(pair_path)
-                    pair_dfs.append(df)
-                    lazy_costs[(act_a, act_b)] = 0.0
-                except Exception:
-                    logger.warning(
-                        f"{self.name}: L3 read failed for "
-                        f"({act_a},{act_b}), falling back to lazy."
-                    )
-                    pair_status = PairStatus.ABSENT
-
-            if pair_status == PairStatus.TRANSIENT:
-                # L3-: check LRU cache
-                cached = get_lru_cache(self.metadata).get(pid, act_a, act_b)
+                persistent_pairs.append((act_a, act_b))
+            elif pair_status == PairStatus.TRANSIENT:
+                cached = lru.get(pid, act_a, act_b)
                 if cached is not None:
                     df = spark.createDataFrame(
                         cached, schema=EventPair.get_schema()
                     )
                     pair_dfs.append(df)
                     lazy_costs[(act_a, act_b)] = 0.0
-                    continue
                 else:
-                    # Cache miss — treat as absent
-                    pair_status = PairStatus.ABSENT
-
-            if pair_status == PairStatus.ABSENT:
-                # Lazy scan: build transiently
-                t0 = time.time()
-                df = build_pair_transient(
-                    pid=pid,
-                    act_a=act_a,
-                    act_b=act_b,
-                    lookback=lookback,
-                    lookback_mode=lookback_mode,
-                    candidate_group_ids=[],  # full scan
-                    grouping_keys=grouping_keys,
-                    metadata=self.metadata,
-                    storage=self.storage,
-                    has_pos=has_pos,
-                )
-                cost_ms = (time.time() - t0) * 1000
-                lazy_costs[(act_a, act_b)] = cost_ms
-
-                # Record cold-start build cost
-                catalog.record_pair_build_cost(
-                    pid, act_a, act_b, cost_ms
-                )
-
-                # Cache in LRU for future queries.  Reuse the materialized
-                # rows for this query so the downstream union/prune/CEP
-                # pipeline does not re-execute the lazy build plan.
+                    # Cache miss — treat as absent.
+                    absent_pairs.append((act_a, act_b))
+            else:
+                absent_pairs.append((act_a, act_b))
+ 
+        # ── PERSISTENT: parallel Delta snapshot resolution ─────────────
+        if persistent_pairs:
+            from concurrent.futures import ThreadPoolExecutor
+ 
+            def _load_pair(pair: Tuple[str, str]):
+                a, b = pair
+                path = _perspective_pair_path(self.metadata, pid, a, b)
                 try:
-                    collected = df.collect()
-                    get_lru_cache(self.metadata).put(pid, act_a, act_b, collected)
-                    catalog.promote_pair(pid, act_a, act_b, PairStatus.TRANSIENT)
-                    df = spark.createDataFrame(
-                        collected, schema=EventPair.get_schema()
+                    return pair, spark.read.format("delta").load(path)
+                except Exception:
+                    logger.warning(
+                        f"{self.name}: L3 read failed for "
+                        f"({a},{b}), falling back to lazy."
+                    )
+                    return pair, None
+ 
+            n_workers = min(16, len(persistent_pairs))
+            with ThreadPoolExecutor(max_workers=n_workers) as ex:
+                for pair, df in ex.map(_load_pair, persistent_pairs):
+                    if df is not None:
+                        pair_dfs.append(df)
+                        lazy_costs[pair] = 0.0
+                    else:
+                        absent_pairs.append(pair)
+ 
+        # ── ABSENT: one shared scan for all missing pairs ──────────────
+        if absent_pairs:
+            t0 = time.time()
+            rows_by_pair = build_pairs_transient_batched(
+                pid=pid,
+                pairs=absent_pairs,
+                lookback=lookback,
+                lookback_mode=lookback_mode,
+                candidate_group_ids=[],  # full scan
+                grouping_keys=grouping_keys,
+                metadata=self.metadata,
+                storage=self.storage,
+                has_pos=has_pos,
+            )
+            # All absent pairs shared one scan; attribute the amortised
+            # per-pair share so the retention policy sees the true
+            # per-pair price under batching.
+            shared_cost_ms = (
+                (time.time() - t0) * 1000 / max(1, len(absent_pairs))
+            )
+            for (act_a, act_b) in absent_pairs:
+                lazy_costs[(act_a, act_b)] = shared_cost_ms
+                catalog.record_pair_build_cost(
+                    pid, act_a, act_b, shared_cost_ms
+                )
+                collected = rows_by_pair.get((act_a, act_b), [])
+                try:
+                    lru.put(pid, act_a, act_b, collected)
+                    catalog.promote_pair(
+                        pid, act_a, act_b, PairStatus.TRANSIENT
                     )
                 except Exception as exc:
                     logger.warning(
                         f"{self.name}: failed to cache transient pair "
                         f"({act_a},{act_b}): {exc}"
                     )
-
-                pair_dfs.append(df)
-
+                if collected:
+                    pair_dfs.append(
+                        spark.createDataFrame(
+                            collected, schema=EventPair.get_schema()
+                        )
+                    )
+ 
         if not pair_dfs:
             return {
                 "code": 200,
@@ -929,8 +962,8 @@ class Adaptive_Querying(SiestaModule):
                     lambda a, b: a.union(b), branch_pruned_dfs
                 ).distinct()
 
-            pruned_count = pruned_group_ids.count()
-            logger.info(f"TIMING prune={time.time()-t_start:.2f}s  pruned_groups={pruned_count}")
+            # pruned_count = pruned_group_ids.count()
+            # logger.info(f"TIMING prune={time.time()-t_start:.2f}s  pruned_groups={pruned_count}")
 
             pair_positions_df = (
                 index_df
@@ -939,8 +972,8 @@ class Adaptive_Querying(SiestaModule):
             )
 
             # after .rdd.map (just inspect the count):
-            positions_count = pair_positions_df.count()
-            logger.info(f"TIMING positions_built={time.time()-t_start:.2f}s  row_count={positions_count}")
+            # positions_count = pair_positions_df.count()
+            # logger.info(f"TIMING positions_built={time.time()-t_start:.2f}s  row_count={positions_count}")
 
         # # --- Step 5: Validate via CEP -----------------------------------
         # # Build per-group pseudo-sequences and run OpenCEP, same as the

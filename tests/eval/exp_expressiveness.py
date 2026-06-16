@@ -1,45 +1,64 @@
 """
 tests/eval/exp_expressiveness.py
 
-Experiment 6.4.2 — Expressiveness beyond competitors.
+Experiment 6.4.2 — Expressiveness demonstration.
 
-Demonstrates query classes that ONLY the adaptive system supports.
-No competitor comparison — this is a capabilities showcase with
-absolute latency measurements.
+Shows that adaptive SIESTA handles advanced pattern operators that ELK
+and MATCH_RECOGNIZE cannot natively express, and measures warm-state
+latency on these queries.
 
-The cold→warm delta IS the paper's story here: it quantifies the
-adaptive index payoff for each uniquely-supported feature class.
+Design
+------
+Systems:
+  siesta (adaptive, warm)  — full measurement
+  elk                      — marked N/A (cannot express these queries)
+  match_recognize          — marked N/A (no native support for most)
 
-Categories
-----------
-multiperspective
-    The same real co-occurring pairs, but grouped by org:resource,
-    lifecycle:transition, etc. instead of case_id.  ELK/MR cannot
-    do this — their partitioning is fixed at index/table creation.
+Dataset:
+  Synthetic (eval_synthetic.csv) with controlled activity set and
+  balanced attribute distributions.  Falls back to any provided dataset.
 
-attribute_multiperspective
-    Attribute-constrained patterns under non-case perspectives.
-    Requires both dynamic grouping AND in-index attribute evaluation.
+Query categories:
+  kleene         — A B+ C           (one-or-more repetition)
+  negation       — A ~B C           (absence between matches)
+  disjunction    — (A|B) C D        (branching patterns)
+  cross_attr     — A[$1] B[$1]      (cross-activity variable binding)
+  combined       — A+ ~B C[$1] D[$1] (multiple operators)
 
-operators
-    Negation (A !B C), alternation (A (B||C) D), Kleene+ (A+ B).
-    Built on top of real pairs so the base patterns are guaranteed
-    to have non-zero results.  Operators modify the structural
-    skeleton; the CEP engine evaluates them.
+All queries have length >= 8 activities in the expanded form, built
+from real co-occurring activity chains to guarantee non-zero results.
 
-combined
-    All features at once: operators + attributes + non-case perspective.
-    The hardest queries the system can handle.
+Approach:
+  1. Ingest dataset (adaptive only).
+  2. Build a pool of candidate patterns per category from real activity
+     chains discovered via pair_coverage.
+  3. Preflight each candidate: query with a short timeout and keep only
+     those with total > 0.
+  4. Warm up the surviving patterns (4 rounds of 2-activity sub-pairs
+     + sleep for promotions).
+  5. Measure warm-state latency (median of 3 reps).
 
-For each category, we measure:
-  - COLD latency  — fresh ingest, empty catalog, SequenceTable scan.
-  - WARM latency  — after promotion to PERSISTENT, index read.
-  - The ratio tells the paper's story: adaptive indexing pays off
-    even for the most expressive queries.
+No cold pass is needed — the paper narrative for this experiment is
+"what SIESTA can do that others cannot" plus steady-state latency.
 
 Output
 ------
-results/6_4_2_expressiveness_{log_name}.jsonl
+results/expressiveness_<log_name>.jsonl
+
+Records:
+  dataset        path, log_name, activities, n_activities
+  candidate_pool category, n_candidates, n_surviving
+  warmup_done    n_pairs_warmed, wall_s
+  query          system, category, qid, pattern, latency_s, total
+  capability     system, category, supported (bool), reason
+
+Running
+-------
+    python -m tests.eval.exp_expressiveness \\
+        --dataset /mnt/datasets/eval_synthetic.csv --log-name eval_synthetic
+
+    python -m tests.eval.exp_expressiveness \\
+        --dataset /mnt/datasets/bpic_2017.xes --log-name bpic_2017
 """
 
 from __future__ import annotations
@@ -47,498 +66,640 @@ from __future__ import annotations
 import argparse
 import itertools
 import os
-import re
-import statistics
 import sys
 import time
+import statistics
 from pathlib import Path
+
+import requests
+from urllib.parse import urljoin
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tests.eval.eval_common import (
-    CONFIG_DIR,
+    API_BASE, API_TIMEOUT_S, CONFIG_DIR, RESULTS_DIR,
+    QUERY_PREFIX,
     Recorder, health_check,
     ingest_adaptive,
-    timed_query,
+    detect_adaptive, timed_query,
     discover_schema, resolve_dataset,
     quote_label,
 )
 from tests.eval.workload import fetch_pair_coverage
 
-CONFIG = CONFIG_DIR / "adaptive_index.config.json"
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
 
-PROMOTION_SLEEP = int(os.environ.get("PROMOTION_SLEEP", "120"))
-MIN_PERSP_CARD  = 5
+ADAPTIVE_CONFIG   = CONFIG_DIR / "adaptive_index.config.json"
+RETENTION_FAST    = {"min_query_count": 1, "half_life_seconds": 300}
 
-RETENTION_OVERRIDES = {
-    "min_query_count":   3,
-    "half_life_seconds": 3600.0,
-    "hysteresis":        0.0,
-}
+WARMUP_REPS       = 4
+PROMOTION_SLEEP_S = int(os.environ.get("PROMOTION_SLEEP_S", "90"))
+MEASURE_REPS      = 3
+PREFLIGHT_TIMEOUT  = int(os.environ.get("PREFLIGHT_TIMEOUT_S", "120"))
 
-_LOG_EXTS = {".csv", ".xes"}
+# How many candidate patterns to generate per category before preflight.
+CANDIDATES_PER_CAT = 10
+# How many surviving patterns to actually measure per category.
+MEASURE_PER_CAT    = 3
+
+# ---------------------------------------------------------------------------
+# Tee — duplicate stdout/stderr to a log file
+# ---------------------------------------------------------------------------
+
+class _Tee:
+    """
+    Wraps a stream so every write goes to both the original stream and
+    a file.  Assign to sys.stdout / sys.stderr so all print() calls and
+    tracebacks are captured without changing any other code.
+    """
+    def __init__(self, stream, filepath: Path) -> None:
+        self._stream = stream
+        self._file   = filepath.open("a", buffering=1, encoding="utf-8")
+
+    def write(self, data: str) -> int:
+        self._stream.write(data)
+        self._file.write(data)
+        return len(data)
+
+    def flush(self) -> None:
+        self._stream.flush()
+        self._file.flush()
+
+    def fileno(self):
+        return self._stream.fileno()
+
+    def close(self) -> None:
+        self._file.close()
+
+    # Forward all other attribute lookups to the underlying stream so
+    # libraries that inspect sys.stdout (e.g. tqdm) don't break.
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+def _setup_tee(label: str) -> Path:
+    """
+    Redirect stdout and stderr through _Tee to a timestamped log file.
+    Returns the log file path.
+    """
+    import datetime
+    ts  = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = RESULTS_DIR / f"{label}_{ts}.txt"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    sys.stdout = _Tee(sys.stdout, log_path)
+    sys.stderr = _Tee(sys.stderr, log_path)
+    return log_path
+
 
 
 # ---------------------------------------------------------------------------
-# Workload construction from pair_coverage per perspective
+# Pattern templates
 # ---------------------------------------------------------------------------
 
-def _pat(*acts: str) -> str:
-    return " ".join(quote_label(a) for a in acts)
+def _ql(act: str) -> str:
+    """Quote-label shorthand."""
+    return quote_label(act)
 
 
-def build_expressiveness_workloads(
-    perspective_coverage: dict[tuple, dict],
-    log_name: str,
-    schema,
-    *,
-    max_length: int = 6,
-) -> dict[str, list[dict]]:
+def build_kleene_patterns(chains: list[list[str]]) -> list[dict]:
     """
-    Build all expressiveness categories from real pairs under non-case perspectives.
-
-    `perspective_coverage` maps (gk_tuple) -> pair_coverage_response.
-    Each response has {"group_count": N, "pairs": [{"source": A, "target": B, "groups": G}, ...]}.
+    Build Kleene patterns of the form: A B+ C D E F G H
+    where B+ covers one activity with one-or-more repetition.
+    Chain length ≥ 8 guaranteed by chain input.
     """
-    cnt = itertools.count(1)
+    patterns = []
+    for chain in chains:
+        if len(chain) < 8:
+            continue
+        # Place Kleene on the second activity.
+        parts = [_ql(chain[0]), f"{_ql(chain[1])}+"]
+        parts.extend(_ql(a) for a in chain[2:])
+        patterns.append({
+            "category": "kleene",
+            "pattern":  " ".join(parts),
+            "chain":    chain,
+            "desc":     f"{chain[0]} {chain[1]}+ {' '.join(chain[2:])}",
+        })
+    return patterns
 
-    attr_pref = ["org:resource", "lifecycle:transition", "org:group",
-                 "org:role", "resource", "role", "Action"]
-    available_attrs = [a for a in attr_pref if schema.attribute_values.get(a)]
-    if not available_attrs:
-        available_attrs = [k for k, vs in schema.attribute_values.items() if vs][:3]
 
-    mp_structural:  list[dict] = []
-    mp_attribute:   list[dict] = []
-    operators:      list[dict] = []
-    combined:       list[dict] = []
-
-    for gk_tuple, cov in perspective_coverage.items():
-        gk = list(gk_tuple)
-        ptag = f"persp={'|'.join(gk)}"
-        pairs = cov.get("pairs", [])
-        gc = cov.get("group_count", 0)
-        if not pairs or gc < MIN_PERSP_CARD:
+def build_negation_patterns(chains: list[list[str]], all_activities: list[str]) -> list[dict]:
+    """
+    Build negation patterns: A ~X B C D E F G H
+    where X is an activity NOT in the chain (guaranteed absent between A and B).
+    Chain length ≥ 8.
+    """
+    patterns = []
+    chain_set_cache: dict[int, set[str]] = {}
+    for ci, chain in enumerate(chains):
+        if len(chain) < 8:
+            continue
+        chain_set = set(chain)
+        # Find an activity not in the chain for the negation.
+        neg_act = None
+        for act in all_activities:
+            if act not in chain_set:
+                neg_act = act
+                break
+        if not neg_act:
             continue
 
-        # Build adjacency for chaining
-        adj: dict[str, list[dict]] = {}
-        for p in pairs:
-            adj.setdefault(p["source"], []).append(p)
-
-        # ── Multiperspective structural ───────────────────────────────
-        # Top pairs by coverage — these will have the most results
-        for p in pairs[:6]:
-            mp_structural.append({
-                "id": f"MS{next(cnt)}", "log_name": log_name,
-                "pattern": _pat(p["source"], p["target"]),
-                "grouping_keys": gk, "pattern_length": 2,
-                "category": "multiperspective",
-                "tags": ["pair", ptag, f"groups={p['groups']}"],
-            })
-
-        # k=3 chains
-        chains_found = 0
-        for p in pairs[:15]:
-            if chains_found >= 3:
-                break
-            for cont in adj.get(p["target"], []):
-                if cont["target"] != p["source"]:
-                    mp_structural.append({
-                        "id": f"MS{next(cnt)}", "log_name": log_name,
-                        "pattern": _pat(p["source"], p["target"], cont["target"]),
-                        "grouping_keys": gk, "pattern_length": 3,
-                        "category": "multiperspective",
-                        "tags": ["triple", ptag],
-                    })
-                    chains_found += 1
-                    break
-
-        # ── Multiperspective + attribute ──────────────────────────────
-        for attr in available_attrs[:2]:
-            vals = schema.attribute_values[attr]
-            for p in pairs[:5]:
-                val = vals[0].replace('"', '\\"')
-                mp_attribute.append({
-                    "id": f"MA{next(cnt)}", "log_name": log_name,
-                    "pattern": f'{quote_label(p["source"])}[{attr}="{val}"] '
-                               f'{quote_label(p["target"])}',
-                    "grouping_keys": gk, "pattern_length": 2,
-                    "category": "attribute_multiperspective",
-                    "tags": ["single_eq", ptag, f"attr={attr}"],
-                })
-                break
-
-            # Cross-event binding
-            for p in pairs[:5]:
-                mp_attribute.append({
-                    "id": f"MA{next(cnt)}", "log_name": log_name,
-                    "pattern": f'{quote_label(p["source"])}[{attr}=$1] '
-                               f'{quote_label(p["target"])}[{attr}=$1]',
-                    "grouping_keys": gk, "pattern_length": 2,
-                    "category": "attribute_multiperspective",
-                    "tags": ["cross_eq", ptag, f"attr={attr}"],
-                })
-                break
-
-        # ── Operators on real pairs ───────────────────────────────────
-        # For each length k from 3 to max_length, find a real chain
-        # and overlay operators onto it.  The base chain has non-zero
-        # results; operators constrain further but the query is non-trivial.
-
-        for k in range(3, min(max_length + 1, 7)):
-            chain = _find_chain(adj, pairs, k)
-            if not chain:
-                continue
-
-            # Pick a "forbidden" activity for negation — must be one
-            # that actually appears in the log but isn't in the chain
-            all_acts_in_log = set(schema.activities)
-            chain_set = set(chain)
-            forbidden_candidates = [a for a in schema.activities[:15]
-                                    if a not in chain_set]
-
-            if forbidden_candidates:
-                forbidden = forbidden_candidates[0]
-                operators.append({
-                    "id": f"OP{next(cnt)}", "log_name": log_name,
-                    "pattern": (
-                        f"{quote_label(chain[0])} "
-                        f"!{quote_label(forbidden)} "
-                        + " ".join(quote_label(a) for a in chain[1:])
-                    ),
-                    "grouping_keys": gk,
-                    "pattern_length": k + 1,
-                    "category": "operators",
-                    "tags": ["negation", f"len={k+1}", ptag],
-                })
-
-            # Alternation: first activity, then (second || alternative), then rest
-            alt_candidates = [a for a in schema.activities[:10]
-                              if a != chain[0] and a != chain[1]]
-            if alt_candidates and k >= 3:
-                alt = alt_candidates[0]
-                operators.append({
-                    "id": f"OP{next(cnt)}", "log_name": log_name,
-                    "pattern": (
-                        f"{quote_label(chain[0])} "
-                        f"({quote_label(chain[1])}||{quote_label(alt)}) "
-                        + " ".join(quote_label(a) for a in chain[2:])
-                    ),
-                    "grouping_keys": gk,
-                    "pattern_length": k + 1,
-                    "category": "operators",
-                    "tags": ["alternation", f"len={k+1}", ptag],
-                })
-
-            # Kleene+
-            operators.append({
-                "id": f"OP{next(cnt)}", "log_name": log_name,
-                "pattern": (
-                    f"{quote_label(chain[0])}+ "
-                    + " ".join(quote_label(a) for a in chain[1:])
-                ),
-                "grouping_keys": gk,
-                "pattern_length": k,
-                "category": "operators",
-                "tags": ["kleene_plus", f"len={k}", ptag],
-            })
-
-        # ── Combined: operators + attributes + multiperspective ───────
-        if available_attrs:
-            attr = available_attrs[0]
-            val = schema.attribute_values[attr][0].replace('"', '\\"')
-
-            for k in range(3, min(max_length + 1, 7)):
-                chain = _find_chain(adj, pairs, k)
-                if not chain:
-                    continue
-
-                forbidden_candidates = [a for a in schema.activities[:15]
-                                        if a not in set(chain)]
-                if forbidden_candidates:
-                    combined.append({
-                        "id": f"CB{next(cnt)}", "log_name": log_name,
-                        "pattern": (
-                            f'{quote_label(chain[0])}[{attr}="{val}"] '
-                            f'!{quote_label(forbidden_candidates[0])} '
-                            + " ".join(quote_label(a) for a in chain[1:])
-                        ),
-                        "grouping_keys": gk,
-                        "pattern_length": k + 1,
-                        "category": "combined",
-                        "tags": ["negation_attr", f"len={k+1}", ptag],
-                    })
-
-                # Variable binding + Kleene+
-                combined.append({
-                    "id": f"CB{next(cnt)}", "log_name": log_name,
-                    "pattern": (
-                        f"{quote_label(chain[0])}[{attr}=$1]+ "
-                        + " ".join(quote_label(a) for a in chain[1:-1])
-                        + f" {quote_label(chain[-1])}[{attr}=$1]"
-                    ),
-                    "grouping_keys": gk,
-                    "pattern_length": k,
-                    "category": "combined",
-                    "tags": ["kleene_var", f"len={k}", ptag],
-                })
-
-    return {
-        "multiperspective":             mp_structural,
-        "attribute_multiperspective":   mp_attribute,
-        "operators":                    operators,
-        "combined":                     combined,
-    }
+        # Pattern: first_act ~neg_act second_act rest...
+        parts = [_ql(chain[0]), f"~{_ql(neg_act)}", _ql(chain[1])]
+        parts.extend(_ql(a) for a in chain[2:])
+        patterns.append({
+            "category": "negation",
+            "pattern":  " ".join(parts),
+            "chain":    chain,
+            "neg_act":  neg_act,
+            "desc":     f"{chain[0]} ~{neg_act} {' '.join(chain[1:])}",
+        })
+    return patterns
 
 
-def _find_chain(adj, pairs, length):
-    for start in pairs[:20]:
-        chain = [start["source"], start["target"]]
-        while len(chain) < length:
-            last = chain[-1]
-            found = False
-            for p in adj.get(last, []):
-                if p["target"] not in chain:
-                    chain.append(p["target"])
-                    found = True
-                    break
-            if not found:
-                break
-        if len(chain) == length:
-            return chain
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Cold + warm runner
-# ---------------------------------------------------------------------------
-
-def run_cold_warm(
-    rec, category, workload, log_name, dataset_path, *, log_size=0,
-    perspectives,
-):
+def build_disjunction_patterns(chains: list[list[str]]) -> list[dict]:
     """
-    Cold pass (fresh ingest → SequenceTable scan) then warm pass
-    (after promotion → PERSISTENT index read).  The delta is the
-    paper's story for each category.
+    Build disjunction patterns: (A|B) C D E F G H I
+    where the first position accepts either of two activities.
+    Need ≥ 2 chains sharing a suffix to construct meaningful disjunctions.
     """
-    if not workload:
-        print(f"\n  [SKIP] {category}: no queries.")
-        rec.emit("skip", category=category, reason="no queries")
-        return
+    patterns = []
+    for i, chain in enumerate(chains):
+        if len(chain) < 8:
+            continue
+        # Use the first two activities as disjunctive alternatives
+        # for the head, then continue with the rest.
+        # Pattern: (chain[0]|chain[1]) chain[2] chain[3] ... chain[N]
+        # This is semantically: either chain[0] or chain[1] is followed by chain[2]...
+        if len(chain) < 9:
+            continue  # Need 9 to get 8 after collapsing first two into disjunction.
+        head = f"({_ql(chain[0])}|{_ql(chain[1])})"
+        tail = [_ql(a) for a in chain[2:]]
+        parts = [head] + tail
+        patterns.append({
+            "category":   "disjunction",
+            "pattern":    " ".join(parts),
+            "chain":      chain,
+            "desc":       f"({chain[0]}|{chain[1]}) {' '.join(chain[2:])}",
+        })
+    return patterns
 
-    # ── Cold ──────────────────────────────────────────────────────────
-    print(f"\n── COLD — {category} ({len(workload)} queries) ──")
-    ingest_adaptive(log_name, dataset_path, CONFIG,
-                    overrides={
-                        "overwrite_data": True,
-                        "perspectives": [{"grouping_keys": gk}
-                                         for gk in perspectives],
-                    },
-                    clear_existing=True)
-    time.sleep(2)
 
-    cold_latencies = []
-    for q in workload:
+def build_cross_attr_patterns(
+    chains: list[list[str]],
+    schema,
+) -> list[dict]:
+    """
+    Build cross-activity attribute constraint patterns:
+    A[attr=$1] B C D E F G H[attr=$1]
+    where A and H must share the same value for `attr`.
+    """
+    # Find a non-numeric attribute.
+    str_attr = None
+    for k, vs in schema.attribute_values.items():
+        if not vs:
+            continue
         try:
-            body, latency = timed_query(
-                q["log_name"], q["pattern"], q["grouping_keys"],
-                retention_overrides=RETENTION_OVERRIDES,
-            )
-            cold_latencies.append(latency)
-            rec.emit("query", system="adaptive_cold", category=category,
-                     qid=q["id"], pattern=q["pattern"],
-                     grouping_keys=q["grouping_keys"],
-                     pattern_length=q.get("pattern_length"),
-                     tags=q.get("tags", []),
-                     latency_s=latency, total=body.get("total", 0),
-                     tier=body.get("pair_status_after", {}),
-                     log_name=log_name, log_size=log_size)
-            print(f"  COLD {q['id']:5s} k={q.get('pattern_length','?')} "
-                  f"{q['pattern'][:45]:45s} -> {latency:.3f}s "
-                  f"(n={body.get('total','?')})")
-        except Exception as exc:
-            rec.emit("query_error", system="adaptive_cold", category=category,
-                     qid=q["id"], log_name=log_name, error=str(exc))
-            print(f"  COLD {q['id']:5s} ERROR: {exc}")
+            [float(v) for v in vs]
+            continue  # numeric
+        except (ValueError, TypeError):
+            pass
+        str_attr = k
+        break
 
-    # ── Warm-up: run queries 3 more times to cross min_query_count ────
-    print(f"\n  Warm-up: 3 more passes ...")
-    for _ in range(3):
-        for q in workload:
+    if not str_attr:
+        return []
+
+    patterns = []
+    for chain in chains:
+        if len(chain) < 8:
+            continue
+        parts = [f"{_ql(chain[0])}[{str_attr}=$1]"]
+        parts.extend(_ql(a) for a in chain[1:-1])
+        parts.append(f"{_ql(chain[-1])}[{str_attr}=$1]")
+        patterns.append({
+            "category":  "cross_attr",
+            "pattern":   " ".join(parts),
+            "chain":     chain,
+            "attr":      str_attr,
+            "desc":      f"{chain[0]}[{str_attr}=$1] ... {chain[-1]}[{str_attr}=$1]",
+        })
+    return patterns
+
+
+def build_combined_patterns(
+    chains: list[list[str]],
+    all_activities: list[str],
+    schema,
+) -> list[dict]:
+    """
+    Combined patterns exercising multiple operators:
+    A+ ~X B C[attr=$1] D E F G H[attr=$1]
+    """
+    str_attr = None
+    for k, vs in schema.attribute_values.items():
+        if not vs:
+            continue
+        try:
+            [float(v) for v in vs]
+            continue
+        except (ValueError, TypeError):
+            pass
+        str_attr = k
+        break
+
+    patterns = []
+    for chain in chains:
+        if len(chain) < 9:
+            continue
+
+        chain_set = set(chain)
+        neg_act = None
+        for act in all_activities:
+            if act not in chain_set:
+                neg_act = act
+                break
+        if not neg_act:
+            continue
+
+        # A+ ~X B C[attr=$1] D ... H[attr=$1]
+        parts = [f"{_ql(chain[0])}+", f"~{_ql(neg_act)}", _ql(chain[1])]
+        if str_attr:
+            parts.append(f"{_ql(chain[2])}[{str_attr}=$1]")
+            start_rest = 3
+        else:
+            parts.append(_ql(chain[2]))
+            start_rest = 3
+
+        for a in chain[start_rest:-1]:
+            parts.append(_ql(a))
+
+        if str_attr:
+            parts.append(f"{_ql(chain[-1])}[{str_attr}=$1]")
+        else:
+            parts.append(_ql(chain[-1]))
+
+        patterns.append({
+            "category":  "combined",
+            "pattern":   " ".join(parts),
+            "chain":     chain,
+            "desc":      f"{chain[0]}+ ~{neg_act} ... [{str_attr}=$1] ...",
+        })
+    return patterns
+
+
+# ---------------------------------------------------------------------------
+# Chain builder (reused from exp_competitive logic)
+# ---------------------------------------------------------------------------
+
+def _build_chains(
+    log_name: str,
+    grouping_keys: list[str],
+    target_len: int = 10,
+    min_len: int = 8,
+    n_chains: int = CANDIDATES_PER_CAT,
+) -> list[list[str]]:
+    """Build activity chains from pair coverage."""
+    from collections import defaultdict
+
+    cov = fetch_pair_coverage(log_name, grouping_keys)
+    pairs = cov.get("pairs", [])
+    if not pairs:
+        return []
+
+    adj: dict[str, list[tuple[str, int]]] = defaultdict(list)
+    for p in pairs:
+        adj[p["source"]].append((p["target"], p["groups"]))
+
+    for src in adj:
+        adj[src].sort(key=lambda x: -x[1])
+
+    chains: list[list[str]] = []
+    used_starters: set[str] = set()
+    starters = sorted(adj.keys(), key=lambda s: sum(g for _, g in adj[s]), reverse=True)
+
+    for starter in starters:
+        if len(chains) >= n_chains:
+            break
+        if starter in used_starters:
+            continue
+
+        chain = [starter]
+        used_in = {starter}
+        for _ in range(target_len - 1):
+            last = chain[-1]
+            extended = False
+            for nxt, _g in adj.get(last, []):
+                if nxt not in used_in:
+                    chain.append(nxt)
+                    used_in.add(nxt)
+                    extended = True
+                    break
+            if not extended:
+                for nxt, _g in adj.get(last, []):
+                    if nxt != last:
+                        chain.append(nxt)
+                        extended = True
+                        break
+            if not extended:
+                break
+
+        if len(chain) >= min_len:
+            chains.append(chain)
+            used_starters.add(starter)
+
+    return chains
+
+
+# ---------------------------------------------------------------------------
+# Preflight
+# ---------------------------------------------------------------------------
+
+def _preflight(
+    log_name: str,
+    pattern: str,
+    grouping_keys: list[str],
+) -> int | None:
+    """Quick check: returns total count or None on error."""
+    body = {
+        "log_name":          log_name,
+        "storage_namespace": "siesta",
+        "method":            "detection",
+        "query":             {"pattern": pattern},
+        "grouping_keys":     grouping_keys,
+        "lookback":          "3650d",
+        "lookback_mode":     "time",
+        "support_threshold": 0.0,
+        "min_query_count":   1,
+        "half_life_seconds": 300,
+    }
+    try:
+        r = requests.post(
+            urljoin(API_BASE, f"/{QUERY_PREFIX}/detection"),
+            json=body,
+            timeout=PREFLIGHT_TIMEOUT,
+        )
+        r.raise_for_status()
+        return r.json().get("total", 0)
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Warm-up
+# ---------------------------------------------------------------------------
+
+def _warmup_chain(
+    log_name: str,
+    chain: list[str],
+    grouping_keys: list[str],
+    reps: int = WARMUP_REPS,
+) -> int:
+    """Warm up all consecutive sub-pairs of a chain."""
+    n = 0
+    for i in range(len(chain) - 1):
+        pat = f"{_ql(chain[i])} {_ql(chain[i+1])}"
+        for _ in range(reps):
             try:
-                timed_query(q["log_name"], q["pattern"],
-                            q["grouping_keys"],
-                            retention_overrides=RETENTION_OVERRIDES)
+                detect_adaptive(log_name, pat, grouping_keys,
+                                retention_overrides=RETENTION_FAST)
+                n += 1
             except Exception:
                 pass
-
-    print(f"  Sleeping {PROMOTION_SLEEP}s for materialisation ...")
-    time.sleep(PROMOTION_SLEEP)
-
-    # ── Warm ──────────────────────────────────────────────────────────
-    print(f"\n── WARM — {category} ({len(workload)} queries) ──")
-    warm_latencies = []
-    for q in workload:
-        try:
-            body, latency = timed_query(
-                q["log_name"], q["pattern"], q["grouping_keys"],
-                retention_overrides=RETENTION_OVERRIDES,
-            )
-            warm_latencies.append(latency)
-            rec.emit("query", system="adaptive_warm", category=category,
-                     qid=q["id"], pattern=q["pattern"],
-                     grouping_keys=q["grouping_keys"],
-                     pattern_length=q.get("pattern_length"),
-                     tags=q.get("tags", []),
-                     latency_s=latency, total=body.get("total", 0),
-                     tier=body.get("pair_status_after", {}),
-                     log_name=log_name, log_size=log_size)
-            print(f"  WARM {q['id']:5s} k={q.get('pattern_length','?')} "
-                  f"{q['pattern'][:45]:45s} -> {latency:.3f}s "
-                  f"(n={body.get('total','?')})")
-        except Exception as exc:
-            rec.emit("query_error", system="adaptive_warm", category=category,
-                     qid=q["id"], log_name=log_name, error=str(exc))
-            print(f"  WARM {q['id']:5s} ERROR: {exc}")
-
-    # Summary
-    if cold_latencies and warm_latencies:
-        c_med = statistics.median(cold_latencies)
-        w_med = statistics.median(warm_latencies)
-        speedup = c_med / w_med if w_med > 0 else float("inf")
-        print(f"\n  {category} summary: "
-              f"cold_median={c_med:.2f}s  warm_median={w_med:.2f}s  "
-              f"speedup={speedup:.1f}×")
-        rec.emit("category_summary", category=category,
-                 cold_median=c_med, warm_median=w_med, speedup=speedup,
-                 n_queries=len(workload))
+    return n
 
 
 # ---------------------------------------------------------------------------
-# Per-dataset execution
+# Measurement
 # ---------------------------------------------------------------------------
 
-def run_dataset(dataset_path, log_name, *, max_length, max_perspectives):
+def _measure(
+    log_name: str,
+    pattern: str,
+    grouping_keys: list[str],
+    reps: int = MEASURE_REPS,
+) -> tuple[float, int]:
+    """Median latency over reps."""
+    lats = []
+    total = 0
+    for _ in range(reps):
+        body, lat = timed_query(
+            log_name, pattern, grouping_keys,
+            retention_overrides=RETENTION_FAST,
+        )
+        lats.append(lat)
+        total = body.get("total", 0)
+    return statistics.median(lats), total
+
+
+# ---------------------------------------------------------------------------
+# Capability table
+# ---------------------------------------------------------------------------
+
+CAPABILITY = {
+    "kleene":     {"elk": False, "match_recognize": False,
+                   "elk_reason": "No sequence-aware Kleene evaluation",
+                   "mr_reason":  "No native Kleene over event sequences"},
+    "negation":   {"elk": False, "match_recognize": False,
+                   "elk_reason": "No absence-between-positions semantics",
+                   "mr_reason":  "No native negation between pattern elements"},
+    "disjunction": {"elk": False, "match_recognize": True,
+                    "elk_reason": "No sequential disjunction",
+                    "mr_reason":  "Supported via DEFINE alternatives"},
+    "cross_attr": {"elk": False, "match_recognize": True,
+                   "elk_reason": "No cross-document attribute binding",
+                   "mr_reason":  "Supported via DEFINE predicates"},
+    "combined":   {"elk": False, "match_recognize": False,
+                   "elk_reason": "Cannot combine sequence operators",
+                   "mr_reason":  "No Kleene + negation combination"},
+}
+
+
+# ---------------------------------------------------------------------------
+# Per-dataset runner
+# ---------------------------------------------------------------------------
+
+def run_dataset(
+    dataset_path: Path,
+    log_name: str,
+) -> None:
+    fmt = dataset_path.suffix.lower().lstrip(".")
+    print(f"\n{'='*64}")
+    print(f"  Dataset: {dataset_path}  log_name={log_name}")
+    print(f"{'='*64}")
+
     schema = discover_schema(dataset_path)
-    perspectives = [[k] for k in schema.perspective_keys[:max_perspectives]]
-    if not perspectives or not any(gk for gk in perspectives):
-        print(f"  SKIP {log_name}: no non-case perspectives.")
+    activities = schema.activities
+
+    print(f"  Activities ({len(activities)}): {activities[:12]}{'...' if len(activities)>12 else ''}")
+
+    if len(activities) < 3:
+        print(f"  SKIP: need >= 3 activities, got {len(activities)}")
         return
 
-    print(f"\n{'═'*64}")
-    print(f"  Dataset:      {log_name}  ({dataset_path.name})")
-    print(f"  Perspectives: {perspectives}")
-    print(f"{'═'*64}")
+    rec = Recorder("6.4.2", f"expressiveness_{log_name}.jsonl")
+    rec.emit("dataset", path=str(dataset_path), log_name=log_name,
+             activities=activities, n_activities=len(activities))
 
-    rec = Recorder("6.4.2", f"6_4_2_expressiveness_{log_name}.jsonl")
-
-    # Bootstrap: ingest with perspectives for pair_coverage discovery
-    print("\n  Bootstrap ingest with perspectives ...")
-    ingest_adaptive(log_name, dataset_path, CONFIG,
-                    overrides={
-                        "perspectives": [{"grouping_keys": gk}
-                                         for gk in perspectives],
-                    },
-                    clear_existing=True)
+    # ── Ingest ─────────────────────────────────────────────────────────
+    print("\n  Ingesting (adaptive) ...")
+    ingest_adaptive(log_name, dataset_path, ADAPTIVE_CONFIG,
+                    overrides={"overwrite_data": True})
     time.sleep(2)
 
-    # Discover real pairs per perspective
-    persp_coverage: dict[tuple, dict] = {}
-    for gk in perspectives:
-        try:
-            cov = fetch_pair_coverage(log_name, gk, activities=schema.activities)
-            gc = cov.get("group_count", 0)
-            n_pairs = len(cov.get("pairs", []))
-            if gc >= MIN_PERSP_CARD and n_pairs >= 2:
-                persp_coverage[tuple(gk)] = cov
-                print(f"  {gk}: {gc} groups, {n_pairs} pairs")
-            else:
-                print(f"  {gk}: skipped (groups={gc}, pairs={n_pairs})")
-        except Exception as exc:
-            print(f"  {gk}: ERROR — {exc}")
+    # Use trace_id perspective for expressiveness queries.
+    gk = ["trace_id"]
 
-    if not persp_coverage:
-        print("  ABORT: no usable perspectives.")
-        rec.emit("abort", reason="no usable perspectives")
+    # ── Build chains ──────────────────────────────────────────────────
+    chains = _build_chains(log_name, gk, target_len=10, min_len=8,
+                           n_chains=CANDIDATES_PER_CAT * 2)
+    if not chains:
+        print("  No chains found — aborting.")
+        return
+    print(f"  Built {len(chains)} candidate chains (lengths: {[len(c) for c in chains]})")
+
+    # ── Generate candidate patterns per category ──────────────────────
+    all_candidates: dict[str, list[dict]] = {
+        "kleene":      build_kleene_patterns(chains),
+        "negation":    build_negation_patterns(chains, activities),
+        "disjunction": build_disjunction_patterns(chains),
+        "cross_attr":  build_cross_attr_patterns(chains, schema),
+        "combined":    build_combined_patterns(chains, activities, schema),
+    }
+
+    # ── Preflight: keep only patterns with non-zero results ───────────
+    surviving: dict[str, list[dict]] = {}
+    for cat, candidates in all_candidates.items():
+        ok = []
+        for cand in candidates:
+            if len(ok) >= MEASURE_PER_CAT:
+                break
+            total = _preflight(log_name, cand["pattern"], gk)
+            if total is not None and total > 0:
+                cand["preflight_total"] = total
+                ok.append(cand)
+            else:
+                pass  # silently skip zero-result patterns
+
+        surviving[cat] = ok
+        rec.emit("candidate_pool", category=cat,
+                 n_candidates=len(candidates),
+                 n_surviving=len(ok))
+        print(f"  {cat:14s}: {len(candidates):3d} candidates → {len(ok)} surviving")
+
+    total_queries = sum(len(v) for v in surviving.values())
+    if total_queries == 0:
+        print("  No surviving patterns — aborting.")
         return
 
-    rec.emit("dataset", log_name=log_name, path=str(dataset_path),
-             activities=schema.activities,
-             perspectives=perspectives,
-             perspective_coverage={
-                 "|".join(k): {"group_count": v["group_count"],
-                               "n_pairs": len(v["pairs"])}
-                 for k, v in persp_coverage.items()
-             })
+    # ── Warm-up all chains used by surviving patterns ─────────────────
+    print(f"\n  Warming up sub-pairs ...")
+    t0 = time.perf_counter()
+    warmed_chains: set[int] = set()
+    total_warmup_qs = 0
+    for cat, pats in surviving.items():
+        for p in pats:
+            chain_id = id(p["chain"])  # identity, not content
+            # Warm up based on chain content to avoid duplicates.
+            chain_key = tuple(p["chain"])
+            if chain_key not in warmed_chains:
+                warmed_chains.add(chain_key)
+                total_warmup_qs += _warmup_chain(log_name, p["chain"], gk)
 
-    # Build workloads
-    workloads = build_expressiveness_workloads(
-        persp_coverage, log_name, schema, max_length=max_length,
-    )
+    print(f"  Waiting {PROMOTION_SLEEP_S}s for async promotions ...")
+    time.sleep(PROMOTION_SLEEP_S)
+    warmup_wall = time.perf_counter() - t0
+    print(f"  Warm-up: {total_warmup_qs} queries, {len(warmed_chains)} chains, "
+          f"{warmup_wall:.0f}s")
+    rec.emit("warmup_done", n_chains=len(warmed_chains),
+             n_queries=total_warmup_qs, wall_s=warmup_wall)
 
-    total = sum(len(wl) for wl in workloads.values())
-    print(f"\n  Total: {total} queries (cold+warm = {total*2} executions)")
-    for cat, wl in workloads.items():
-        print(f"  {cat}: {len(wl)} queries")
-        for q in wl[:3]:
-            print(f"    {q['id']} k={q.get('pattern_length','?')}  "
-                  f"{q['pattern'][:55]}  gk={q['grouping_keys']}")
-        if len(wl) > 3:
-            print(f"    ... and {len(wl)-3} more")
-        rec.emit("workload_summary", category=cat, n_queries=len(wl))
-        for q in wl:
-            rec.emit("workload_query", log_name=log_name, category=cat,
-                     **{k: v for k, v in q.items() if k != "log_name"})
+    # ── Measure ───────────────────────────────────────────────────────
+    qid_counter = itertools.count(1)
+    print(f"\n  ── Measurements ──")
 
-    # Run cold→warm for each category
-    for category, workload in workloads.items():
-        run_cold_warm(rec, category, workload, log_name, dataset_path,
-                      perspectives=perspectives)
+    for cat in ["kleene", "negation", "disjunction", "cross_attr", "combined"]:
+        pats = surviving.get(cat, [])
+        if not pats:
+            print(f"    {cat:14s}: no surviving patterns")
+            continue
 
-    print(f"\n  Results: {rec.path}")
-    print("\n  Figures this data supports:")
-    print("    - Grouped bar: cold vs warm per category → adaptive payoff")
-    print("    - Per-operator bars: negation / alternation / kleene+ speedup")
-    print("    - Cross-perspective: same queries under different groupings")
-    print("    - Paper table: 'not supported by competitors' with warm latencies")
+        print(f"\n    ── {cat} ──")
+        for p in pats:
+            qid = f"E{next(qid_counter)}"
+            try:
+                lat, total = _measure(log_name, p["pattern"], gk)
+                rec.emit("query", system="siesta",
+                         category=cat, qid=qid,
+                         pattern=p["pattern"],
+                         latency_s=lat, total=total,
+                         log_name=log_name)
+                print(f"      {qid:6s}  {lat:7.3f}s  total={total:5d}  "
+                      f"{p['pattern'][:70]}")
+            except Exception as exc:
+                rec.emit("query_error", system="siesta",
+                         category=cat, qid=qid,
+                         pattern=p["pattern"],
+                         error=str(exc), log_name=log_name)
+                print(f"      {qid:6s}  ERROR: {exc}")
+
+    # ── Capability table ──────────────────────────────────────────────
+    print(f"\n  ── Capability summary ──")
+    for cat, cap in CAPABILITY.items():
+        for sys_name in ["elk", "match_recognize"]:
+            supported = cap[sys_name]
+            reason = cap.get(f"{sys_name}_reason", "")
+            rec.emit("capability", system=sys_name,
+                     category=cat, supported=supported, reason=reason)
+        status_elk = "✓" if cap["elk"] else "✗"
+        status_mr  = "✓" if cap["match_recognize"] else "✗"
+        print(f"    {cat:14s}  ELK={status_elk}  MR={status_mr}")
+
+    print(f"\n  Results → {rec.path}")
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
-def main():
+def main() -> None:
+    global PROMOTION_SLEEP_S
+
     ap = argparse.ArgumentParser(
-        description="Experiment 6.4.2 — Expressiveness beyond competitors.",
+        description="Experiment 6.4.2 — Expressiveness demonstration.",
     )
-    ds = ap.add_mutually_exclusive_group()
-    ds.add_argument("--dataset")
-    ds.add_argument("--datasets-dir", type=Path)
-    ap.add_argument("--log-name", default=None)
-    ap.add_argument("--max-length", type=int, default=6)
-    ap.add_argument("--max-perspectives", type=int, default=4)
+    ap.add_argument("--dataset", default=None,
+                    help="Path to dataset (CSV or XES).")
+    ap.add_argument("--log-name", default=None,
+                    help="Log name for API calls.")
+    ap.add_argument("--datasets-dir", default=None,
+                    help="Run on all CSV/XES files in this directory.")
+    ap.add_argument("--promotion-sleep", type=int, default=PROMOTION_SLEEP_S,
+                    help=f"Seconds to wait after warm-up (default {PROMOTION_SLEEP_S}).")
     args = ap.parse_args()
+
+    log_tag = f"expressiveness_{args.log_name or 'multi'}"
+    log_path = _setup_tee(log_tag)
+    print(f"Output log: {log_path}", flush=True)
+
+    PROMOTION_SLEEP_S = args.promotion_sleep
 
     health_check()
 
     if args.datasets_dir:
-        specs = [(p, p.stem) for p in sorted(args.datasets_dir.iterdir())
-                 if p.suffix.lower() in _LOG_EXTS]
+        ds_dir = Path(args.datasets_dir)
+        for p in sorted(ds_dir.iterdir()):
+            if p.suffix.lower() in {".csv", ".xes"} and p.is_file():
+                ln = p.stem.replace(" ", "_").lower()
+                try:
+                    run_dataset(p, ln)
+                except Exception as exc:
+                    print(f"  FAILED: {exc}")
     else:
         spec = resolve_dataset(args.dataset, args.log_name)
-        specs = [(spec.path, spec.log_name)]
-
-    for path, name in specs:
-        try:
-            run_dataset(path, name,
-                        max_length=args.max_length,
-                        max_perspectives=args.max_perspectives)
-        except Exception as exc:
-            import traceback
-            print(f"\n[ERROR] {name}: {exc}")
-            traceback.print_exc()
+        run_dataset(spec.path, spec.log_name)
 
 
 if __name__ == "__main__":

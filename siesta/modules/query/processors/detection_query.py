@@ -114,7 +114,7 @@ def detect(pattern: str, config: Dict[str, Any], metadata: MetaData):
                             seen_positions[pos][key] = value
 
 
-        events = sorted(seen_positions.values(), key=lambda e: int(e["position"]))
+        events = sorted(seen_positions.values(), key=lambda e: int(e["timestamp"]))
 
         positions = find_occurrences_dsl(
             [e["name"] for e in events], pattern, events=events
@@ -156,7 +156,6 @@ def build_exact_pair_predicate(pairs_2d: set[tuple[str, str]]):
         return F.lit(False)
     # OR all clauses together: a row matches if it satisfies any (source, targets) group
     return reduce(lambda a, b: a | b, clauses)
-
 
 def _literal_attr_predicate(side_map: str, name: str, op: str, value):
     """
@@ -204,7 +203,6 @@ def _literal_attr_predicate(side_map: str, name: str, op: str, value):
 
     # VarExpr (a $-binding) is handled by the caller as a cross-side equality.
     return None
-
 
 def build_pair_attr_predicate(rp: RespondedPair):
     """
@@ -278,7 +276,6 @@ def build_pair_attr_predicate(rp: RespondedPair):
     if not preds:
         return None, all_pushable
     return reduce(lambda a, b: a & b, preds), all_pushable
-
 
 def process_detection_query(config: Dict[str, Any], metadata: MetaData):
     new_pattern = config.get("query", {}).get("pattern", "")

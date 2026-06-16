@@ -565,7 +565,6 @@ def build_pair_persistent(
     (
         pairs_df.write
         .format("delta")
-        .partitionBy("source")
         .mode("overwrite")
         .save(pairs_path)
     )
@@ -780,7 +779,6 @@ def incremental_update_persistent_pairs(
         (
             new_pairs_df.write
             .format("delta")
-            .partitionBy("source")
             .mode("append")
             .option("mergeSchema", "true")
             .save(pairs_path)
@@ -808,6 +806,77 @@ def incremental_update_persistent_pairs(
 # Internal helpers
 # ===========================================================================
 
+# ===========================================================================
+# L3-: BATCHED transient pair build — one scan for many pairs
+# ===========================================================================
+ 
+def build_pairs_transient_batched(
+    pid: str,
+    pairs: List[Tuple[str, str]],
+    lookback: str,
+    lookback_mode: str,
+    candidate_group_ids: List[str],
+    grouping_keys: List[str],
+    metadata: MetaData,
+    storage: StorageManager,
+    has_pos: bool,
+) -> Dict[Tuple[str, str], list]:
+    """
+    Transient extraction for MANY pairs with ONE SequenceTable scan.
+ 
+    The per-pair path (build_pair_transient) re-reads the perspective
+    sequence DataFrame for every pair, so a cold length-n pattern pays
+    C(n,2) full scans.  Here the seq_df — slimmed to the activities the
+    requested pairs reference — is persisted once; the unchanged
+    _extract_single_pair_from_df then runs per pair against the cached
+    data, and the result rows are collected per pair for the caller's
+    LRU.  Extraction logic is reused verbatim, so results are
+    bit-identical to the per-pair path.
+ 
+    Returns
+    -------
+    dict
+        {(act_a, act_b): [Row, ...]} in EventPair schema, with
+        "trace_id" holding the group value v (same as the per-pair
+        path).  Pairs with no co-occurrences map to [].
+    """
+    from pyspark import StorageLevel
+    from pyspark.sql.functions import col as _col
+ 
+    if not pairs:
+        return {}
+ 
+    acts = sorted({a for a, _b in pairs} | {b for _a, b in pairs})
+ 
+    seq_df = _get_perspective_seq_df(
+        pid=pid,
+        grouping_keys=grouping_keys,
+        metadata=metadata,
+        storage=storage,
+        has_pos=has_pos,
+        group_ids_filter=candidate_group_ids if candidate_group_ids else None,
+    ).filter(_col("activity").isin(acts))
+ 
+    seq_df = seq_df.persist(StorageLevel.MEMORY_AND_DISK)
+    try:
+        seq_df.count()  # materialise the shared scan exactly once
+ 
+        out: Dict[Tuple[str, str], list] = {}
+        for (act_a, act_b) in pairs:
+            pairs_df, _lc = _extract_single_pair_from_df(
+                seq_df=seq_df,
+                act_a=act_a,
+                act_b=act_b,
+                lookback_str=lookback,
+                previous_lc_df=None,
+                batch_min_ts=None,
+                has_pos=has_pos,
+            )
+            out[(act_a, act_b)] = pairs_df.collect()
+        return out
+    finally:
+        seq_df.unpersist()
+        
 def _extract_single_pair_from_df(
     seq_df: DataFrame,
     act_a: str,

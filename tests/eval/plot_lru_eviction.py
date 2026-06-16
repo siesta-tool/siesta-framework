@@ -117,12 +117,21 @@ _DATASET_COLOURS = [
 ]
 _DATASET_MARKERS = ["o", "s", "D", "^", "v", "P"]
 
-# Series colours for this experiment (Okabe-Ito).
-COL_HOT      = "#0072B2"   # blue       — skewed hot pairs
-COL_COLD     = "#E69F00"   # orange     — skewed cold pairs
-COL_UNIFORM  = "#D55E00"   # vermillion — uniform stream
-COL_PERSIST  = "#009E73"   # green      — PERSISTENT tier highlight
+# ── Series colours (NONE of these appear in _DATASET_COLOURS) ─────────────
+COL_HOT     = "#C44E52"   # PAL red       — skewed hot pairs
+COL_COLD    = "#937860"   # PAL brown     — skewed cold pairs
+COL_UNIFORM = "#7F7F7F"   # PAL grey      — uniform stream
+COL_PERSIST = "#4DA54A"   # PAL green     — PERSISTENT tier highlight
+                           #   (distinct from Okabe #009E73 used for bpic2015)
 
+# ── Skewness-level progression (most → least concentrated) ────────────────
+_SKEWNESS_PAL: list[str] = [
+    "#C44E52",   # red        — most concentrated (matches COL_HOT)
+    "#4DA54A",   # green
+    "#8E6DB5",   # purple
+    "#937860",   # brown
+    "#D57EBF",   # pink
+]
 
 def dataset_style(log_name: str) -> dict:
     clean = log_name.lower().replace("-", "").replace("_", "")
@@ -421,7 +430,7 @@ def plot_skewness_lines(log_name: str, data: dict, output: Path) -> None:
         print(f"  SKIP {output.name}: no stream data.")
         return
 
-    fig, ax = plt.subplots(figsize=(4.5, 2.8))
+    fig, ax = plt.subplots(figsize=(5, 3.2))
 
     # x_right = actual maximum seq across all streams + small margin.
     all_seqs = []
@@ -535,7 +544,7 @@ def plot_streams_lines(all_data: OrderedDict[str, dict], output: Path) -> None:
 
     Mirrors the structure of plot_lines() in plot_maintenance_savings.py.
     """
-    fig, ax = plt.subplots(figsize=(4.5, 3.2))
+    fig, ax = plt.subplots(figsize=(5, 3.2))
 
     # Common x-right: max seq of the most concentrated level + small margin.
     # Matches plot_stream_single so both figures share the same x-axis range.

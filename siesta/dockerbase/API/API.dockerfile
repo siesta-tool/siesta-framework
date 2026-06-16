@@ -5,7 +5,9 @@ USER root
 RUN apt-get update && apt-get install -y bash && rm -rf /var/lib/apt/lists/*
 
 # Ensure UID 1001 has a username entry. Hadoop's UnixLoginModule requires this.
-RUN getent passwd 1001 >/dev/null || echo 'spark:x:1001:0:spark user:/home/spark:/bin/bash' >> /etc/passwd
+# Note: the apache/spark image already has a 'spark' user at uid 185, so we use
+# a different name here to avoid a duplicate /etc/passwd entry.
+RUN getent passwd 1001 >/dev/null || echo 'siesta:x:1001:0:siesta api:/home/siesta:/bin/bash' >> /etc/passwd
 
 WORKDIR /workspace
 
@@ -19,7 +21,7 @@ COPY siesta/modules/index/requirements.txt /tmp/req/siesta/modules/index/require
 COPY siesta/modules/model/requirements.txt /tmp/req/siesta/modules/model/requirements.txt
 COPY siesta/modules/mine/requirements.txt /tmp/req/siesta/modules/mine/requirements.txt
 
-RUN /opt/bitnami/python/bin/python3 -m pip install --prefer-binary \
+RUN python3.12 -m pip install --prefer-binary \
       -r /tmp/req/siesta/requirements.txt \
       -r /tmp/req/siesta/api/requirements.txt \
       -r /tmp/req/siesta/core/requirements.txt \

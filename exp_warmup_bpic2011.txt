@@ -1,0 +1,13 @@
+Dataset : /mnt/datasets/bpic2011.xes (log_name=bpic2011)
+  activities   = ['1e consult poliklinisch', 'administratief tarief       - eerste pol', 'verlosk.-gynaec. korte kaart kosten-out', 'echografie  - genitalia interna', 'simulator - gebruik voor aanvang megavol', 'behandeltijd - eenheid t3 - megavolt']
+  perspectives = [['Section'], ['org:group'], ['Producer code']]
+  retention    = {'min_query_count': 3, 'half_life_seconds': 3600.0, 'hysteresis': 0.0}
+
+Ingesting (eager, clear_existing=True) ...
+Ingest complete.
+
+Fetching pair coverage and building query stream ...
+  [workload] skipping perspective ['Section']: only 0 groups (< 5)
+  [workload] skipping perspective ['org:group']: only 0 groups (< 5)
+  [workload] skipping perspective ['Producer code']: only 0 groups (< 5)
+ERROR: no queries generated.  Check perspective cardinality and pair coverage.

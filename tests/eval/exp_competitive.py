@@ -1,96 +1,81 @@
 """
 tests/eval/exp_competitive.py
 
-Experiment 6.4.1 — Competitive performance comparison.
+Experiment 6.4.1 — Competitive latency benchmark.
 
-Thesis
+Compares warm adaptive SIESTA against ELK (Elasticsearch) on long
+structural and attribute-aware pattern queries.
+
+Design
 ------
-ELK and Flink MATCH_RECOGNIZE cannot natively group by arbitrary event
-attributes.  They must fetch all matching events and perform a post-hoc
-GROUP BY to answer multiperspective queries.  Our adaptive system
-pre-builds per-perspective pair indices (PERSISTENT), answering queries
-directly from the index without a full scan.
+Two perspectives per dataset:
+  - case_id   (trace-centric):  grouping_keys depends on format:
+                                ["trace_id"] for CSV, ["case:concept:name"] for XES.
+                                This is the *case* perspective — the adaptive endpoint
+                                builds its own per-perspective PairsIndex over case groups
+                                rather than delegating to the eager index.
+  - best_alt  (multiperspective): the perspective with the most balanced group-size
+                                  distribution (lowest coefficient of variation) among
+                                  those discovered by discover_schema.
 
-Systems
--------
-siesta_warm
-    Adaptive system after warm-up (PERSISTENT pairs).
-    Protocol identical to exp_warmup.py: ingest_adaptive declares all
-    perspectives → N_WARMUP_QUERIES repetitions per query pair with
-    min_query_count=3 → sleep → timed benchmark from PERSISTENT.
+Query construction:
+  Patterns of length 8–10 are built from real activity chains found in
+  the data via pair_coverage.  We build chains greedily: start from a
+  high-coverage pair, then extend by appending the best successor whose
+  (last, next) pair also has high coverage.  This guarantees non-zero
+  results — every consecutive sub-pair exists in the data.
 
-elk
-    Elasticsearch 8.x.  Multiperspective aggregation:
-      terms(perspective_key) → terms(trace_id) → cardinality(activity)
-                                → bucket_selector(n >= k)
-    No ordering enforced.  Result is a superset (annotated).
-    Regex: not supported (skipped).
+  Structural queries use the chain as-is.
+  Attribute-aware queries annotate one or two activities with inline
+  bracket constraints derived from real attribute values.
 
-match_recognize
-    Flink SQL MATCH_RECOGNIZE partitioned by trace_id (the only option).
-    Wrapped in GROUP BY perspective_key to simulate multiperspective
-    grouping.  Queries use eventually-follows semantics matching SIESTA:
+Warm-up:
+  All C(n,2) sub-pairs of each long pattern are warmed up by issuing
+  short 2-activity queries (each sub-pair repeated 4× with
+  min_query_count=1).  A sleep follows for async promotions.
+  Then the long pattern is measured.
 
-        PATTERN (V0 GAP0* V1 GAP1* V2 …)
+ELK baseline:
+  For each query, ELK receives a bool/filter on the constituent activities
+  plus a terms aggregation on the perspective key.  This is a *lower bound*
+  on ELK's true latency — it does no ordering verification, just retrieval
+  and grouping.  The paper frames this as: "even ELK's best-case retrieval
+  step alone is slower than SIESTA's end-to-end pattern detection."
 
-    where GAP variables are NOT in DEFINE → Flink treats them as matching
-    any event (STNM / skip-till-next-match).  Without this, Flink would
-    compute direct-follows which is semantically wrong vs SIESTA.
-
-Perspective selection
----------------------
-Same logic as exp_skew_vs_uniform_latency.py:
-  • discover_schema → perspective_keys (non-numeric, cardinality in
-    [3,500], event-level avg_dpt > 1.2, sorted by cardinality asc)
-  • ingest_adaptive declares ALL perspectives in one call
-  • pair_coverage per perspective; skip if group_count < MIN_PERSP_CARD
-  • workloads built per perspective; warm-up across all; then benchmark
-
-Query categories (per perspective) — all timed against SIESTA
--------------------------------------------------------------
-  structural   A B, A B C, long chains up to max_length.
-               2-activity patterns use the single-pair skip-CEP path; 3+
-               activity chains are answered by a NATIVE chain join over the
-               consecutive PERSISTENT pair tables (stitched on shared
-               positions) — no Python CEP.
-
-  attribute    A[attr="val"] B   (value verified to exist on act A)
-               A[attr=$1] B[attr=$1]  (only if A,B share a common value)
-               Attribute constraints are pushed down as Spark column
-               predicates over the pair index's source_attributes /
-               target_attributes maps (see build_pair_attr_predicate in
-               detection_query.py).  Equality / inequality literals and
-               cross-side bindings become column filters, which keeps the
-               query on the fast path (single-pair skip or chain join).
-
-  regex        A B+ C, A B* C.
-               Kleene closure genuinely requires the CEP engine, but warm
-               constituent pairs let CEP read from the index rather than
-               cold-scanning the SequenceTable.  Run against Flink too;
-               ELK is skipped (cannot express Kleene operators).
-
-Note on group density
----------------------
-The chain-join and CEP costs scale with per-group pair density.  On dense
-real logs (e.g. very high-frequency activities) longer chains / regex can
-still be heavy; an artificial dataset with controlled group density is the
-clean way to isolate the comparison.
+  For attribute-aware queries, ELK additionally receives term/range filters
+  on the constrained attributes.
 
 Output
 ------
-results/6_4_1_competitive_{log_name}.jsonl
+results/competitive_<log_name>.jsonl
+
+Records:
+  dataset        path, log_name, activities, perspectives, case_gk, alt_gk
+  query_def      qid, pattern, perspective, category, chain_pairs, n_activities
+  warmup_done    perspective, n_pairs_warmed, wall_s
+  query          system, perspective, category, qid, pattern, latency_s, total
+  query_error    system, qid, error
+
+Running
+-------
+    python -m tests.eval.exp_competitive \\
+        --dataset /mnt/datasets/bpic_2017.xes --log-name bpic_2017
+
+    python -m tests.eval.exp_competitive \\
+        --datasets-dir /mnt/datasets
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
 import itertools
 import json
 import os
 import re
+import statistics
 import sys
 import time
+from collections import defaultdict
 from pathlib import Path
 
 import requests
@@ -99,1373 +84,1132 @@ from urllib.parse import urljoin
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tests.eval.eval_common import (
-    API_BASE, API_TIMEOUT_S, CONFIG_DIR,
+    API_BASE, API_TIMEOUT_S, CONFIG_DIR, RESULTS_DIR,
+    QUERY_PREFIX,
     Recorder, health_check,
     ingest_adaptive,
-    timed_query, detect_adaptive,
+    detect_adaptive, timed_query,
     discover_schema, resolve_dataset,
-    quote_label,
+    quote_label, _guess_mime,
 )
 from tests.eval.workload import fetch_pair_coverage
 
-CONFIG = CONFIG_DIR / "adaptive_index.config.json"
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+ADAPTIVE_CONFIG   = CONFIG_DIR / "adaptive_index.config.json"
+# half_life_seconds must be >> warmup duration so query counts do not decay
+# to zero before the promotion worker runs.  300 s caused pairs warmed early
+# to have round(count * exp(-2700 * ln2 / 300)) == 0 by the end of warmup.
+RETENTION_FAST    = {"min_query_count": 1, "half_life_seconds": 86400}
 
 ELK_ENDPOINT = os.environ.get("ELK_ENDPOINT", "http://localhost:9200")
-MR_ENDPOINT  = os.environ.get("MR_ENDPOINT",  "http://localhost:8083")
+ELK_INDEX    = os.environ.get("ELK_INDEX",    "siesta_events")
 
-SWEEP_TIMEOUT_S = int(os.environ.get("SWEEP_TIMEOUT_S", "600"))
-ELK_BULK_BATCH  = int(os.environ.get("ELK_BULK_BATCH",  "5000"))
-
-# Warm-up retention overrides — identical to exp_warmup.py / exp_skew.py
-RETENTION_OVERRIDES = {
-    "min_query_count":   3,
-    "half_life_seconds": 3600.0,
-    "hysteresis":        0.0,
-}
-N_WARMUP_QUERIES = 4       # > min_query_count guarantees promotion
-WARMUP_SLEEP_S   = int(os.environ.get("WARMUP_SLEEP_S", "120"))
-
-# Minimum perspective group count to be eligible (same as exp_skew)
-MIN_PERSP_CARD = 5
+MIN_CHAIN_LEN     = 8     # minimum pattern length
+TARGET_CHAIN_LEN  = 10    # target pattern length
+N_QUERIES_PER_CAT = 5     # queries per (perspective, category) combo
+WARMUP_REPS       = 4     # repetitions per sub-pair during warm-up
+PROMOTION_SLEEP_S = int(os.environ.get("PROMOTION_SLEEP_S", "90"))
+MEASURE_REPS      = 3     # repeat each measurement, take median
 
 _LOG_EXTS = {".csv", ".xes"}
 
+# ---------------------------------------------------------------------------
+# Tee — duplicate stdout/stderr to a log file
+# ---------------------------------------------------------------------------
 
-# ═══════════════════════════════════════════════════════════════════════════
-# ELK — ingestion
-# ═══════════════════════════════════════════════════════════════════════════
+class _Tee:
+    """
+    Wraps a stream so every write goes to both the original stream and
+    a file.  Assign to sys.stdout / sys.stderr so all print() calls and
+    tracebacks are captured without changing any other code.
+    """
+    def __init__(self, stream, filepath: Path) -> None:
+        self._stream = stream
+        self._file   = filepath.open("a", buffering=1, encoding="utf-8")
+
+    def write(self, data: str) -> int:
+        self._stream.write(data)
+        self._file.write(data)
+        return len(data)
+
+    def flush(self) -> None:
+        self._stream.flush()
+        self._file.flush()
+
+    def fileno(self):
+        return self._stream.fileno()
+
+    def close(self) -> None:
+        self._file.close()
+
+    # Forward all other attribute lookups to the underlying stream so
+    # libraries that inspect sys.stdout (e.g. tqdm) don't break.
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+def _setup_tee(label: str) -> Path:
+    """
+    Redirect stdout and stderr through _Tee to a timestamped log file.
+    Returns the log file path.
+    """
+    import datetime
+    ts  = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = RESULTS_DIR / f"{label}_{ts}.txt"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    sys.stdout = _Tee(sys.stdout, log_path)
+    sys.stderr = _Tee(sys.stderr, log_path)
+    return log_path
+
+
+
+# ---------------------------------------------------------------------------
+# ELK helpers
+# ---------------------------------------------------------------------------
 
 def _elk_reachable() -> bool:
     try:
-        return requests.get(ELK_ENDPOINT, timeout=5).status_code == 200
+        return requests.get(ELK_ENDPOINT, timeout=3).status_code == 200
     except Exception:
         return False
 
 
-def elk_create_index(index_name: str, attribute_keys: list[str]) -> None:
-    r = requests.delete(f"{ELK_ENDPOINT}/{index_name}", timeout=10)
-    if r.status_code == 200:
-        print(f"    ES index '{index_name}' deleted (previous run cleared)")
-    elif r.status_code != 404:
-        r.raise_for_status()
-    time.sleep(0.5)
-    props: dict = {
-        "trace_id":        {"type": "keyword"},
-        "activity":        {"type": "keyword"},
-        "start_timestamp": {"type": "date",
-                            "format": "strict_date_optional_time||epoch_millis"},
-        "position":        {"type": "integer"},
-    }
-    for attr in attribute_keys:
-        props[attr] = {"type": "keyword"}
+def _elk_index_events(dataset_path: Path, index_name: str) -> int:
+    """
+    Bulk-index events from a CSV/XES file into Elasticsearch.
+    Returns the number of indexed documents.
+
+    Uses the _bulk API for efficiency.  Each event becomes one document
+    with fields: activity, timestamp, trace_id, plus all other attributes.
+    """
+    from tests.eval.batch_splitter import _iter_log
+
+    bulk_lines: list[str] = []
+    count = 0
+    for ev in _iter_log(dataset_path):
+        action = json.dumps({"index": {"_index": index_name}})
+        doc = {
+            "activity":  ev.get("activity", ""),
+            "timestamp": ev.get("timestamp", ""),
+            "trace_id":  ev.get("trace_id", ""),
+        }
+        # Add all other attributes.
+        for k, v in ev.items():
+            if k not in ("activity", "timestamp", "trace_id") and v:
+                doc[k] = v
+        bulk_lines.append(action)
+        bulk_lines.append(json.dumps(doc))
+        count += 1
+
+        # Flush every 5000 docs.
+        if count % 5000 == 0:
+            _elk_bulk_send(bulk_lines, index_name)
+            bulk_lines.clear()
+
+    if bulk_lines:
+        _elk_bulk_send(bulk_lines, index_name)
+
+    # Refresh to make documents searchable.
+    requests.post(f"{ELK_ENDPOINT}/{index_name}/_refresh", timeout=30)
+    return count
+
+
+def _elk_bulk_send(lines: list[str], index_name: str) -> None:
+    body = "\n".join(lines) + "\n"
+    r = requests.post(
+        f"{ELK_ENDPOINT}/_bulk",
+        data=body,
+        headers={"Content-Type": "application/x-ndjson"},
+        timeout=120,
+    )
+    r.raise_for_status()
+    resp = r.json()
+    if resp.get("errors"):
+        n_err = sum(1 for item in resp["items"] if "error" in item.get("index", {}))
+        print(f"  [ELK bulk] {n_err} errors in batch")
+
+
+def _elk_create_index(index_name: str) -> None:
+    """Delete and recreate the ELK index with keyword mappings."""
+    requests.delete(f"{ELK_ENDPOINT}/{index_name}", timeout=10)
+    time.sleep(1)
     mapping = {
         "settings": {
-            "number_of_shards": 1, "number_of_replicas": 0,
-            "refresh_interval": "-1",
+            "number_of_shards": 1,
+            "number_of_replicas": 0,
+            "refresh_interval": "-1",  # disable auto-refresh during bulk
         },
-        "mappings": {"properties": props},
-    }
-    requests.put(f"{ELK_ENDPOINT}/{index_name}", json=mapping, timeout=30).raise_for_status()
-    print(f"    ES index '{index_name}' created ({len(props)} fields)")
-
-
-def elk_ingest_from_log(dataset_path: Path, index_name: str,
-                        attribute_keys: list[str]) -> int:
-    from tests.eval.batch_splitter import _iter_log
-    buf: list[str] = []
-    n = 0
-    for ev in _iter_log(dataset_path):
-        doc: dict = {
-            "trace_id": ev.get("trace_id"),
-            "activity": ev.get("activity"),
-            "start_timestamp": ev.get("timestamp") or ev.get("start_timestamp"),
-        }
-        if "position" in ev:
-            doc["position"] = ev["position"]
-        for attr in attribute_keys:
-            v = ev.get(attr)
-            if v is not None:
-                doc[attr] = v
-        buf.append(json.dumps({"index": {"_index": index_name}}))
-        buf.append(json.dumps(doc))
-        n += 1
-        if len(buf) >= ELK_BULK_BATCH * 2:
-            _elk_bulk_send(buf); buf.clear()
-    if buf:
-        _elk_bulk_send(buf)
-    requests.post(f"{ELK_ENDPOINT}/{index_name}/_refresh", timeout=30)
-    requests.put(f"{ELK_ENDPOINT}/{index_name}/_settings",
-                 json={"index": {"refresh_interval": "1s"}}, timeout=10)
-    return n
-
-
-def _elk_bulk_send(lines: list[str]) -> None:
-    body = "\n".join(lines) + "\n"
-    r = requests.post(f"{ELK_ENDPOINT}/_bulk", data=body.encode(),
-                      headers={"Content-Type": "application/x-ndjson"}, timeout=120)
-    r.raise_for_status()
-    if r.json().get("errors"):
-        errs = sum(1 for it in r.json()["items"] if "error" in it.get("index", {}))
-        if errs:
-            print(f"    WARNING: {errs} ELK bulk errors")
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# ELK — multiperspective query
-# ═══════════════════════════════════════════════════════════════════════════
-
-def build_elk_multiperspective_query(
-    activities: list[str],
-    perspective_key: str,
-    attr_eq: list[tuple[str, str, str]] | None = None,
-) -> dict:
-    """
-    Count (perspective_group, trace_id) pairs where the trace contains
-    all required activities.  No ordering enforcement — result is a
-    superset of SIESTA's ordered result.
-
-    The ELK GROUP BY is done via nested terms aggregations:
-      terms(perspective_key) → terms(trace_id) → cardinality(activity)
-                              → bucket_selector(n >= len(activities))
-    """
-    must: list[dict] = [{"terms": {"activity": activities}}]
-    if attr_eq:
-        for _, attr_key, attr_val in attr_eq:
-            must.append({"term": {attr_key: attr_val}})
-    return {
-        "size": 0,
-        "query": {"bool": {"filter": must}},
-        "aggs": {
-            "by_perspective": {
-                "terms": {"field": perspective_key, "size": 100_000},
-                "aggs": {
-                    "by_trace": {
-                        "terms": {"field": "trace_id", "size": 1_000_000},
-                        "aggs": {
-                            "act_count": {"cardinality": {"field": "activity"}},
-                            "has_all": {
-                                "bucket_selector": {
-                                    "buckets_path": {"n": "act_count"},
-                                    "script": f"params.n >= {len(activities)}",
-                                },
-                            },
-                        },
-                    },
-                },
+        "mappings": {
+            "properties": {
+                "activity":  {"type": "keyword"},
+                "timestamp": {"type": "date", "format": "strict_date_optional_time||epoch_millis"},
+                "trace_id":  {"type": "keyword"},
             },
+            "dynamic": "true",
+            "dynamic_templates": [
+                {"strings_as_keyword": {
+                    "match_mapping_type": "string",
+                    "mapping": {"type": "keyword"},
+                }},
+            ],
         },
     }
-
-
-def elk_count_from_response(resp: dict) -> int:
-    """Total qualifying (group, trace) pairs from aggregation response."""
-    total = 0
-    for pb in resp.get("aggregations", {}).get("by_perspective", {}).get("buckets", []):
-        total += len(pb.get("by_trace", {}).get("buckets", []))
-    return total
-
-
-def run_elk_query(body: dict, index_name: str) -> tuple[float, int, bool]:
-    t0 = time.perf_counter()
-    try:
-        r = requests.post(f"{ELK_ENDPOINT}/{index_name}/_search",
-                          json=body, timeout=SWEEP_TIMEOUT_S)
-        r.raise_for_status()
-        return time.perf_counter() - t0, elk_count_from_response(r.json()), False
-    except requests.exceptions.Timeout:
-        return time.perf_counter() - t0, 0, True
-    except Exception as exc:
-        print(f"    ELK error: {exc}")
-        return time.perf_counter() - t0, 0, True
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Flink MATCH_RECOGNIZE — data prep + query
-# ═══════════════════════════════════════════════════════════════════════════
-
-def _mr_reachable() -> bool:
-    try:
-        return requests.get(f"{MR_ENDPOINT}/v1/info", timeout=5).status_code == 200
-    except Exception:
-        return False
-
-
-def _sanitize_col(name: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_]", "_", name)
-
-
-def flink_prepare_csv(dataset_path: Path, output_csv: Path,
-                      attribute_keys: list[str]) -> int:
-    """
-    Write events to a header-free CSV for Flink's filesystem connector.
-
-    Flink maps columns by POSITION (DDL order), not by name.  Writing a
-    header row would make Flink treat "trace_id,activity,..." as the first
-    data row — position would be "position" (a string), causing a parse
-    error that is silently ignored by csv.ignore-parse-errors, corrupting
-    the row count and yielding null values in some columns.
-    """
-    from tests.eval.batch_splitter import _iter_log
-    output_csv.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = ["trace_id", "activity", "start_timestamp", "position"] + attribute_keys
-    n = 0
-    trace_pos: dict[str, int] = {}
-    with output_csv.open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-        # NO writeheader() — Flink reads all rows as data
-        for ev in _iter_log(dataset_path):
-            tid = ev.get("trace_id", "")
-            pos = trace_pos.get(tid, 0)
-            trace_pos[tid] = pos + 1
-            row = {"trace_id": tid, "activity": ev.get("activity", ""),
-                   "start_timestamp": ev.get("timestamp") or ev.get("start_timestamp") or "",
-                   "position": pos}
-            for attr in attribute_keys:
-                row[attr] = ev.get(attr, "")
-            writer.writerow(row)
-            n += 1
-    print(f"    Flink CSV: {n} events → {output_csv}")
-    return n
-
-
-def flink_get_session() -> str:
-    r = requests.post(f"{MR_ENDPOINT}/v1/sessions",
-                      json={"properties": {"execution.runtime-mode": "BATCH"}},
-                      timeout=30)
+    r = requests.put(
+        f"{ELK_ENDPOINT}/{index_name}",
+        json=mapping,
+        timeout=30,
+    )
     r.raise_for_status()
-    handle = r.json()["sessionHandle"]
-    print(f"    Flink session: {handle}")
-    return handle
 
 
-def flink_exec(session: str, sql: str, *, timeout_s: int = 60) -> dict:
-    r = requests.post(f"{MR_ENDPOINT}/v1/sessions/{session}/statements",
-                      json={"statement": sql}, timeout=timeout_s)
-    r.raise_for_status()
-    op = r.json()["operationHandle"]
-    t0 = time.perf_counter()
-    while True:
-        if time.perf_counter() - t0 > timeout_s:
-            return {"operationHandle": op, "status": "TIMEOUT"}
-        sr = requests.get(
-            f"{MR_ENDPOINT}/v1/sessions/{session}/operations/{op}/status",
-            timeout=30)
-        st = sr.json().get("status", "UNKNOWN")
-        if st in ("FINISHED", "ERROR", "CANCELED"):
-            return {"operationHandle": op, "status": st}
-        time.sleep(0.3)
-
-
-def flink_create_table(session: str, table_name: str, csv_path: str,
-                       attribute_keys: list[str]) -> None:
-    cols = ["`trace_id` STRING", "`activity` STRING",
-            "`start_timestamp` STRING", "`position` INT"]
-    for attr in attribute_keys:
-        cols.append(f"`{_sanitize_col(attr)}` STRING")
-    ddl = (f"CREATE TABLE IF NOT EXISTS `{table_name}` "
-           f"({', '.join(cols)}) WITH ("
-           f"'connector'='filesystem', 'path'='{csv_path}', "
-           f"'format'='csv', 'csv.ignore-parse-errors'='true')")
-    r = flink_exec(session, ddl, timeout_s=30)
-    if r["status"] != "FINISHED":
-        raise RuntimeError(f"Flink CREATE TABLE failed: {r}")
-    print(f"    Flink table '{table_name}' created")
-
-
-def build_mr_multiperspective_sql(
-    table_name: str,
-    activities: list[str],
+def _elk_detect_verify(
+    chain: list[str],
+    constraints: dict[int, tuple[str, str]],
     perspective_key: str,
-    attr_eq: list[tuple[str, str, str]] | None = None,
-    binding_vars: dict | None = None,
-    regex_ops: dict[int, str] | None = None,
-) -> str:
+) -> tuple[float, int, int]:
     """
-    Build a Flink SQL query that mirrors SIESTA's STNM (eventually-follows)
-    semantics and answers a multiperspective query.
+    Honest end-to-end ELK pattern detection, comparable to SIESTA:
 
-    Eventually-follows translation
-    --------------------------------
-    SIESTA's SeQL `A B` uses STNM: B can appear anywhere after A in the
-    sequence, with any intervening events.  Flink MATCH_RECOGNIZE's
-    `PATTERN (V0 V1)` means V1 *directly* follows V0 — this is the wrong
-    semantics (strict contiguity / directly-follows).
+      1. Retrieve all events whose activity appears in the pattern,
+         with (perspective key, activity, timestamp, constrained attrs),
+         sorted by timestamp, via search_after paging.
+      2. Group client-side by perspective key.
+      3. Greedy subsequence match per group under eventually-follows
+         semantics, applying per-position attribute constraints.
 
-    The correct translation inserts gap wildcard variables between every
-    pair of consecutive required pattern variables:
+    `constraints` maps pattern position -> (attr_key, attr_value).
 
-        PATTERN (V0 GAP0* V1 GAP1* V2 …)
+    Greedy earliest-match is correct for plain sequential patterns with
+    per-position predicates: taking the earliest event that satisfies
+    position i never precludes a match that a later choice would allow.
 
-    GAP variables are intentionally NOT added to DEFINE.  In Flink MATCH_
-    RECOGNIZE, any pattern variable absent from DEFINE is treated as
-    matching any event — giving "zero or more of any event" between
-    required matches, i.e. STNM / eventually-follows semantics.
-
-    Multiperspective wrapper
-    ------------------------
-    MATCH_RECOGNIZE can only PARTITION BY trace_id (fixed at DDL time).
-    To simulate GROUP BY perspective_key we:
-      1. MEASURES the perspective attribute from the first match variable
-      2. Wrap the inner MR in GROUP BY perspective_key + COUNT(DISTINCT)
-    This forces Flink to pay both the full NFA scan and the GROUP BY cost.
+    Returns (wall_seconds, n_matching_groups, n_events_retrieved).
+    This is the equivalent work SIESTA performs end-to-end, so latency
+    and totals are directly comparable.
     """
-    n = len(activities)
-    var_names = [f"V{i}" for i in range(n)]
-    safe_persp = _sanitize_col(perspective_key)
+    acts = sorted(set(chain))
+    constraint_attrs = sorted({attr for attr, _v in constraints.values()})
+    source_fields = [perspective_key, "activity", "timestamp"] + constraint_attrs
 
-    # ── DEFINE clauses ────────────────────────────────────────────────
-    defines = []
-    for i, (var, act) in enumerate(zip(var_names, activities)):
-        conds = [f"{var}.`activity` = '{act}'"]
-        if attr_eq:
-            for eq_act, eq_key, eq_val in attr_eq:
-                if eq_act == act:
-                    conds.append(f"{var}.`{_sanitize_col(eq_key)}` = '{eq_val}'")
-        if binding_vars:
-            for _, bindings in binding_vars.items():
-                for b_act, b_key in bindings:
-                    if b_act == act and i > 0:
-                        ref_var = var_names[next(
-                            j for j, a in enumerate(activities) if a == bindings[0][0]
-                        )]
-                        conds.append(
-                            f"{var}.`{_sanitize_col(b_key)}` "
-                            f"= {ref_var}.`{_sanitize_col(b_key)}`"
-                        )
-        defines.append(f"{var} AS ({' AND '.join(conds)})")
-    # NOTE: GAP variables are deliberately NOT added to DEFINE here.
-    # Flink matches any event for undefined variables → STNM semantics.
+    body: dict = {
+        "query": {"bool": {"filter": [{"terms": {"activity": acts}}]}},
+        "size": 10000,
+        "_source": source_fields,
+        # NB: sorting on _id is disallowed (fielddata on _id is
+        # disabled by default) and returns HTTP 400.  _doc is the
+        # supported tiebreaker; with a single shard it gives a stable
+        # total order for search_after paging.
+        "sort": [{"timestamp": "asc"}, {"_doc": "asc"}],
+        "track_total_hits": False,
+    }
 
-    # ── PATTERN clause with GAP wildcards (eventually-follows) ────────
-    # For V0 V1 V2: generates "V0 GAP0* V1 GAP1* V2"
-    # For V0 V1+ V2: generates "V0 GAP0* V1+ GAP1* V2"
-    pattern_parts: list[str] = []
-    for i, var in enumerate(var_names):
-        if i > 0:
-            # GAP between previous variable and this one.
-            pattern_parts.append(f"GAP{i - 1}*")
-        op = (regex_ops or {}).get(i, "")
-        pattern_parts.append(f"{var}{op}")
+    t0 = time.perf_counter()
 
-    # ── Inner MATCH_RECOGNIZE query ───────────────────────────────────
-    inner = (
-        f"SELECT T.`trace_id`, T.`{safe_persp}` "
-        f"FROM `{table_name}` MATCH_RECOGNIZE ("
-        f" PARTITION BY `trace_id`"
-        f" ORDER BY `position`"
-        f" MEASURES `{var_names[0]}`.`{safe_persp}` AS `{safe_persp}`"
-        f" ONE ROW PER MATCH"
-        f" AFTER MATCH SKIP TO NEXT ROW"
-        f" PATTERN ({' '.join(pattern_parts)})"
-        f" DEFINE {', '.join(defines)}"
-        f") AS T"
+    groups: dict[str, list[dict]] = defaultdict(list)
+    n_events = 0
+    search_after = None
+    while True:
+        if search_after is not None:
+            body["search_after"] = search_after
+        r = requests.post(
+            f"{ELK_ENDPOINT}/{ELK_INDEX}/_search",
+            json=body,
+            timeout=API_TIMEOUT_S,
+        )
+        if r.status_code >= 400:
+            raise RuntimeError(
+                f"ELK search failed ({r.status_code}): {r.text[:400]}"
+            )
+        hits = r.json().get("hits", {}).get("hits", [])
+        if not hits:
+            break
+        for h in hits:
+            srcdoc = h.get("_source", {})
+            gv = srcdoc.get(perspective_key)
+            if gv is None:
+                continue
+            groups[str(gv)].append(srcdoc)
+            n_events += 1
+        search_after = hits[-1]["sort"]
+        if len(hits) < body["size"]:
+            break
+
+    # ── Client-side verification ───────────────────────────────────────
+    # Events arrive in global timestamp order (server-side sort), so the
+    # per-group lists are already temporally ordered.
+    n_match = 0
+    for gv, events in groups.items():
+        pos = 0
+        for ev in events:
+            if ev.get("activity") != chain[pos]:
+                continue
+            if pos in constraints:
+                attr, val = constraints[pos]
+                if str(ev.get(attr, "")) != val:
+                    continue
+            pos += 1
+            if pos == len(chain):
+                n_match += 1
+                break
+
+    return time.perf_counter() - t0, n_match, n_events
+
+
+def _elk_query_lowerbound(
+    activities: list[str],
+    perspective_key: str | None,
+    attr_filters: list[dict] | None = None,
+) -> tuple[float, int]:
+    """
+    LOWER-BOUND ELK query: filter by activities + terms aggregation on
+    the perspective key.  No ordering verification — measures only the
+    retrieval/grouping step.  Kept for reference; totals are document
+    counts, NOT comparable to SIESTA's group counts.
+    """
+    must_clauses = [
+        {"bool": {"should": [{"term": {"activity": a}} for a in activities],
+                  "minimum_should_match": 1}},
+    ]
+    if attr_filters:
+        must_clauses.extend(attr_filters)
+
+    body: dict = {
+        "query": {"bool": {"must": must_clauses}},
+        "size": 0,
+        "track_total_hits": True,
+    }
+    if perspective_key:
+        body["aggs"] = {
+            "by_group": {"terms": {"field": perspective_key, "size": 100000}},
+        }
+
+    t0 = time.perf_counter()
+    r = requests.post(
+        f"{ELK_ENDPOINT}/{ELK_INDEX}/_search",
+        json=body,
+        timeout=API_TIMEOUT_S,
     )
-
-    # ── Outer GROUP BY perspective key ────────────────────────────────
-    return (
-        f"SELECT `{safe_persp}`, COUNT(DISTINCT `trace_id`) AS grp_count "
-        f"FROM ({inner}) "
-        f"GROUP BY `{safe_persp}`"
-    )
+    r.raise_for_status()
+    latency = time.perf_counter() - t0
+    total = r.json().get("hits", {}).get("total", {}).get("value", 0)
+    return latency, total
 
 
-def _flink_fetch_page(uri: str, *, timeout_s: int = 30, retries: int = 40) -> dict | None:
+
+# ---------------------------------------------------------------------------
+# Chain builder — direct trace subsequence sampling
+#
+# IMPORTANT: chains built from pair_coverage adjacency do NOT guarantee
+# non-zero results — each consecutive pair exists in *some* group, but a
+# long pattern requires all pairs to coexist (in order) within *one*
+# group.  The correct approach is to sample contiguous activity windows
+# directly from real groups: a window taken from a real group is
+# guaranteed to match that group under STNM eventually-follows semantics.
+# ---------------------------------------------------------------------------
+
+MAX_PARSE_EVENTS = int(os.environ.get("MAX_PARSE_EVENTS", "2000000"))
+
+
+def _index_lookback_seconds() -> float:
     """
-    GET one result page from the Flink SQL Gateway, retrying while
-    resultType == NOT_READY.  Returns the parsed body or None on failure.
+    Parse the indexing-time lookback λ from the adaptive config.
 
-    NOT_READY means the operation is FINISHED but the gateway hasn't yet
-    buffered this page — polling with a short sleep resolves it.
+    CRITICAL: pairs whose time gap exceeds λ are NEVER extracted into
+    the persisted PairsIndex — a query lookback larger than λ cannot
+    recover them.  Sampled windows must span <= λ or some ordered pair
+    (i, j) of the pattern will be absent and the group falsely
+    eliminated (observed as sporadic 0-result preflights and
+    undercounted totals).
+
+    Override with env WINDOW_MAX_SPAN_S.
     """
-    for _ in range(retries):
-        try:
-            rr = requests.get(f"{MR_ENDPOINT}{uri}", timeout=timeout_s)
-            rr.raise_for_status()
-            body = rr.json()
-            if body.get("resultType") != "NOT_READY":
-                return body
-            time.sleep(0.5)
-        except Exception as exc:
-            print(f"    _flink_fetch_page error: {exc}")
-            return None
-    return None   # still NOT_READY after all retries
-
-
-def flink_fetch_rows(
-    session: str,
-    sql: str,
-    *,
-    timeout_s: int = 120,
-    max_pages: int = 5,
-) -> list[dict] | None:
-    """
-    Submit a SQL statement to Flink, wait for completion, and return
-    the raw result rows.  Returns None on timeout or error.
-
-    Result fetching polls each page until resultType != NOT_READY.
-    The Flink SQL Gateway may return NOT_READY even after the operation
-    status is FINISHED — the result buffer is materialised asynchronously.
-    """
+    env = os.environ.get("WINDOW_MAX_SPAN_S")
+    if env:
+        return float(env)
     try:
-        r = requests.post(f"{MR_ENDPOINT}/v1/sessions/{session}/statements",
-                          json={"statement": sql}, timeout=timeout_s)
-        r.raise_for_status()
-        op = r.json()["operationHandle"]
-        t0 = time.perf_counter()
-        # Phase 1 — wait for operation status to reach FINISHED
-        while True:
-            if time.perf_counter() - t0 >= timeout_s:
-                return None
-            sr = requests.get(
-                f"{MR_ENDPOINT}/v1/sessions/{session}/operations/{op}/status",
-                timeout=30)
-            status = sr.json().get("status", "UNKNOWN")
-            if status == "FINISHED":
-                break
-            if status in ("ERROR", "CANCELED"):
-                return None
-            time.sleep(0.3)
-        # Phase 2 — paginate results, polling each page until it's ready
-        rows: list[dict] = []
-        uri = f"/v1/sessions/{session}/operations/{op}/result/0"
-        for _ in range(max_pages):
-            body = _flink_fetch_page(uri, timeout_s=30, retries=40)
-            if body is None:
-                # NOT_READY never resolved — result not available via this API
-                return None
-            rows.extend(body.get("results", {}).get("data", []))
-            nxt = body.get("nextResultUri")
-            if not nxt or body.get("resultType") == "EOS":
-                break
-            uri = nxt
-        return rows
-    except Exception as exc:
-        print(f"    flink_fetch_rows error: {exc}")
+        cfg = json.loads(ADAPTIVE_CONFIG.read_text())
+        lb = str(cfg.get("lookback", "7d"))
+    except Exception:
+        lb = "7d"
+    m = re.match(r"(\d+(?:\.\d+)?)\s*([dhms])", lb)
+    if not m:
+        return 7 * 86400.0
+    val, unit = float(m.group(1)), m.group(2)
+    return val * {"d": 86400, "h": 3600, "m": 60, "s": 1}[unit]
+
+
+def sample_chains_from_traces(
+    dataset_path: Path,
+    group_key: str,
+    target_len: int = 10,
+    min_len: int = 8,
+    n_chains: int = 5,
+) -> list[list[dict]]:
+    """
+    Sample activity chains of length `target_len` as contiguous windows
+    from real groups in the dataset.
+
+    group_key: "trace_id" for case perspective, or any attribute key
+               (e.g. "org:resource") for an alternative perspective.
+
+    Guarantees: every returned chain is a contiguous activity
+    subsequence of at least one real group, so the corresponding
+    sequential pattern has >= 1 match under STNM semantics.
+
+    Selection strategy: prefer windows with many *distinct* activities
+    (more informative sub-pair intersections) drawn from different
+    groups for diversity.  Windows whose time span exceeds the indexing
+    lookback λ are REJECTED — their long-gap pairs are absent from the
+    persisted index and the pattern would falsely return 0.
+
+    Returns a list of windows; each window is a list of event dicts
+    (activity, timestamp, plus all contextual attributes), preserving
+    the actual attribute values for guaranteed-satisfiable constraints.
+    """
+    from tests.eval.batch_splitter import _iter_log, _parse_ts
+
+    max_span = _index_lookback_seconds()
+    print(f"    [sampler] max window time-span = {max_span/86400:.1f}d "
+          f"(indexing lookback λ)")
+
+    # ── Build groups: key -> [(epoch_ts, event_dict)] ──────────────────
+    groups: dict[str, list[tuple[float, dict]]] = defaultdict(list)
+    n_parsed = 0
+    for ev in _iter_log(dataset_path):
+        gv = ev.get(group_key)
+        act = ev.get("activity")
+        if not gv or not act:
+            continue
+        ts = _parse_ts(ev.get("timestamp", "")) if ev.get("timestamp") else 0.0
+        groups[gv].append((ts, ev))
+        n_parsed += 1
+        if n_parsed >= MAX_PARSE_EVENTS:
+            break
+
+    if not groups:
+        return []
+
+    candidates: list[tuple[int, str, list[dict]]] = []
+    seen_windows: set[tuple[str, ...]] = set()
+    n_span_rejected = 0
+
+    ranked_groups = sorted(groups.items(), key=lambda kv: -len(kv[1]))
+
+    for gv, events in ranked_groups:
+        if len(events) < min_len:
+            continue
+        events.sort(key=lambda e: e[0])
+
+        max_wlen = min(target_len, len(events))
+        if max_wlen < min_len:
+            continue
+
+        best_window = None
+        best_distinct = -1
+        stride = max(1, (len(events) - max_wlen) // 50 or 1)
+        for start in range(0, len(events) - max_wlen + 1, stride):
+            w = events[start:start + max_wlen]
+            # λ check: full window span must fit in the indexing lookback.
+            if w[-1][0] - w[0][0] > max_span:
+                n_span_rejected += 1
+                continue
+            acts_w = tuple(e[1]["activity"] for e in w)
+            if acts_w in seen_windows:
+                continue
+            nd = len(set(acts_w))
+            if nd > best_distinct:
+                best_distinct = nd
+                best_window = [e[1] for e in w]
+
+        if best_window:
+            seen_windows.add(tuple(e["activity"] for e in best_window))
+            candidates.append((best_distinct, gv, best_window))
+
+        if len(candidates) >= n_chains * 4:
+            break
+
+    if n_span_rejected:
+        print(f"    [sampler] rejected {n_span_rejected} windows exceeding λ "
+              f"— consider increasing 'lookback' in the adaptive config "
+              f"and re-ingesting")
+
+    if not candidates:
+        return []
+
+    candidates.sort(key=lambda c: -c[0])
+    chosen = [c[2] for c in candidates[:n_chains]]
+    n_rep = sum(1 for w in chosen if len({e["activity"] for e in w}) < len(w))
+    print(f"    [sampler] selected {len(chosen)} chains "
+          f"(lengths={[len(w) for w in chosen]}, "
+          f"repeated-activity={n_rep}/{len(chosen)})")
+    return chosen
+
+
+def _chain_sub_pairs(chain: list[str]) -> list[tuple[str, str]]:
+    """All consecutive sub-pairs from a chain."""
+    return [(chain[i], chain[i + 1]) for i in range(len(chain) - 1)]
+
+
+def _chain_all_pairs(chain: list[str]) -> list[tuple[str, str]]:
+    """All ordered sub-pairs (i < j) from a chain — these are what the
+    adaptive detection intersects."""
+    return [(chain[i], chain[j])
+            for i in range(len(chain))
+            for j in range(i + 1, len(chain))]
+
+
+# ---------------------------------------------------------------------------
+# Attribute-aware query construction
+# ---------------------------------------------------------------------------
+
+_RESERVED_KEYS = {"activity", "timestamp", "trace_id"}
+
+
+def _build_attr_pattern(
+    window: list[dict],
+    perspective_attr: str | None = None,
+) -> tuple[str | None, dict[int, tuple[str, str]]]:
+    """
+    Annotate the first and last positions of the window with inline
+    bracket constraints whose values are taken from the window's OWN
+    events.  Because the source group satisfies the structural pattern
+    AND its events carry exactly these attribute values, the constrained
+    pattern is guaranteed to have >= 1 match.
+
+    `perspective_attr` is excluded as a constraint key (constraining on
+    the grouping attribute itself is trivially satisfied per group).
+
+    Returns (pattern_string, constraints) where constraints maps
+    position -> (attr_key, attr_value), or (None, {}) if no usable
+    attribute exists on the boundary events.
+    """
+    chain = [e["activity"] for e in window]
+    constraints: dict[int, tuple[str, str]] = {}
+
+    def _pick_attr(ev: dict) -> tuple[str, str] | None:
+        for k, v in ev.items():
+            if k in _RESERVED_KEYS or k == perspective_attr:
+                continue
+            if v is None or str(v).strip() == "":
+                continue
+            return k, str(v)
         return None
 
+    first = _pick_attr(window[0])
+    last  = _pick_attr(window[-1])
+    if not first and not last:
+        return None, {}
+    if first:
+        constraints[0] = first
+    if last:
+        constraints[len(window) - 1] = last
 
-def flink_validate_table(
-    session: str,
-    table_name: str,
-    n_written: int,
-    csv_host_path: Path,
-) -> bool:
-    """
-    Validate that the Flink table was created and the CSV data is correct.
+    parts = []
+    for i, act in enumerate(chain):
+        label = quote_label(act)
+        if i in constraints:
+            attr, val = constraints[i]
+            safe_val = val.replace('"', '\\"')
+            label = f'{label}[{attr}="{safe_val}"]'
+        parts.append(label)
 
-    Why not SELECT COUNT(*)?
-    ------------------------
-    In Flink batch mode, COUNT(*) is submitted as a cluster job.  The SQL
-    Gateway never buffers the job result back into its own result store, so
-    the /result endpoint returns NOT_READY indefinitely even after the job
-    finishes.  This is a known Gateway behaviour in batch mode.
-
-    Instead we use two checks that do not require a Flink job:
-
-    Check 1 — CSV file (host side, pure Python)
-        • File exists at the host path
-        • Line count == n_written (no extra header row)
-        • First line does not start with column names (header leak detection)
-
-    Check 2 — DESCRIBE table (catalog DDL, no Flink job)
-        • Confirms the table is registered in the session catalog
-        • Verifies the expected columns (trace_id, activity, position) are present
-        • DESCRIBE is executed synchronously by the SQL Gateway; result is
-          available immediately with no NOT_READY delay
-    """
-    print(f"    Validating Flink table '{table_name}' ...")
-
-    # ── Check 1: CSV file (host side) ─────────────────────────────────
-    if not csv_host_path.exists():
-        print(f"    ✗ FAIL: CSV not found at {csv_host_path}")
-        return False
-
-    with csv_host_path.open("rb") as f:
-        n_lines = sum(1 for _ in f)
-
-    if n_lines == 0:
-        print("    ✗ FAIL: CSV file is empty")
-        return False
-
-    # Check no header row (Flink maps by position; header becomes corrupt data)
-    with csv_host_path.open() as f:
-        first_line = f.readline().strip()
-    first_fields = first_line.split(",")
-    if first_fields[0].lower() == "trace_id":
-        print("    ✗ FAIL: CSV first row is a header — writeheader() must not be called")
-        return False
-
-    if n_lines != n_written:
-        diff_pct = abs(n_lines - n_written) / max(n_written, 1) * 100
-        print(f"    ⚠ WARNING: CSV has {n_lines} lines but {n_written} events were "
-              f"written ({diff_pct:.1f}% difference)")
-    else:
-        print(f"    ✓ CSV: {n_lines} lines, no header, "
-              f"first row starts with {first_fields[0]!r}")
-
-    # ── Check 2: DESCRIBE table (catalog DDL, no Flink job) ───────────
-    # DESCRIBE is processed locally by the SQL Gateway (no cluster job),
-    # so the result is immediately available — no NOT_READY issue.
-    describe_rows = flink_fetch_rows(
-        session, f"DESCRIBE `{table_name}`",
-        timeout_s=30, max_pages=2,
-    )
-    if not describe_rows:
-        print(f"    ✗ FAIL: DESCRIBE returned nothing — "
-              f"table not registered or session lost")
-        return False
-
-    col_names = [str(r.get("fields", ["?"])[0]) for r in describe_rows]
-    for required in ("trace_id", "activity", "position"):
-        if required not in col_names:
-            print(f"    ✗ FAIL: column '{required}' missing from table schema. "
-                  f"Got: {col_names}")
-            return False
-
-    print(f"    ✓ DESCRIBE OK: {len(describe_rows)} columns — "
-          f"{col_names[:6]}{'...' if len(col_names) > 6 else ''}")
-    return True
+    return " ".join(parts), constraints
 
 
-def flink_run_query(session: str, sql: str) -> tuple[float, int, bool, str]:
-    """Execute Flink query; return (latency_s, total_groups, timed_out, status)."""
-    t0 = time.perf_counter()
+def _is_num(s: str) -> bool:
     try:
-        r = requests.post(f"{MR_ENDPOINT}/v1/sessions/{session}/statements",
-                          json={"statement": sql}, timeout=SWEEP_TIMEOUT_S)
-        r.raise_for_status()
-        op = r.json()["operationHandle"]
-        while True:
-            if time.perf_counter() - t0 >= SWEEP_TIMEOUT_S:
-                return time.perf_counter() - t0, 0, True, "TIMEOUT"
-            sr = requests.get(
-                f"{MR_ENDPOINT}/v1/sessions/{session}/operations/{op}/status",
-                timeout=30)
-            status = sr.json().get("status", "UNKNOWN")
-            if status in ("FINISHED", "ERROR", "CANCELED"):
-                break
-            time.sleep(0.3)
-        latency = time.perf_counter() - t0
-        if status != "FINISHED":
-            return latency, 0, False, status
-        # Paginate and sum per-group counts, polling each page for NOT_READY
-        total = 0
-        uri = f"/v1/sessions/{session}/operations/{op}/result/0"
-        for _ in range(500):
-            body = _flink_fetch_page(uri, timeout_s=60, retries=60)
-            if body is None:
-                break
-            for row in body.get("results", {}).get("data", []):
-                try:
-                    total += int(row.get("fields", [None, 0])[1])
-                except (TypeError, ValueError, IndexError):
-                    total += 1
-            nxt = body.get("nextResultUri")
-            if not nxt or body.get("resultType") == "EOS":
-                break
-            uri = nxt
-        return latency, total, False, status
-    except Exception as exc:
-        return time.perf_counter() - t0, 0, True, f"EXCEPTION: {exc}"
+        float(s)
+        return True
+    except (TypeError, ValueError):
+        return False
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Pattern parsing
-# ═══════════════════════════════════════════════════════════════════════════
+# ---------------------------------------------------------------------------
+# Perspective selection — pick the best alternative perspective
+# ---------------------------------------------------------------------------
 
-def _parse_seql_pattern(pattern: str):
-    """Parse SeQL pattern → (activities, attr_eq, has_binding, has_regex)."""
-    has_binding = False
-    has_regex   = bool(re.search(r'[+*?]', pattern))
-    attr_eq: list[tuple[str, str, str]] = []
-    segments: list[str] = []
-    pos = 0
-    while pos < len(pattern):
-        m = re.match(r'"((?:[^"\\]|\\.)*)"', pattern[pos:])
-        if m:
-            label = m.group(1).replace('\\"', '"').replace("\\\\", "\\")
-            pos += m.end()
-        else:
-            m = re.match(r'[A-Za-z_][A-Za-z0-9_:\\]*', pattern[pos:])
-            if m:
-                label = m.group(0); pos += m.end()
-            else:
-                pos += 1; continue
-        if pos < len(pattern) and pattern[pos] == '[':
-            end = pattern.find(']', pos)
-            if end != -1:
-                for part in pattern[pos + 1:end].split(","):
-                    part = part.strip()
-                    cm = re.match(r'([\w:]+)\s*=\s*(.+)', part)
-                    if cm:
-                        key = cm.group(1)
-                        val = cm.group(2).strip().strip('"')
-                        if val.startswith("$"):
-                            has_binding = True
-                        else:
-                            attr_eq.append((label, key, val))
-                pos = end + 1
-        segments.append(label)
-    return segments, attr_eq, has_binding, has_regex
+MIN_ALT_GROUPS = int(os.environ.get("MIN_ALT_GROUPS", "10"))
 
 
-def _extract_binding_vars(pattern: str):
-    """Extract $N variable bindings → {var_id: [(act, attr), ...]}."""
-    bindings: dict[str, list[tuple[str, str]]] = {}
-    pos = 0
-    while pos < len(pattern):
-        m = re.match(r'"((?:[^"\\]|\\.)*)"', pattern[pos:])
-        if m:
-            label = m.group(1).replace('\\"', '"'); pos += m.end()
-        else:
-            m = re.match(r'[A-Za-z_][A-Za-z0-9_:\\]*', pattern[pos:])
-            if m:
-                label = m.group(0); pos += m.end()
-            else:
-                pos += 1; continue
-        if pos < len(pattern) and pattern[pos] == '[':
-            end = pattern.find(']', pos)
-            if end != -1:
-                for part in pattern[pos + 1:end].split(","):
-                    cm = re.match(r'([\w:]+)\s*=\s*(\$\d+)', part.strip())
-                    if cm:
-                        bindings.setdefault(cm.group(2), []).append(
-                            (label, cm.group(1)))
-                pos = end + 1
-    return bindings or None
-
-
-def _extract_regex_ops(pattern: str) -> dict[int, str] | None:
-    """Extract Kleene ops → {activity_index: op}."""
-    clean = re.sub(r'\[[^\]]*\]', '', pattern)
-    ops = {}
-    for i, (_, op) in enumerate(
-        re.findall(r'("(?:[^"\\]|\\.)*"|[A-Za-z_][A-Za-z0-9_:\\]*)([+*?])?', clean)
-    ):
-        if op:
-            ops[i] = op
-    return ops or None
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Workload construction — verified non-null
-# ═══════════════════════════════════════════════════════════════════════════
-
-def _pat(*acts: str) -> str:
-    return " ".join(quote_label(a) for a in acts)
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Trace-based workload sampling
-# ═══════════════════════════════════════════════════════════════════════════
-# Queries are sampled directly from real traces instead of being derived
-# from pair-coverage statistics.  This guarantees total > 0 by construction
-# — every sampled query pattern was witnessed in at least one real trace.
-# No preflight cold-scan is needed.
-# ═══════════════════════════════════════════════════════════════════════════
-
-MAX_TRACE_SAMPLE = int(os.environ.get("MAX_TRACE_SAMPLE", "5000"))
-
-
-def _load_traces(dataset_path: Path) -> list[list[dict]]:
-    """
-    Load up to MAX_TRACE_SAMPLE traces from the log into memory.
-
-    Returns a list of traces, each trace being a list of event dicts
-    (already in timestamp order as they appear in the source file).
-    """
-    from tests.eval.batch_splitter import _iter_log
-    trace_dict: dict[str, list[dict]] = {}
-    for ev in _iter_log(dataset_path):
-        tid = ev.get("trace_id")
-        if not tid:
-            continue
-        if tid not in trace_dict:
-            if len(trace_dict) >= MAX_TRACE_SAMPLE:
-                continue
-            trace_dict[tid] = []
-        trace_dict[tid].append(ev)
-    print(f"    Loaded {len(trace_dict)} traces into memory")
-    return list(trace_dict.values())
-
-
-def _distinct_subseq(acts: list[str], k: int) -> list[str] | None:
-    """
-    Return the first k distinct activities from acts preserving order,
-    or None if fewer than k distinct activities exist.
-    """
-    seen: set[str] = set()
-    result: list[str] = []
-    for a in acts:
-        if a not in seen:
-            seen.add(a)
-            result.append(a)
-            if len(result) == k:
-                return result
-    return None
-
-
-def _find_regex_chain(acts: list[str]) -> tuple[str, str, str] | None:
-    """
-    Find activities A, B, C (all distinct) where B appears at least
-    once between A and C in `acts`.  Guarantees the pattern A B+ C matches.
-    O(n²) scan.
-    """
-    n = len(acts)
-    for i in range(n - 2):
-        act_a = acts[i]
-        for j in range(i + 1, n - 1):
-            act_b = acts[j]
-            if act_b == act_a:
-                continue
-            # Find any C after j that is not A or B
-            for k in range(j + 1, n):
-                act_c = acts[k]
-                if act_c != act_a and act_c != act_b:
-                    return act_a, act_b, act_c
-    return None
-
-
-def sample_workload_for_perspective(
-    traces: list[list[dict]],
+def select_best_alt_perspective(
     log_name: str,
-    perspective_key: str,
-    schema,
-    *,
-    max_length: int = 5,
-    n_structural_per_k: int = 3,
-    n_attribute: int = 2,
-    n_regex: int = 2,
-) -> dict[str, list[dict]]:
+    perspective_keys: list[str],
+) -> str | None:
     """
-    Sample queries by scanning real traces.  Every generated query is
-    guaranteed to match ≥ 1 trace by construction — the trace it was
-    sampled from.
+    Among discovered perspective keys, pick the one with the most
+    balanced group-size distribution (lowest coefficient of variation),
+    REQUIRING at least MIN_ALT_GROUPS groups.
 
-    Structural k=2..max_length
-        For each k, scan traces and collect n_structural_per_k distinct
-        k-length subsequences (all distinct activities, in order).
+    The group-count floor matters twice over: (a) a perspective with a
+    handful of giant groups (e.g. a 3-value attribute over 1.2M events)
+    yields enormous pseudo-sequences that blow up CEP validation, and
+    (b) the sampler takes one window per group, so chain diversity is
+    capped at the group count.
 
-    Attribute single_eq  A[attr="val"] B
-        Find a trace where event at position i has (activity=A, attr=val)
-        and a later event at position j has activity=B.
-        The sampled val is known to exist on activity A in that trace.
-
-    Attribute cross_eq   A[attr=$1] B[attr=$1]
-        Find a trace where event A and a later event B share the same
-        value for attr.  The binding $1 is satisfied by construction.
-
-    Regex  A B+ C  and  A B* C
-        Find a trace where activities A, B, C appear in that order (B
-        at least once between A and C).  B+ is satisfied; B* is the
-        same pattern with a strictly weaker operator (superset of B+).
+    Returns None (skip the alt perspective) if nothing qualifies —
+    deliberately NOT falling back to an unsuitable perspective.
     """
-    gk = [perspective_key]
-    attr_pref = ["org:resource", "lifecycle:transition", "org:group",
-                 "org:role", "resource", "role", "Action"]
-    avail_attrs = [a for a in attr_pref if schema.attribute_values.get(a)]
-    if not avail_attrs:
-        avail_attrs = [k for k, vs in schema.attribute_values.items() if vs][:3]
+    best_key = None
+    best_cv  = float("inf")
 
-    cnt   = itertools.count(1)
-    cnt_a = itertools.count(1)
-    cnt_r = itertools.count(1)
-
-    # ── Structural ─────────────────────────────────────────────────────
-    structural: list[dict] = []
-    seen_s: set[str] = set()
-
-    for k in range(2, max_length + 1):
-        found = 0
-        for trace in traces:
-            acts = [ev.get("activity", "") for ev in trace if ev.get("activity")]
-            subseq = _distinct_subseq(acts, k)
-            if subseq is None:
-                continue
-            pat = _pat(*subseq)
-            if pat in seen_s:
-                continue
-            seen_s.add(pat)
-            structural.append({
-                "id": f"S{next(cnt)}", "log_name": log_name,
-                "pattern": pat, "grouping_keys": gk,
-                "pattern_length": k, "category": "structural",
-                "tags": [f"len={k}", "sampled"],
-            })
-            found += 1
-            if found >= n_structural_per_k:
-                break
-
-    # ── Attribute — single_eq ──────────────────────────────────────────
-    attribute: list[dict] = []
-    seen_a: set[str] = set()
-
-    for attr in avail_attrs[:2]:
-        found = 0
-        for trace in traces:
-            if found >= n_attribute:
-                break
-            for i, ev_a in enumerate(trace):
-                act_a = ev_a.get("activity", "")
-                val   = ev_a.get(attr)
-                if not act_a or not val:
-                    continue
-                # Find any B after position i
-                for ev_b in trace[i + 1:]:
-                    act_b = ev_b.get("activity", "")
-                    if not act_b or act_b == act_a:
-                        continue
-                    val_esc = str(val).replace('"', '\\"')
-                    pat = (f'{quote_label(act_a)}[{attr}="{val_esc}"] '
-                           f'{quote_label(act_b)}')
-                    if pat in seen_a:
-                        break
-                    seen_a.add(pat)
-                    attribute.append({
-                        "id": f"A{next(cnt_a)}", "log_name": log_name,
-                        "pattern": pat, "grouping_keys": gk,
-                        "pattern_length": 2, "category": "attribute",
-                        "tags": ["single_eq", f"attr={attr}", "sampled"],
-                    })
-                    found += 1
-                    break  # one query per trace per attr
-                if found >= n_attribute:
-                    break
-
-    # ── Attribute — cross_eq ───────────────────────────────────────────
-    seen_x: set[str] = set()
-    for attr in avail_attrs[:1]:
-        found = 0
-        for trace in traces:
-            if found >= n_attribute:
-                break
-            for i, ev_a in enumerate(trace):
-                act_a = ev_a.get("activity", "")
-                val_a = ev_a.get(attr)
-                if not act_a or not val_a:
-                    continue
-                # Find B after i with the SAME attribute value
-                for ev_b in trace[i + 1:]:
-                    act_b = ev_b.get("activity", "")
-                    if not act_b or act_b == act_a:
-                        continue
-                    if ev_b.get(attr) == val_a:
-                        pat = (f'{quote_label(act_a)}[{attr}=$1] '
-                               f'{quote_label(act_b)}[{attr}=$1]')
-                        if pat not in seen_x:
-                            seen_x.add(pat)
-                            attribute.append({
-                                "id": f"A{next(cnt_a)}", "log_name": log_name,
-                                "pattern": pat, "grouping_keys": gk,
-                                "pattern_length": 2, "category": "attribute",
-                                "tags": ["cross_eq", f"attr={attr}", "sampled"],
-                            })
-                            found += 1
-                        break
-                if found >= n_attribute:
-                    break
-
-    # ── Regex ──────────────────────────────────────────────────────────
-    regex: list[dict] = []
-    seen_r: set[str] = set()
-
-    for trace in traces:
-        if len(regex) >= n_regex * 2:
-            break
-        acts = [ev.get("activity", "") for ev in trace if ev.get("activity")]
-        chain = _find_regex_chain(acts)
-        if chain is None:
-            continue
-        a, b, c = chain
-        pat_plus = f'{quote_label(a)} {quote_label(b)}+ {quote_label(c)}'
-        pat_star = f'{quote_label(a)} {quote_label(b)}* {quote_label(c)}'
-        if pat_plus not in seen_r:
-            seen_r.add(pat_plus)
-            regex.append({
-                "id": f"R{next(cnt_r)}", "log_name": log_name,
-                "pattern": pat_plus, "grouping_keys": gk,
-                "pattern_length": 3, "category": "regex",
-                "tags": ["regex", "B+", "sampled"],
-            })
-        if pat_star not in seen_r and len(regex) < n_regex * 2:
-            seen_r.add(pat_star)
-            regex.append({
-                "id": f"R{next(cnt_r)}", "log_name": log_name,
-                "pattern": pat_star, "grouping_keys": gk,
-                "pattern_length": 3, "category": "regex",
-                "tags": ["regex", "B*", "sampled"],
-            })
-
-    if not regex:
-        print("    WARNING: no regex chain found in sampled traces")
-
-    return {"structural": structural, "attribute": attribute, "regex": regex}
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Warm-up — identical protocol to exp_warmup.py
-# ═══════════════════════════════════════════════════════════════════════════
-
-def warmup_all_perspectives(
-    all_workloads: dict[tuple, dict[str, list[dict]]],
-) -> None:
-    """
-    Issue every query N_WARMUP_QUERIES times with RETENTION_OVERRIDES
-    so every pair crosses min_query_count and gets queued for
-    build_pair_persistent.  Then sleep WARMUP_SLEEP_S seconds for
-    background materialisation.
-
-    All perspectives are warmed up before the sleep so one sleep covers
-    all of them.
-    """
-    total_q = sum(len(wl) for wls in all_workloads.values() for wl in wls.values())
-    print(f"\n  Warm-up: {total_q} queries × {N_WARMUP_QUERIES} reps "
-          f"across {len(all_workloads)} perspectives ...")
-
-    for rep in range(N_WARMUP_QUERIES):
-        print(f"\n  ── warm-up rep {rep + 1}/{N_WARMUP_QUERIES} ──")
-        q_idx = 0
-        for gk_tuple, workloads in all_workloads.items():
-            pkey = gk_tuple[0]
-            for cat, queries in workloads.items():
-                for q in queries:
-                    q_idx += 1
-                    t0 = time.perf_counter()
-                    try:
-                        body = detect_adaptive(
-                            q["log_name"], q["pattern"], q["grouping_keys"],
-                            retention_overrides=RETENTION_OVERRIDES,
-                        )
-                        latency = time.perf_counter() - t0
-                        tier_map = body.get("pair_status_after") or {}
-                        tiers = sorted(set(tier_map.values()))
-                        tier_str = ",".join(tiers) if tiers else "?"
-                        print(f"    [{pkey}/{cat}] {q['id']:5s} "
-                              f"({q_idx}/{total_q})  "
-                              f"{q['pattern'][:45]:45s}  "
-                              f"{latency:6.1f}s  [{tier_str}]")
-                    except Exception as exc:
-                        latency = time.perf_counter() - t0
-                        print(f"    [{pkey}/{cat}] {q['id']:5s} "
-                              f"({q_idx}/{total_q})  ERROR {latency:.1f}s: {exc}")
-        print(f"  rep {rep + 1}/{N_WARMUP_QUERIES} done")
-
-    print(f"\n    Sleeping {WARMUP_SLEEP_S}s for background materialisation ...")
-    time.sleep(WARMUP_SLEEP_S)
-
-    # Verify promotion — re-query each pattern once and report final tiers
-    print("    Verifying pair promotion after sleep ...")
-    persistent_count = 0
-    total_pairs = 0
-    for gk_tuple, workloads in all_workloads.items():
-        pkey = gk_tuple[0]
-        for cat, queries in workloads.items():
-            for q in queries:
-                try:
-                    body = detect_adaptive(
-                        q["log_name"], q["pattern"], q["grouping_keys"],
-                        retention_overrides=RETENTION_OVERRIDES,
-                    )
-                    tier_map = body.get("pair_status_after") or {}
-                    for tier in tier_map.values():
-                        total_pairs += 1
-                        if tier == "PERSISTENT":
-                            persistent_count += 1
-                except Exception:
-                    pass
-    pct = (persistent_count / total_pairs * 100) if total_pairs else 0
-    print(f"    Warm-up complete — {persistent_count}/{total_pairs} pairs "
-          f"PERSISTENT ({pct:.0f}%).")
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Timed system runners
-# ═══════════════════════════════════════════════════════════════════════════
-
-def run_siesta(rec, category, workload, log_name):
-    """Measure SIESTA adaptive from warm (PERSISTENT) state."""
-    print(f"\n── SIESTA warm — {category} ({len(workload)} queries) ──")
-    for q in workload:
+    for pk in perspective_keys:
         try:
-            body, latency = timed_query(
-                q["log_name"], q["pattern"], q["grouping_keys"],
-                retention_overrides=RETENTION_OVERRIDES,
-            )
-            total = body.get("total", 0)
-            tier  = body.get("pair_status_after", {})
-            rec.emit("query", system="siesta_warm", category=category,
-                     qid=q["id"], pattern=q["pattern"],
-                     grouping_keys=q["grouping_keys"],
-                     pattern_length=q.get("pattern_length"),
-                     tags=q.get("tags", []),
-                     latency_s=latency, total=total, tier=tier,
-                     log_name=log_name)
-            tiers = ",".join(set(tier.values())) if tier else "?"
-            print(f"  {q['id']:5s} k={q.get('pattern_length','?')} "
-                  f"{q['pattern'][:45]:45s} → {latency:.3f}s "
-                  f"(n={total}, {tiers})")
-        except Exception as exc:
-            rec.emit("query_error", system="siesta_warm", category=category,
-                     qid=q["id"], log_name=log_name, error=str(exc))
-            print(f"  {q['id']:5s} ERROR: {exc}")
-
-
-def run_elk(rec, category, workload, log_name, elk_index, perspective_key):
-    """ELK multiperspective aggregation — no ordering, result is superset."""
-    if not _elk_reachable():
-        rec.emit("skip", system="elk", reason="not reachable")
-        print(f"  [SKIP] ELK not reachable"); return
-
-    print(f"\n── ELK — {category} ({len(workload)} queries) ──")
-    for q in workload:
-        activities, attr_eq, has_binding, has_regex = _parse_seql_pattern(q["pattern"])
-        if has_regex:
-            rec.emit("query", system="elk", category=category, qid=q["id"],
-                     pattern=q["pattern"], latency_s=0.0, total=-1,
-                     elk_note="regex_unsupported",
-                     grouping_keys=q.get("grouping_keys"), log_name=log_name)
-            print(f"  {q['id']:5s} SKIP (regex unsupported by ELK)")
+            cov = fetch_pair_coverage(log_name, [pk])
+        except Exception:
             continue
-        note = ("binding_unsupported_structural_only" if has_binding
-                else "partial_attr_no_ordering" if attr_eq
-                else "structural_no_ordering")
-        elk_q = build_elk_multiperspective_query(
-            activities, perspective_key,
-            attr_eq=(None if has_binding else attr_eq) or None,
-        )
-        latency, total, timed_out = run_elk_query(elk_q, elk_index)
-        rec.emit("query", system="elk", category=category,
-                 qid=q["id"], pattern=q["pattern"],
-                 grouping_keys=q.get("grouping_keys"),
-                 pattern_length=q.get("pattern_length"),
-                 tags=q.get("tags", []),
-                 latency_s=latency, total=total, timed_out=timed_out,
-                 elk_note=note, siesta_expected=q.get("siesta_total", 0),
-                 log_name=log_name)
-        st = "TIMEOUT" if timed_out else f"{latency:.3f}s"
-        print(f"  {q['id']:5s} [{note[:18]}] "
-              f"{q['pattern'][:40]:40s} → {st} (n={total})")
+        gc = cov.get("group_count", 0)
+        if gc < MIN_ALT_GROUPS:
+            print(f"    [perspective] {pk}: only {gc} groups "
+                  f"(< {MIN_ALT_GROUPS}), excluded")
+            continue
+        pairs = cov.get("pairs", [])
+        if not pairs:
+            continue
+
+        # Use pair group counts as a proxy for group-size balance.
+        # More evenly distributed pairs → lower CV.
+        group_counts = [p["groups"] for p in pairs]
+        if len(group_counts) < 2:
+            continue
+        mean_g = statistics.mean(group_counts)
+        if mean_g == 0:
+            continue
+        stdev_g = statistics.stdev(group_counts)
+        cv = stdev_g / mean_g
+
+        if cv < best_cv:
+            best_cv = cv
+            best_key = pk
+
+    return best_key  # None => caller skips the alt perspective
 
 
-def run_match_recognize(rec, category, workload, log_name,
-                        flink_session, flink_table, perspective_key):
+# ---------------------------------------------------------------------------
+# Warm-up: promote all sub-pairs to PERSISTENT via short 2-activity queries
+# ---------------------------------------------------------------------------
+
+def warmup_pairs(
+    log_name: str,
+    pairs: set[tuple[str, str]],
+    grouping_keys: list[str],
+    reps: int = WARMUP_REPS,
+) -> int:
     """
-    Flink MATCH_RECOGNIZE with:
-      - GAP* wildcards for STNM / eventually-follows semantics
-      - outer GROUP BY perspective_key for multiperspective semantics
+    Issue short 2-activity queries for every pair in `pairs`, repeated
+    `reps` times to ensure promotion to PERSISTENT.
+
+    IMPORTANT: Algorithm 3 (Detect) intersects ALL ordered pairs (i<j)
+    of the pattern, not only consecutive ones.  Callers must pass the
+    full ordered-pair set of each pattern (see _chain_all_pairs) or the
+    measured "warm" query will silently pay transient extraction cost
+    for the un-warmed pairs.
+
+    Returns the number of queries issued.
     """
-    if not _mr_reachable():
-        rec.emit("skip", system="match_recognize", reason="not reachable")
-        print(f"  [SKIP] Flink not reachable"); return
+    n = 0
+    for a, b in sorted(pairs):
+        pattern = f"{quote_label(a)} {quote_label(b)}"
+        for _ in range(reps):
+            try:
+                detect_adaptive(
+                    log_name, pattern, grouping_keys,
+                    retention_overrides=RETENTION_FAST,
+                )
+                n += 1
+            except Exception as exc:
+                print(f"    [warmup] {a}->{b} error: {exc}")
+    return n
 
-    print(f"\n── MATCH_RECOGNIZE — {category} ({len(workload)} queries) ──")
-    for q in workload:
-        activities, attr_eq, has_binding, has_regex = _parse_seql_pattern(q["pattern"])
-        if len(activities) < 2:
-            print(f"  {q['id']:5s} SKIP (too few activities)"); continue
-        sql = build_mr_multiperspective_sql(
-            flink_table, activities, perspective_key,
-            attr_eq=attr_eq or None,
-            binding_vars=_extract_binding_vars(q["pattern"]) if has_binding else None,
-            regex_ops=_extract_regex_ops(q["pattern"]) if has_regex else None,
+
+PROMOTION_BUDGET_S = int(os.environ.get("PROMOTION_BUDGET_S", "1800"))
+PROMOTION_POLL_S   = int(os.environ.get("PROMOTION_POLL_S", "20"))
+
+
+def wait_for_promotions(
+    log_name: str,
+    pairs: set[tuple[str, str]],
+    grouping_keys: list[str],
+    budget_s: int = PROMOTION_BUDGET_S,
+) -> dict[str, int]:
+    """
+    Poll until every pair in `pairs` reaches PERSISTENT, or the budget
+    expires.
+
+    Each detection response carries `pair_status_after` for the pairs
+    it touched, so the poll is a sweep of cheap 2-activity queries over
+    the not-yet-persistent set.  A blind sleep is wrong here:
+    build_pair_persistent re-scans the sequence table per pair
+    (~10-20 s each), so persisting ~90 pairs takes ~15-30 min of
+    background work — far beyond any fixed sleep.
+
+    Pairs may also legitimately stay TRANSIENT: the retention predicate
+    is utility vs cost, and a cheap-to-extract pair can fail the cost
+    gate forever.  TRANSIENT pairs are served from the in-memory LRU
+    (faster than Delta), so they do not hurt warm measurements — but
+    the experiment should know the tier mix, hence the returned counts.
+
+    Returns {"PERSISTENT": n, "TRANSIENT": n, "ABSENT": n, ...} for the
+    final sweep.
+    """
+    t0 = time.perf_counter()
+    pending = set(pairs)
+    final_status: dict[tuple[str, str], str] = {}
+
+    while pending and (time.perf_counter() - t0) < budget_s:
+        next_pending: set[tuple[str, str]] = set()
+        for (a, b) in sorted(pending):
+            pattern = f"{quote_label(a)} {quote_label(b)}"
+            try:
+                body = detect_adaptive(
+                    log_name, pattern, grouping_keys,
+                    retention_overrides=RETENTION_FAST,
+                )
+            except Exception:
+                next_pending.add((a, b))
+                continue
+            statuses = body.get("pair_status_after") or {}
+            st = statuses.get(f"{a}->{b}")
+            if st is None and len(statuses) == 1:
+                # 2-activity query touches exactly one pair; tolerate
+                # key-format differences by taking the single entry.
+                st = next(iter(statuses.values()))
+            st = st or "UNKNOWN"
+            final_status[(a, b)] = st
+            if st != "PERSISTENT":
+                next_pending.add((a, b))
+        pending = next_pending
+        if pending:
+            elapsed = time.perf_counter() - t0
+            print(f"    [promotions] {len(pairs)-len(pending)}/{len(pairs)} "
+                  f"persistent after {elapsed:.0f}s; polling again in "
+                  f"{PROMOTION_POLL_S}s ...")
+            time.sleep(PROMOTION_POLL_S)
+
+    counts: dict[str, int] = {}
+    for (a, b) in pairs:
+        st = final_status.get((a, b), "UNKNOWN")
+        counts[st] = counts.get(st, 0) + 1
+    return counts
+
+
+# ---------------------------------------------------------------------------
+# Preflight — test a pattern to check for non-zero results
+# ---------------------------------------------------------------------------
+
+PREFLIGHT_TIMEOUT_S = int(os.environ.get("PREFLIGHT_TIMEOUT_S", "300"))
+
+
+def preflight_query(
+    log_name: str,
+    pattern: str,
+    grouping_keys: list[str],
+) -> tuple[int | None, str | None]:
+    """
+    Quick check whether a pattern returns non-zero results.
+
+    Returns (total, None) on success or (None, reason) on
+    timeout/error.  Callers MUST distinguish the two: a timeout means
+    "couldn't tell", not "zero results" — conflating them silently
+    discards valid (slow) queries.
+    """
+    body = {
+        "log_name":          log_name,
+        "storage_namespace": "siesta",
+        "method":            "detection",
+        "query":             {"pattern": pattern},
+        "grouping_keys":     grouping_keys,
+        "lookback":          "3650d",
+        "lookback_mode":     "time",
+        "support_threshold": 0.0,
+        "min_query_count":   1,
+        "half_life_seconds": 300,
+    }
+    try:
+        r = requests.post(
+            urljoin(API_BASE, f"/{QUERY_PREFIX}/detection"),
+            json=body,
+            timeout=PREFLIGHT_TIMEOUT_S,
         )
-        latency, total, timed_out, status = flink_run_query(flink_session, sql)
-        rec.emit("query", system="match_recognize", category=category,
-                 qid=q["id"], pattern=q["pattern"],
-                 grouping_keys=q.get("grouping_keys"),
-                 pattern_length=q.get("pattern_length"),
-                 tags=q.get("tags", []),
-                 latency_s=latency, total=total, timed_out=timed_out,
-                 flink_status=status, siesta_expected=q.get("siesta_total", 0),
-                 log_name=log_name)
-        st = "TIMEOUT" if timed_out else f"{latency:.3f}s [{status}]"
-        print(f"  {q['id']:5s} k={q.get('pattern_length','?')} "
-              f"{q['pattern'][:40]:40s} → {st} (n={total})")
+        r.raise_for_status()
+        return r.json().get("total", 0), None
+    except requests.Timeout:
+        return None, f"timeout after {PREFLIGHT_TIMEOUT_S}s"
+    except Exception as exc:
+        return None, str(exc)[:200]
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Per-dataset orchestration
-# ═══════════════════════════════════════════════════════════════════════════
+# ---------------------------------------------------------------------------
+# Measurement
+# ---------------------------------------------------------------------------
+
+def measure_siesta(
+    log_name: str,
+    pattern: str,
+    grouping_keys: list[str],
+    reps: int = MEASURE_REPS,
+) -> tuple[float, int, dict]:
+    """
+    Measure median latency over `reps` repetitions.
+    Returns (median_latency, total_matches, last_response_body).
+    The body carries pair_status_after and any other diagnostic fields.
+    """
+    latencies = []
+    total = 0
+    body: dict = {}
+    for _ in range(reps):
+        body, lat = timed_query(
+            log_name, pattern, grouping_keys,
+            retention_overrides=RETENTION_FAST,
+        )
+        latencies.append(lat)
+        total = body.get("total", 0)
+    return statistics.median(latencies), total, body
+
+
+# ---------------------------------------------------------------------------
+# ELK perspective key mapping
+# ---------------------------------------------------------------------------
+
+def _elk_perspective_key(grouping_keys: list[str], fmt: str) -> str | None:
+    """
+    Map SIESTA grouping_keys to the ELK document field name for the
+    perspective aggregation.
+    """
+    if not grouping_keys:
+        return None
+    gk = grouping_keys[0]
+    # trace_id / case:concept:name → "trace_id" in ELK docs
+    if gk in ("trace_id", "case:concept:name"):
+        return "trace_id"
+    return gk
+
+
+# ---------------------------------------------------------------------------
+# Per-dataset runner
+# ---------------------------------------------------------------------------
+
+def _case_grouping_key(fmt: str) -> list[str]:
+    """Return the grouping key for case-centric perspective."""
+    # The adaptive endpoint needs a real attribute key that exists
+    # in the event's attribute map.  For XES, trace_id is stored
+    # under "case:concept:name" at trace level but the SequenceTable
+    # has a top-level "trace_id" column.  The adaptive grouping uses
+    # the top-level column directly when grouping_keys=["trace_id"].
+    return ["trace_id"]
+
 
 def run_dataset(
     dataset_path: Path,
     log_name: str,
     *,
-    max_length: int,
-    skip_elk: bool,
-    skip_mr: bool,
-    flink_csv_dir: str,
-    flink_csv_container_dir: str,
-    max_perspectives: int,
-    top_perspectives: int,
+    skip_elk: bool = False,
 ) -> None:
+    fmt = dataset_path.suffix.lower().lstrip(".")
+    print(f"\n{'='*64}")
+    print(f"  Dataset: {dataset_path}  log_name={log_name}")
+    print(f"{'='*64}")
+
     schema = discover_schema(dataset_path)
-    print(f"\n{'═' * 64}")
-    print(f"  Dataset:      {log_name}  ({dataset_path.name})")
-    print(f"  Activities:   {len(schema.activities)}")
-    print(f"  Perspectives: {schema.perspective_keys[:max_perspectives]}")
-    print(f"{'═' * 64}")
+    activities = schema.activities
+    persp_keys = schema.perspective_keys
 
-    # ── Perspective selection — same logic as exp_skew ─────────────────
-    # discover_schema returns perspective_keys sorted by cardinality asc,
-    # already filtered for non-numeric, event-level, cardinality in [3,500].
-    # We additionally apply MIN_PERSP_CARD after pair_coverage (below).
-    candidate_persp_keys = schema.perspective_keys[:max_perspectives]
-    if not candidate_persp_keys:
-        print("  ABORT: no valid perspective keys found."); return
+    print(f"  Activities ({len(activities)}): {activities[:10]}{'...' if len(activities)>10 else ''}")
+    print(f"  Perspectives: {persp_keys}")
 
-    perspectives: list[list[str]] = [[k] for k in candidate_persp_keys]
-    attr_keys = [k for k, vs in schema.attribute_values.items() if vs]
+    if len(activities) < 3:
+        print(f"  SKIP: need at least 3 activities, got {len(activities)}")
+        return
 
-    rec = Recorder("6.4.1", f"6_4_1_competitive_{log_name}.jsonl")
+    rec = Recorder("6.4.1", f"competitive_{log_name}.jsonl")
 
-    # ── Phase 1: Adaptive ingest — all perspectives declared ──────────
-    # ingest_adaptive builds the shared SequenceTable and registers all
-    # candidate perspectives at L0.  One call covers everything.
-    print(f"\n  Phase 1: ingest_adaptive (all {len(perspectives)} perspectives) ...")
-    ingest_adaptive(
-        log_name, dataset_path, CONFIG,
-        overrides={"perspectives": [{"grouping_keys": g} for g in perspectives]},
-        clear_existing=True,
-    )
+    # ── Ingest ─────────────────────────────────────────────────────────
+    print("\n  Ingesting (adaptive) ...")
+    ingest_adaptive(log_name, dataset_path, ADAPTIVE_CONFIG,
+                    overrides={"overwrite_data": True})
     time.sleep(2)
 
-    # ── Phase 2: ELK ingest ───────────────────────────────────────────
-    elk_index = f"siesta_{log_name}".lower().replace(" ", "_")
-    if not skip_elk and _elk_reachable():
-        print(f"\n  Phase 2: ELK ingest (index={elk_index}) ...")
-        elk_create_index(elk_index, attr_keys)
-        n_elk = elk_ingest_from_log(dataset_path, elk_index, attr_keys)
-        print(f"    {n_elk} events indexed")
-        rec.emit("elk_ingest", log_name=log_name, n_events=n_elk)
-    else:
-        print(f"\n  Phase 2: ELK {'skipped' if skip_elk else 'not reachable'}")
+    # ── Perspective selection ──────────────────────────────────────────
+    case_gk = _case_grouping_key(fmt)
+    alt_key = select_best_alt_perspective(log_name, persp_keys)
+    alt_gk  = [alt_key] if alt_key else None
 
-    # ── Phase 3: Flink table ──────────────────────────────────────────
-    # Two distinct paths:
-    #   csv_host_path      — where this script writes the CSV on the host
-    #   csv_container_path — what the Flink container sees via the volume mount
-    # e.g. volume: /host/tests/eval/flink_data:/opt/flink/flink_data
-    #   csv_host_path      = /host/tests/eval/flink_data/{log_name}.csv
-    #   csv_container_path = /opt/flink/flink_data/{log_name}.csv
-    flink_session = None
-    flink_table = f"event_log_{log_name}".replace("-", "_").replace(" ", "_")
-    if not skip_mr and _mr_reachable():
-        print(f"\n  Phase 3: Flink table ...")
-        csv_host_path      = Path(flink_csv_dir)           / f"{log_name}.csv"
-        csv_container_path = Path(flink_csv_container_dir) / f"{log_name}.csv"
-        n_flink = flink_prepare_csv(dataset_path, csv_host_path, attr_keys)
-        flink_session = flink_get_session()
-        try:
-            flink_exec(flink_session, f"DROP TABLE IF EXISTS `{flink_table}`",
-                       timeout_s=15)
-        except Exception:
-            pass
-        # Pass the CONTAINER path to the DDL — that is what Flink will open
-        flink_create_table(flink_session, flink_table,
-                           str(csv_container_path), attr_keys)
-        rec.emit("flink_ingest", log_name=log_name, n_events=n_flink,
-                 host_path=str(csv_host_path),
-                 container_path=str(csv_container_path))
+    perspectives: list[tuple[str, list[str]]] = [("case", case_gk)]
+    if alt_gk and alt_gk != case_gk:
+        perspectives.append(("alt", alt_gk))
 
-        # Validate immediately — abort Flink participation if anything is wrong
-        if not flink_validate_table(flink_session, flink_table, n_flink,
-                                    csv_host_path):
-            print("    Flink table validation FAILED — "
-                  "Flink will be skipped for this dataset.")
-            rec.emit("flink_validation_failed", log_name=log_name)
-            flink_session = None
-    else:
-        print(f"\n  Phase 3: Flink {'skipped' if skip_mr else 'not reachable'}")
+    print(f"  Case perspective:  {case_gk}")
+    print(f"  Alt  perspective:  {alt_gk}")
 
-    # ── Phase 4: Load traces + sample workloads per perspective ──────
-    # Two-pass design:
-    #   Pass 1 — probe ALL candidate perspectives via pair_coverage to get
-    #            their actual group_count, filter by MIN_PERSP_CARD.
-    #   Sort   — rank survivors by group_count descending.  Higher group
-    #            count = more expensive GROUP BY for ELK/Flink = clearest
-    #            demonstration of SIESTA's advantage.
-    #   Slice  — keep only the top `top_perspectives` survivors.
-    #   Pass 2 — load traces once, sample workloads for selected perspectives.
-    print(f"\n  Phase 4: Probing {len(perspectives)} candidate perspectives ...")
-    candidates: list[tuple[list[str], int]] = []   # (gk, group_count)
+    rec.emit("dataset", path=str(dataset_path), log_name=log_name,
+             activities=activities, perspectives=persp_keys,
+             case_gk=case_gk, alt_gk=alt_gk,
+             fmt=fmt, n_activities=len(activities))
 
-    for gk in perspectives:
-        pkey = gk[0]
-        try:
-            cov = fetch_pair_coverage(log_name, gk, activities=schema.activities)
-        except Exception as exc:
-            print(f"    [{pkey}] pair_coverage failed: {exc}"); continue
-        gc = cov.get("group_count", 0)
-        if gc < MIN_PERSP_CARD:
-            print(f"    [{pkey}] SKIP  gc={gc} < {MIN_PERSP_CARD}")
-        else:
-            print(f"    [{pkey}] OK    gc={gc}")
-            candidates.append((gk, gc))
-
-    if not candidates:
-        print("  ABORT: no perspectives passed MIN_PERSP_CARD filter."); return
-
-    # Sort by group_count descending and take the top N
-    candidates.sort(key=lambda x: x[1], reverse=True)
-    selected = candidates[:top_perspectives]
-    print(f"\n  Selected top {len(selected)} perspective(s) by group_count:")
-    for gk, gc in selected:
-        print(f"    {gk[0]}  (group_count={gc})")
-
-    # Load traces once, reused across all perspectives
-    traces = _load_traces(dataset_path)
-    all_workloads: dict[tuple, dict[str, list[dict]]] = {}
-
-    for gk, gc in selected:
-        pkey = gk[0]
-        rec.emit("perspective", log_name=log_name, perspective=pkey, group_count=gc)
-        wls = sample_workload_for_perspective(
-            traces, log_name, pkey, schema,
-            max_length=max_length,
+    # ── ELK setup ─────────────────────────────────────────────────────
+    elk_available = (not skip_elk) and _elk_reachable()
+    if elk_available:
+        print("\n  Setting up ELK index ...")
+        _elk_create_index(ELK_INDEX)
+        n_elk = _elk_index_events(dataset_path, ELK_INDEX)
+        # Re-enable refresh.
+        requests.put(
+            f"{ELK_ENDPOINT}/{ELK_INDEX}/_settings",
+            json={"settings": {"refresh_interval": "1s"}},
+            timeout=10,
         )
-        total_q = sum(len(wl) for wl in wls.values())
-        for cat, ql in wls.items():
-            print(f"      [{pkey}] {cat}: {len(ql)} queries")
-        if total_q > 0:
-            all_workloads[tuple(gk)] = wls
+        requests.post(f"{ELK_ENDPOINT}/{ELK_INDEX}/_refresh", timeout=30)
+        print(f"  ELK: indexed {n_elk} events")
+        rec.emit("elk_setup", n_events=n_elk, index=ELK_INDEX)
+    elif not skip_elk:
+        print("  [SKIP] ELK not reachable")
 
-    if not all_workloads:
-        print("  ABORT: no valid perspectives after filtering."); return
+    # ── Per-perspective loop ──────────────────────────────────────────
+    for persp_label, gk in perspectives:
+        print(f"\n  ── Perspective: {persp_label} ({gk}) ──")
 
-    rec.emit("dataset", log_name=log_name, path=str(dataset_path),
-             perspectives=[list(k) for k in all_workloads],
-             activities=schema.activities[:20])
+        # Build chains from pair coverage.
+        # group_key for sampling: "trace_id" for case perspective,
+        # else the attribute key itself.
+        sample_key = "trace_id" if persp_label == "case" else gk[0]
+        chains = sample_chains_from_traces(
+            dataset_path, sample_key,
+            target_len=TARGET_CHAIN_LEN,
+            min_len=MIN_CHAIN_LEN,
+            n_chains=N_QUERIES_PER_CAT,
+        )
+        if not chains:
+            print(f"    No chains of length >= {MIN_CHAIN_LEN} found, skipping.")
+            continue
 
-    # ── Phase 5: Warm up ALL perspectives before any timing ───────────
-    # All three categories benefit from warm-up:
-    #   structural — multi-activity chains answered by the native chain join
-    #                over PERSISTENT consecutive pair tables (no CEP).
-    #   attribute  — constraints pushed down as Spark column predicates, so
-    #                single-pair / chain patterns also skip CEP.
-    #   regex      — Kleene closure still needs the CEP engine, but warming the
-    #                constituent pairs lets CEP read them from the index instead
-    #                of cold-scanning the SequenceTable.
-    warmup_all_perspectives(all_workloads)
+        # chains are windows of event dicts; derive plain activity chains.
+        windows = chains
+        act_chains = [[e["activity"] for e in w] for w in windows]
 
-    # ── Phase 6: Timed benchmark per perspective ──────────────────────
-    for gk_tuple, workloads in all_workloads.items():
-        pkey = gk_tuple[0]
-        print(f"\n{'─' * 64}")
-        print(f"  Perspective: {pkey}")
-        print(f"{'─' * 64}")
+        print(f"    Built {len(act_chains)} chains: lengths {[len(c) for c in act_chains]}")
 
-        for category, workload in workloads.items():
-            if not workload:
+        # ── Warm-up all sub-pairs ─────────────────────────────────────
+        # Collect ALL ordered pairs (i<j) across all chains — Algorithm 3
+        # intersects every ordered pair of the pattern, so all must be
+        # promoted before measurement.  Dedupe across chains.
+        all_pairs_seen: set[tuple[str, str]] = set()
+        for chain in act_chains:
+            all_pairs_seen.update(_chain_all_pairs(chain))
+
+        print(f"    Warming up {len(all_pairs_seen)} unique ordered pairs "
+              f"(reps={WARMUP_REPS}) ...")
+        t_warmup = time.perf_counter()
+        total_warmed = warmup_pairs(log_name, all_pairs_seen, gk,
+                                    reps=WARMUP_REPS)
+
+        print(f"    Polling promotions (budget {PROMOTION_BUDGET_S}s) ...")
+        tier_counts = wait_for_promotions(
+            log_name, all_pairs_seen, gk,
+        )
+        warmup_wall = time.perf_counter() - t_warmup
+        print(f"    Warm-up done: {total_warmed} queries, "
+              f"{len(all_pairs_seen)} unique pairs, {warmup_wall:.0f}s, "
+              f"tiers={tier_counts}")
+        rec.emit("warmup_done", perspective=persp_label,
+                 n_pairs_warmed=len(all_pairs_seen),
+                 n_queries=total_warmed, wall_s=warmup_wall,
+                 tier_counts=tier_counts)
+
+        # ── Build queries ─────────────────────────────────────────────
+        queries: list[dict] = []
+        qid_counter = itertools.count(1)
+
+        persp_attr = gk[0] if persp_label != "case" else None
+        for ci, window in enumerate(windows):
+            chain = act_chains[ci]
+            # Structural query.
+            struct_pat = " ".join(quote_label(a) for a in chain)
+            total, pf_err = preflight_query(log_name, struct_pat, gk)
+            if pf_err is not None:
+                print(f"    [preflight] structural chain {ci} FAILED "
+                      f"({pf_err}) — raise PREFLIGHT_TIMEOUT_S or check "
+                      f"promotion state; skipping")
+                continue
+            if total == 0:
+                print(f"    [preflight] structural chain {ci} has 0 results, "
+                      f"skipping — check indexing lookback λ vs window span")
                 continue
 
-            for q in workload:
-                rec.emit("workload_query", log_name=log_name,
-                         perspective=pkey, category=category,
-                         qid=q["id"], pattern=q["pattern"],
-                         grouping_keys=q["grouping_keys"],
-                         pattern_length=q.get("pattern_length"),
-                         tags=q.get("tags", []),
-                         siesta_total=q.get("siesta_total", 0))
+            qid = f"S{next(qid_counter)}"
+            queries.append({
+                "qid":         qid,
+                "pattern":     struct_pat,
+                "category":    "structural",
+                "chain":       chain,
+                "constraints": {},
+                "perspective": persp_label,
+            })
+            rec.emit("query_def", qid=qid, pattern=struct_pat,
+                     perspective=persp_label, category="structural",
+                     chain_len=len(chain),
+                     chain_pairs=_chain_sub_pairs(chain),
+                     preflight_total=total)
 
-            # SIESTA: all three categories are timed.
-            #   structural / attribute → native chain join + attribute pushdown
-            #     (skip CEP); regex → CEP over index-pruned constituent pairs.
-            run_siesta(rec, category, workload, log_name)
+            # Attribute-aware query — constraint values from the window's
+            # own boundary events (guaranteed satisfiable).
+            attr_pat, constraints = _build_attr_pattern(window, persp_attr)
+            if attr_pat:
+                total_a, pf_err_a = preflight_query(log_name, attr_pat, gk)
+                if pf_err_a is not None:
+                    print(f"    [preflight] attr chain {ci} FAILED "
+                          f"({pf_err_a}), skipping attr variant")
+                elif total_a > 0:
+                    qid_a = f"A{next(qid_counter)}"
+                    queries.append({
+                        "qid":         qid_a,
+                        "pattern":     attr_pat,
+                        "category":    "attribute_aware",
+                        "chain":       chain,
+                        "constraints": constraints,
+                        "perspective": persp_label,
+                    })
+                    rec.emit("query_def", qid=qid_a, pattern=attr_pat,
+                             perspective=persp_label, category="attribute_aware",
+                             chain_len=len(chain),
+                             constraints={str(k): list(v) for k, v in constraints.items()},
+                             preflight_total=total_a)
+                else:
+                    print(f"    [preflight] attr chain {ci} has 0 results, skipping attr variant")
 
-            # ELK: cannot express Kleene operators, so it skips regex.
-            if not skip_elk and category != "regex":
-                run_elk(rec, category, workload, log_name, elk_index, pkey)
+        if not queries:
+            print(f"    No valid queries for perspective {persp_label}")
+            continue
 
-            # Flink: all categories including regex.
-            if not skip_mr and flink_session:
-                run_match_recognize(rec, category, workload, log_name,
-                                    flink_session, flink_table, pkey)
+        print(f"    Queries: {len(queries)} "
+              f"(structural={sum(1 for q in queries if q['category']=='structural')}, "
+              f"attr_aware={sum(1 for q in queries if q['category']=='attribute_aware')})")
 
-    print(f"\n  Results: {rec.path}")
+        # ── Measure SIESTA ────────────────────────────────────────────
+        print(f"\n    ── SIESTA (adaptive warm) ──")
+        for q in queries:
+            chain = q["chain"]
+            n_distinct = len(set(chain))
+            n_repeated = len(chain) - n_distinct
+            try:
+                lat, total, resp_body = measure_siesta(log_name, q["pattern"], gk)
+                pair_tiers = resp_body.get("pair_status_after", {})
+                tier_summary = {}
+                for st in pair_tiers.values():
+                    tier_summary[st] = tier_summary.get(st, 0) + 1
+                rec.emit("query", system="siesta",
+                         perspective=q["perspective"],
+                         category=q["category"],
+                         qid=q["qid"], pattern=q["pattern"],
+                         latency_s=lat, total=total,
+                         n_distinct_acts=n_distinct,
+                         n_repeated_acts=n_repeated,
+                         pair_tiers=tier_summary,
+                         log_name=log_name)
+                print(f"      {q['qid']:6s} {q['category']:16s} "
+                      f"len={len(chain):2d}  distinct={n_distinct}  "
+                      f"repeated={n_repeated}  {lat:.3f}s  total={total}  "
+                      f"tiers={tier_summary}")
+            except Exception as exc:
+                rec.emit("query_error", system="siesta",
+                         qid=q["qid"], error=str(exc),
+                         log_name=log_name)
+                print(f"      {q['qid']:6s} ERROR: {exc}")
+
+        # ── Measure ELK (end-to-end: retrieve + verify ordering) ─────
+        if elk_available:
+            elk_persp = _elk_perspective_key(gk, fmt)
+            print(f"\n    ── ELK (retrieve+verify, perspective={elk_persp}) ──")
+            for q in queries:
+                try:
+                    lats, total, n_ev = [], 0, 0
+                    for _ in range(MEASURE_REPS):
+                        lat, total, n_ev = _elk_detect_verify(
+                            q["chain"], q["constraints"], elk_persp,
+                        )
+                        lats.append(lat)
+                    lat = statistics.median(lats)
+                    rec.emit("query", system="elk",
+                             perspective=q["perspective"],
+                             category=q["category"],
+                             qid=q["qid"], pattern=q["pattern"],
+                             latency_s=lat, total=total,
+                             n_events_retrieved=n_ev,
+                             log_name=log_name)
+                    print(f"      {q['qid']:6s} {q['category']:16s} "
+                          f"len={len(q['chain']):2d}  {lat:.3f}s  "
+                          f"total={total}  (retrieved {n_ev} events)")
+                except Exception as exc:
+                    rec.emit("query_error", system="elk",
+                             qid=q["qid"], error=str(exc),
+                             log_name=log_name)
+                    print(f"      {q['qid']:6s} ERROR: {exc}")
+
+    print(f"\n  Results → {rec.path}")
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+# ---------------------------------------------------------------------------
 # Main
-# ═══════════════════════════════════════════════════════════════════════════
+# ---------------------------------------------------------------------------
 
 def main() -> None:
+    global TARGET_CHAIN_LEN, MIN_CHAIN_LEN, PROMOTION_SLEEP_S
+    global N_QUERIES_PER_CAT, WARMUP_REPS
+
     ap = argparse.ArgumentParser(
-        description=(
-            "Experiment 6.4.1 — Competitive comparison "
-            "(SIESTA adaptive warm vs ELK vs Flink MATCH_RECOGNIZE) "
-            "on multiperspective queries with attribute constraints and regex."
-        ),
+        description="Experiment 6.4.1 — Competitive latency benchmark.",
     )
-    ds = ap.add_mutually_exclusive_group()
-    ds.add_argument("--dataset")
-    ds.add_argument("--datasets-dir", type=Path)
-    ap.add_argument("--log-name", default=None)
-    ap.add_argument("--max-length", type=int, default=5)
-    ap.add_argument(
-        "--max-perspectives", type=int, default=8,
-        help=(
-            "How many perspectives to probe from discover_schema via pair_coverage. "
-            "Acts as the candidate pool. Default 8."
-        ),
-    )
-    ap.add_argument(
-        "--top-perspectives", type=int, default=2,
-        help=(
-            "From the probed candidates, keep only the top N by group_count "
-            "descending. Higher group_count = more expensive GROUP BY for "
-            "ELK/Flink = clearest competitive advantage for SIESTA. Default 2."
-        ),
-    )
-    ap.add_argument("--skip-elk", action="store_true")
-    ap.add_argument("--skip-mr",  action="store_true")
-    ap.add_argument(
-        "--flink-csv-dir",
-        default="./flink_data",
-        help=(
-            "Host-side directory where this script writes Flink CSV files. "
-            "Must be the host path of the volume mounted into the Flink containers. "
-            "Example: /home/user/project/tests/eval/flink_data"
-        ),
-    )
-    ap.add_argument(
-        "--flink-csv-container-dir",
-        default="/opt/flink/flink_data",
-        help=(
-            "Container-side path where Flink sees the CSV files (the other end "
-            "of the volume mount used in docker-compose-flink.yml). "
-            "This is the path written into the CREATE TABLE DDL. "
-            "Default matches the docker-compose volume: /opt/flink/flink_data"
-        ),
-    )
+    ap.add_argument("--dataset", default=None,
+                    help="Path to dataset (CSV or XES).")
+    ap.add_argument("--log-name", default=None,
+                    help="Log name for API calls.")
+    ap.add_argument("--datasets-dir", default=None,
+                    help="Run on all CSV/XES files in this directory.")
+    ap.add_argument("--skip-elk", action="store_true",
+                    help="Skip ELK baseline.")
+    ap.add_argument("--target-len", type=int, default=TARGET_CHAIN_LEN,
+                    help=f"Target pattern length (default {TARGET_CHAIN_LEN}).")
+    ap.add_argument("--min-len", type=int, default=MIN_CHAIN_LEN,
+                    help=f"Min pattern length (default {MIN_CHAIN_LEN}).")
+    ap.add_argument("--promotion-sleep", type=int, default=PROMOTION_SLEEP_S,
+                    help=f"Seconds to wait after warm-up (default {PROMOTION_SLEEP_S}).")
+    ap.add_argument("--n-chains", type=int, default=N_QUERIES_PER_CAT,
+                    help=f"Chains (queries) per perspective "
+                         f"(default {N_QUERIES_PER_CAT}).  NB: the "
+                         f"sampler takes one window per group, so the "
+                         f"effective count is min(n, #groups).")
+    ap.add_argument("--warmup-reps", type=int, default=2,
+                    help="Warm-up repetitions per pair (default 2; "
+                         "with min_query_count=1 a single rep makes a "
+                         "pair eligible — promotion completion is "
+                         "ensured by polling, not by reps).")
     args = ap.parse_args()
+
+    log_tag = f"competitive_{args.log_name or 'multi'}"
+    log_path = _setup_tee(log_tag)
+    print(f"Output log: {log_path}", flush=True)
+
+    TARGET_CHAIN_LEN  = args.target_len
+    MIN_CHAIN_LEN     = args.min_len
+    PROMOTION_SLEEP_S = args.promotion_sleep
+    N_QUERIES_PER_CAT = args.n_chains
+    WARMUP_REPS       = args.warmup_reps
 
     health_check()
 
-
     if args.datasets_dir:
-        specs = [(p, p.stem) for p in sorted(args.datasets_dir.iterdir())
-                 if p.suffix.lower() in _LOG_EXTS]
+        ds_dir = Path(args.datasets_dir)
+        for p in sorted(ds_dir.iterdir()):
+            if p.suffix.lower() in _LOG_EXTS and p.is_file():
+                ln = p.stem.replace(" ", "_").lower()
+                try:
+                    run_dataset(p, ln, skip_elk=args.skip_elk)
+                except Exception as exc:
+                    print(f"  FAILED: {exc}")
     else:
         spec = resolve_dataset(args.dataset, args.log_name)
-        specs = [(spec.path, spec.log_name)]
-
-    for path, name in specs:
-        try:
-            run_dataset(
-                path, name,
-                max_length=args.max_length,
-                skip_elk=args.skip_elk,
-                skip_mr=args.skip_mr,
-                flink_csv_dir=args.flink_csv_dir,
-                flink_csv_container_dir=args.flink_csv_container_dir,
-                max_perspectives=args.max_perspectives,
-                top_perspectives=args.top_perspectives,
-            )
-        except Exception as exc:
-            import traceback
-            print(f"\n[ERROR] {name}: {exc}")
-            traceback.print_exc()
+        run_dataset(spec.path, spec.log_name, skip_elk=args.skip_elk)
 
 
 if __name__ == "__main__":
