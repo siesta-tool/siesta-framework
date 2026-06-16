@@ -1,10 +1,10 @@
 {
-  "log_name": "bpic2017",
-  "log_path": "datasets/bpic2017.csv",
+  "log_name": "test",
+  "log_path": "datasets/test.csv",
   "storage_namespace": "siesta",
   "overwrite_data": true,
   "enable_streaming": false,
-  "lookback": "3000000d",
+  "lookback": "30d",
   "kafka_topic": "example_log",
   "field_mappings": {
     "xes": {

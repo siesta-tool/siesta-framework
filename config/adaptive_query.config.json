@@ -7,6 +7,6 @@
   },
   "support_threshold": 0.0,
   "grouping_keys": ["resource"],
-  "lookback": "3000000d",
+  "lookback": "30d",
   "lookback_mode": "time"
 }
