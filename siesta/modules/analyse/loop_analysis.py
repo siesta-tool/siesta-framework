@@ -1079,6 +1079,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     print(f"Loading event log from: {args.log}")
     log_df = pd.read_csv(args.log)
     log_df.columns = log_df.columns.str.strip()
+    log_df[args.trace_col] = log_df[args.trace_col]
+    log_df[args.activity_col] = log_df[args.activity_col].astype(str)
     print(f"  {len(log_df):,} events, {log_df[args.trace_col].nunique():,} traces loaded.")
 
     result = run_loop_analysis(

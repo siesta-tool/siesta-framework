@@ -399,8 +399,8 @@ def plot_distributions(
     )
 
     for ax, data_groups, ylabel, yscale in [
-        (ax_size, size_groups, "Events per trace",      "linear"),
-        (ax_dur,  dur_groups,  "Duration (working h)",  "linear"),
+        (ax_size, size_groups, "Events per trace",      "log"),
+        (ax_dur,  dur_groups,  "Duration (working h)",  "log"),
     ]:
         _violin_or_strip(ax, data_groups, positions, colors, min_n)
 
@@ -484,6 +484,10 @@ def run_trace_plots(
     # Build trace labels (from full log, before activity filter)
     sep_key    = separating_key    or (log_df.columns[0] if not separating_key else None)
     sep_groups = separating_groups or []
+
+    # Default sep_key to activity_col when groups are specified but key is omitted
+    if not separating_key and sep_groups:
+        separating_key = activity_col
 
     if separating_key:
         trace_labels = build_trace_labels(log_df, separating_key, sep_groups, trace_col)
