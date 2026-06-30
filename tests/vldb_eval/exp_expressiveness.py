@@ -54,10 +54,10 @@ Records:
 
 Running
 -------
-    python -m tests.eval.exp_expressiveness \\
+    python -m tests.vldb_eval.exp_expressiveness \\
         --dataset /mnt/datasets/eval_synthetic.csv --log-name eval_synthetic
 
-    python -m tests.eval.exp_expressiveness \\
+    python -m tests.vldb_eval.exp_expressiveness \\
         --dataset /mnt/datasets/bpic_2017.xes --log-name bpic_2017
 """
 
@@ -76,7 +76,7 @@ from urllib.parse import urljoin
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tests.eval.eval_common import (
+from tests.vldb_eval.eval_common import (
     API_BASE, API_TIMEOUT_S, CONFIG_DIR, RESULTS_DIR,
     QUERY_PREFIX,
     Recorder, health_check,
@@ -85,7 +85,7 @@ from tests.eval.eval_common import (
     discover_schema, resolve_dataset,
     quote_label,
 )
-from tests.eval.workload import fetch_pair_coverage
+from tests.vldb_eval.workload import fetch_pair_coverage
 
 # ---------------------------------------------------------------------------
 # Configuration

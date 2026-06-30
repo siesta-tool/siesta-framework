@@ -97,11 +97,11 @@ Record types
 Running
 -------
 Single dataset:
-    python -m tests.eval.exp_skew_vs_uniform_latency \\
+    python -m tests.vldb_eval.exp_skew_vs_uniform_latency \\
         --dataset /mnt/datasets/bpic_2017.xes --log-name bpic_2017
 
 All datasets in a directory:
-    python -m tests.eval.exp_skew_vs_uniform_latency \\
+    python -m tests.vldb_eval.exp_skew_vs_uniform_latency \\
         --datasets-dir /mnt/datasets
 
 Key CLI options:
@@ -122,7 +122,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tests.eval.eval_common import (
+from tests.vldb_eval.eval_common import (
     CONFIG_DIR, RESULTS_DIR,
     Recorder, health_check,
     ingest_adaptive,
@@ -130,7 +130,7 @@ from tests.eval.eval_common import (
     resolve_dataset,
     quote_label,
 )
-from tests.eval.workload import (
+from tests.vldb_eval.workload import (
     build_workloads,
     fetch_pair_coverage,
 )

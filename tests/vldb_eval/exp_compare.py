@@ -271,8 +271,6 @@ def siesta_create_index(xes_file_path):
         # Open file as binary stream for multipart upload
         with open(xes_file_path, "rb") as f:
             
-            # Note: You may need to change "config" and "file" below if the Siesta API 
-            # explicitly expects different form-data key names.
             data = {
                 "index_config": json.dumps(payload) 
             }
@@ -533,7 +531,7 @@ def elk_detect(pattern):
             break
 
     matches = 0
-    matching_traces = []  # <-- CHANGE 1: Initialize a list to hold valid trace_ids
+    matching_traces = []  
     for trace_id, events in groups.items():
         match_found = False
 

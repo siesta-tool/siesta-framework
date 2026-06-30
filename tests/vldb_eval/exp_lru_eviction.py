@@ -68,7 +68,7 @@ Record types:
 
 Usage
 -----
-    python -m tests.eval.exp_lru_eviction \\
+    python -m tests.vldb_eval.exp_lru_eviction \\
         --dataset /mnt/datasets/bpic2017.xes --log-name bpic2017
 
 Options
@@ -92,7 +92,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tests.eval.eval_common import (
+from tests.vldb_eval.eval_common import (
     CONFIG_DIR,
     RESULTS_DIR,
     Recorder, health_check,
@@ -100,7 +100,7 @@ from tests.eval.eval_common import (
     timed_query,
     resolve_dataset,
 )
-from tests.eval.workload import fetch_pair_coverage, quote_label
+from tests.vldb_eval.workload import fetch_pair_coverage, quote_label
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +153,7 @@ def select_perspective(
         return gk, len(cov.get("pairs", []))
 
     try:
-        from tests.eval.eval_common import discover_schema
+        from tests.vldb_eval.eval_common import discover_schema
         schema       = discover_schema(dataset_path)
         perspectives = [[k] for k in schema.perspective_keys] if schema.perspective_keys else []
     except (ImportError, AttributeError):

@@ -54,7 +54,7 @@ import itertools
 from dataclasses import dataclass
 from typing import Sequence
 
-from tests.eval.eval_common import (
+from tests.vldb_eval.eval_common import (
     API_BASE,
     QUERY_PREFIX,
     API_TIMEOUT_S,

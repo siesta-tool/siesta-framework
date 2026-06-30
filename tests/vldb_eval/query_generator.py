@@ -19,7 +19,7 @@ for cross-activity equality.  There is no separate `constraints` field.
 
 CLI usage
 ---------
-    python -m tests.eval.query_generator --type skewed --count 100 \\
+    python -m tests.vldb_eval.query_generator --type skewed --count 100 \\
         --hot-ratio 0.8 --dataset datasets/test.xes --out workload.json
 
 Activities, perspectives, and attribute values are discovered from the
@@ -37,7 +37,7 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
-from tests.eval.eval_common import (
+from tests.vldb_eval.eval_common import (
     DatasetSchema,
     discover_schema,
     quote_label,

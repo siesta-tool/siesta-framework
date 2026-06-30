@@ -64,14 +64,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tests.eval.eval_common import (
+from tests.vldb_eval.eval_common import (
     CONFIG_DIR,
     Recorder, health_check,
     ingest_eager,
     timed_query,
     resolve_dataset,
 )
-from tests.eval.workload import build_workloads, build_shared_structure_workload
+from tests.vldb_eval.workload import build_workloads, build_shared_structure_workload
 
 
 CONFIG = CONFIG_DIR / "adaptive_index.config.json"

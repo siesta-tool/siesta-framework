@@ -1,6 +1,4 @@
 """
-exp_multiperspective.py — Reviewer W3 response experiment.
-
 Demonstrates that the same pattern query, evaluated under different
 analytical perspectives simultaneously maintained by the adaptive index,
 produces meaningfully different results — grounding the multiperspective
@@ -27,19 +25,19 @@ Output files
 Usage
 -----
   # Log already ingested:
-  python -m tests.eval.exp_multiperspective \\
+  python -m tests.vldb_eval.exp_multiperspective \\
       --log-name bpic_2017 \\
       --dataset datasets/BPIC17.xes
 
   # Ingest first, then probe:
-  python -m tests.eval.exp_multiperspective \\
+  python -m tests.vldb_eval.exp_multiperspective \\
       --log-name bpic_2017 \\
       --dataset datasets/BPIC17.xes \\
       --ingest \\
       --config config/adaptive_index.config.json
 
   # Override probe budget:
-  python -m tests.eval.exp_multiperspective \\
+  python -m tests.vldb_eval.exp_multiperspective \\
       --log-name bpic_2017 \\
       --dataset datasets/BPIC17.xes \\
       --max-candidates 300 --top-k 8
@@ -61,7 +59,7 @@ _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
-from tests.eval.eval_common import (
+from tests.vldb_eval.eval_common import (
     API_BASE, QUERY_PREFIX, API_TIMEOUT_S,
     CONFIG_DIR, RESULTS_DIR,
     Recorder,
@@ -71,7 +69,7 @@ from tests.eval.eval_common import (
     discover_schema,
     quote_label,
 )
-from tests.eval.workload import fetch_pair_coverage
+from tests.vldb_eval.workload import fetch_pair_coverage
 
 
 # ---------------------------------------------------------------------------
@@ -462,8 +460,7 @@ def run(
 
 def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
-        description=("Multiperspective divergence experiment — "
-                     "reviewer W3 response."),
+        description=("Multiperspective divergence experiment"),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     ap.add_argument("--log-name",  required=True,

@@ -54,7 +54,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tests.eval.eval_common import (
+from tests.vldb_eval.eval_common import (
     API_BASE, API_TIMEOUT_S, EAGER_INDEXER,
     CONFIG_DIR, RESULTS_DIR,
     Recorder, health_check,
@@ -65,8 +65,8 @@ from tests.eval.eval_common import (
     quote_label,
     _guess_mime,
 )
-from tests.eval.workload import build_workloads, fetch_pair_coverage
-from tests.eval.batch_splitter import split_log
+from tests.vldb_eval.workload import build_workloads, fetch_pair_coverage
+from tests.vldb_eval.batch_splitter import split_log
 
 import requests
 from urllib.parse import urljoin

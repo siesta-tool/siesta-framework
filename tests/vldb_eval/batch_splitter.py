@@ -34,7 +34,7 @@ eval_common.
 
 Usage
 -----
-    from tests.eval.batch_splitter import split_log
+    from tests.vldb_eval.batch_splitter import split_log
 
     paths = split_log(
         src=Path("datasets/bpic_2017.xes"),
