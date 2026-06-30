@@ -1,0 +1,376 @@
+/home/balaktsis/Projects/siesta-framework/venv/lib/python3.14/site-packages/pm4py/utils.py:987: UserWarning: In the current version, the import/export operation uses `rustxes` by default for importing/exporting files faster. Please uninstall `rustxes` to revert the behavior.
+  warnings.warn("In the current version, the import/export operation uses `rustxes` by default for importing/exporting files faster. Please uninstall `rustxes` to revert the behavior.")
+
+============================================================
+  Step 1: Load dataset  [bpic2017.xes]
+============================================================
+  1,202,267 events  |  31,509 cases
+
+============================================================
+  Step 2: Discover grouping perspectives
+============================================================
+  Auto-discovered 5 grouping(s): ['case_id', 'EventOrigin', 'Action', 'lifecycle:transition', 'org:resource']
+
+============================================================
+  Step 3: Write minimal CSV → /tmp/mr_exp_events.csv
+============================================================
+  Keeping 7 columns: ['case_id', 'activity', 'event_ts', 'EventOrigin', 'Action', 'lifecycle:transition', 'org:resource']
+  SQL columns: ['pos', 'case_id', 'activity', 'event_ts', 'EventOrigin', 'Action', 'lifecycle_transition', 'org_resource']
+[docker] Found 3 Flink container(s): ['siesta_flink_tm', 'siesta_flink_gw', 'siesta_flink_jm']
+[docker cp] mr_exp_events.csv → siesta_flink_tm:/tmp/mr_data/mr_exp_events.csv
+[docker cp] mr_exp_events.csv → siesta_flink_gw:/tmp/mr_data/mr_exp_events.csv
+[docker cp] mr_exp_events.csv → siesta_flink_jm:/tmp/mr_data/mr_exp_events.csv
+[verify] siesta_flink_tm dir listing (/tmp/mr_data):
+         total 112M
+         -rw-rw-r-- 1 1000 1000 112M Jun 26 18:45 mr_exp_events.csv
+[verify] First 3 data lines:
+         0,Application_652823628,A_Create Application,1451641875304,Application,Created,complete,User_1
+         1,Application_652823628,A_Submitted,1451641875352,Application,statechange,complete,User_1
+         2,Application_652823628,W_Handle leads,1451641875774,Workflow,Created,schedule,User_1
+  In-container path: /tmp/mr_data
+
+============================================================
+  Step 4: Connect to SQL Gateway  [http://localhost:8083]
+============================================================
+  Session handle: 88931a7f-ab3f-4596-a922-418531808292
+  Session configured (batch mode, parallelism=4)
+
+============================================================
+  Step 5: Register events table (DDL)
+============================================================
+  DDL:
+CREATE TABLE IF NOT EXISTS events_raw (
+    pos       BIGINT,
+    case_id  STRING,
+    activity  STRING,
+    event_ts  BIGINT,
+    EventOrigin  STRING,
+    Action  STRING,
+    lifecycle_transition  STRING,
+    org_resource  STRING
+) WITH (
+    'connector' = 'filesystem',
+    'path' = 'file:///tmp/mr_data',
+    'format' = 'csv'
+)
+  VIEW:
+CREATE VIEW events AS
+    SELECT pos, case_id, activity, event_ts, EventOrigin, Action, lifecycle_transition, org_resource,
+           TO_TIMESTAMP_LTZ(event_ts, 3) AS ts
+    FROM events_raw
+  Done in 4.0s
+
+============================================================
+  Step 6: Verify events table contents
+============================================================
+  events table row count: 1,202,267
+  Sample rows:
+    {'pos': 0, 'case_id': 'Application_652823628', 'activity': 'A_Create Application', 'event_ts': 1451641875304, 'EventOrigin': 'Application', 'Action': 'Created', 'lifecycle_transition': 'complete', 'org_resource': 'User_1', 'ts': '2016-01-01T09:51:15.304Z'}
+    {'pos': 1, 'case_id': 'Application_652823628', 'activity': 'A_Submitted', 'event_ts': 1451641875352, 'EventOrigin': 'Application', 'Action': 'statechange', 'lifecycle_transition': 'complete', 'org_resource': 'User_1', 'ts': '2016-01-01T09:51:15.352Z'}
+    {'pos': 2, 'case_id': 'Application_652823628', 'activity': 'W_Handle leads', 'event_ts': 1451641875774, 'EventOrigin': 'Workflow', 'Action': 'Created', 'lifecycle_transition': 'schedule', 'org_resource': 'User_1', 'ts': '2016-01-01T09:51:15.774Z'}
+    {'pos': 3, 'case_id': 'Application_652823628', 'activity': 'W_Handle leads', 'event_ts': 1451641956392, 'EventOrigin': 'Workflow', 'Action': 'Deleted', 'lifecycle_transition': 'withdraw', 'org_resource': 'User_1', 'ts': '2016-01-01T09:52:36.392Z'}
+    {'pos': 4, 'case_id': 'Application_652823628', 'activity': 'W_Complete application', 'event_ts': 1451641956403, 'EventOrigin': 'Workflow', 'Action': 'Created', 'lifecycle_transition': 'schedule', 'org_resource': 'User_1', 'ts': '2016-01-01T09:52:36.403Z'}
+
+============================================================
+  Step 7: Diagnostic — column contents in Flink
+============================================================
+  Top 10 activity values in Flink:
+    {'activity': 'W_Validate application', 'cnt': 209496}
+    {'activity': 'W_Call after offers', 'cnt': 191092}
+    {'activity': 'W_Call incomplete files', 'cnt': 168529}
+    {'activity': 'W_Complete application', 'cnt': 148900}
+    {'activity': 'W_Handle leads', 'cnt': 47264}
+    {'activity': 'O_Created', 'cnt': 42995}
+    {'activity': 'O_Create Offer', 'cnt': 42995}
+    {'activity': 'O_Sent (mail and online)', 'cnt': 39707}
+    {'activity': 'A_Validating', 'cnt': 38816}
+    {'activity': 'A_Concept', 'cnt': 31509}
+  Top 5 case_id values in Flink:
+    {'case_id': 'Application_2037628374', 'cnt': 180}
+    {'case_id': 'Application_1219772874', 'cnt': 180}
+    {'case_id': 'Application_1359726788', 'cnt': 159}
+    {'case_id': 'Application_1875888758', 'cnt': 156}
+    {'case_id': 'Application_1387439149', 'cnt': 154}
+
+  Top 10 activity values in Pandas:
+    'W_Validate application': 209496
+    'W_Call after offers': 191092
+    'W_Call incomplete files': 168529
+    'W_Complete application': 148900
+    'W_Handle leads': 47264
+    'O_Create Offer': 42995
+    'O_Created': 42995
+    'O_Sent (mail and online)': 39707
+    'A_Validating': 38816
+    'A_Create Application': 31509
+
+  WHERE activity = 'W_Validate application': [{'n': 209496}]
+
+============================================================
+  Step 8: Run experiment grid  [5 grouping(s) × 8 lengths × 5 queries]
+============================================================
+
+  ┌─ Grouping 1/5: 'case_id'  (31,509 distinct values)
+  │  len=8  running 5 queries
+  │    [1/5] [(W_Shortened completion  | A_Create Application)* W_Short...]  
+      [Matches Preview] Found 70 total:
+→ 139.0s  matches=70  groups=5  FINISHED
+  │    [2/5] [(W_Complete application | O_Returned) W_Call after offers...]  
+      [Matches Preview] Found 1116 total:
+→ 19.9s  matches=1116  groups=473  FINISHED
+  │    [3/5] [(O_Create Offer | A_Pending) (O_Created | A_Validating) (...]  
+      [Matches Preview] Found 14470 total:
+→ 234.2s  matches=14470  groups=8771  FINISHED
+  │    [4/5] [O_Sent (mail and online)+ O_Cancelled+ O_Cancelled+ (W_Ca...]  → 700.0s  matches=None  groups=None  TIMEOUT
+  │    [5/5] [(O_Cancelled | O_Created)* W_Call incomplete files W_Vali...]  → 700.2s  matches=0  groups=0  FINISHED
+  │  len=9  running 5 queries
+  │    [1/5] [O_Create Offer* (O_Created | O_Sent (mail and online))* (...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [2/5] [(W_Validate application | O_Accepted)+ (A_Validating | A_...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [3/5] [(W_Complete application | W_Call after offers)* (W_Call a...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [4/5] [(A_Incomplete | W_Handle leads)* (W_Call incomplete files...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [5/5] [W_Call after offers O_Create Offer+ O_Created* O_Sent (ma...]  → 700.1s  matches=0  groups=0  FINISHED
+  │  len=10  running 5 queries
+  │    [1/5] [A_Complete* (W_Call after offers | O_Created)+ O_Create O...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [2/5] [W_Call incomplete files* O_Create Offer+ O_Created+ O_Sen...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [3/5] [(W_Validate application | A_Accepted)+ W_Validate applica...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [4/5] [O_Sent (mail and online)* W_Call incomplete files* W_Call...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [5/5] [A_Concept* W_Complete application+ W_Complete application...]  → 700.1s  matches=0  groups=0  FINISHED
+  │  len=11  running 5 queries
+  │    [1/5] [W_Call after offers+ (W_Call after offers | O_Sent (onlin...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [2/5] [W_Complete application A_Accepted+ (O_Create Offer | A_Su...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [3/5] [O_Sent (mail and online)+ (O_Create Offer | W_Shortened c...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [4/5] [W_Handle leads* W_Complete application (A_Concept | O_Cre...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [5/5] [(O_Created | W_Complete application)+ O_Sent (mail and on...]  → 700.2s  matches=0  groups=0  FINISHED
+  │  len=12  running 5 queries
+  │    [1/5] [W_Call after offers* (W_Call after offers | O_Refused)+ (...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [2/5] [(A_Incomplete | A_Complete)+ W_Call incomplete files* W_C...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [3/5] [W_Complete application* (W_Complete application | O_Sent ...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [4/5] [(O_Returned | W_Assess potential fraud)* W_Validate appli...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [5/5] [W_Complete application W_Complete application+ W_Complete...]  → 700.2s  matches=0  groups=0  FINISHED
+  │  len=13  running 5 queries
+  │    [1/5] [W_Validate application+ (A_Validating | W_Shortened compl...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [2/5] [(W_Call incomplete files | A_Submitted)+ W_Call incomplet...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [3/5] [(A_Incomplete | A_Validating)+ (W_Call incomplete files |...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [4/5] [(O_Cancelled | A_Pending)+ W_Call after offers* (W_Valida...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [5/5] [W_Call after offers* (W_Call after offers | O_Sent (onlin...]  → 700.2s  matches=0  groups=0  FINISHED
+  │  len=14  running 5 queries
+  │    [1/5] [O_Created (O_Create Offer | O_Sent (mail and online))* (O...]  → 700.3s  matches=0  groups=0  FINISHED
+  │    [2/5] [W_Call incomplete files A_Incomplete (W_Call incomplete f...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [3/5] [O_Cancelled O_Create Offer O_Created+ O_Sent (online only...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [4/5] [(A_Complete | A_Denied)+ W_Shortened completion + (W_Call...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [5/5] [O_Create Offer+ (O_Created | A_Incomplete)+ O_Sent (mail ...]  → 700.2s  matches=0  groups=0  FINISHED
+  │  len=15  running 5 queries
+  │    [1/5] [(O_Create Offer | W_Personal Loan collection) O_Created* ...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [2/5] [(W_Shortened completion  | O_Accepted)* (A_Accepted | W_H...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [3/5] [O_Sent (mail and online)* (W_Complete application | O_Can...]  → X`
+  │    [4/5] [W_Call incomplete files W_Call incomplete files* (W_Call ...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [5/5] [A_Concept+ A_Accepted* W_Complete application+ (W_Complet...]  → 700.3s  matches=0  groups=0  FINISHED
+  └─ Grouping 1/5 complete
+
+  ┌─ Grouping 2/5: 'EventOrigin'  (3 distinct values)
+  │  len=8  running 5 queries
+  │    [1/5] [(O_Sent (mail and online) | O_Refused)* O_Returned+ (O_Ac...]  → 700.3s  matches=0  groups=0  FINISHED
+  │    [2/5] [(A_Validating | W_Call after offers)+ A_Incomplete+ (A_In...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [3/5] [(A_Validating | W_Call after offers)* (A_Accepted | W_Sho...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [4/5] [A_Validating+ (A_Validating | A_Cancelled)+ (A_Incomplete...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [5/5] [(W_Complete application | W_Call after offers)* W_Call af...]  → 700.1s  matches=0  groups=0  FINISHED
+  │  len=9  running 5 queries
+  │    [1/5] [W_Validate application* (W_Validate application | O_Retur...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [2/5] [O_Sent (mail and online) (O_Accepted | W_Call incomplete ...]  → 700.3s  matches=0  groups=0  FINISHED
+  │    [3/5] [W_Handle leads (W_Validate application | A_Pending)+ (W_H...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [4/5] [(A_Accepted | O_Accepted)* A_Complete* A_Validating* A_In...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [5/5] [A_Validating A_Complete+ (A_Accepted | A_Denied)* (A_Comp...]  → 700.2s  matches=0  groups=0  FINISHED
+  │  len=10  running 5 queries
+  │    [1/5] [W_Call incomplete files W_Call after offers+ W_Call incom...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [2/5] [(W_Call after offers | A_Denied)* (W_Validate application...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [3/5] [(A_Submitted | W_Shortened completion )+ (A_Accepted | W_...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [4/5] [(W_Validate application | W_Handle leads)* (W_Call incomp...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [5/5] [W_Validate application+ W_Handle leads* W_Complete applic...]  → 700.2s  matches=0  groups=0  FINISHED
+  │  len=11  running 5 queries
+  │    [1/5] [A_Pending A_Accepted* A_Accepted A_Validating* A_Pending*...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [2/5] [W_Call incomplete files W_Call incomplete files+ W_Call a...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [3/5] [W_Call incomplete files+ W_Call incomplete files* (W_Call...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [4/5] [(A_Incomplete | O_Cancelled)+ A_Complete A_Accepted* A_Co...]  → 700.1s  matches=0  groups=0  FINISHED
+  │    [5/5] [(W_Call after offers | W_Assess potential fraud) W_Call i...]  → 700.2s  matches=0  groups=0  FINISHED
+  │  len=12  running 5 queries
+  │    [1/5] [W_Call incomplete files+ (W_Handle leads | A_Submitted)* ...]  → 700.3s  matches=0  groups=0  FINISHED
+  │    [2/5] [(O_Create Offer | A_Cancelled)* (O_Created | W_Assess pot...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [3/5] [(W_Complete application | O_Refused) (W_Call after offers...]  → 700.2s  matches=0  groups=0  FINISHED
+  │    [4/5] [A_Concept+ (A_Accepted | O_Accepted)* A_Create Applicatio...]  → 700.3s  matches=0  groups=0  FINISHED
+  │    [5/5] [(W_Call after offers | W_Validate application) W_Handle l...]  → 700.2s  matches=0  groups=0  FINISHED
+  │  len=13  running 5 queries
+  │    [1/5] [(W_Call incomplete files | A_Pending)* (W_Complete applic...]  → 700.3s  matches=0  groups=0  FINISHED
+  │    [2/5] [W_Validate application* (W_Call after offers | W_Shortene...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [3/5] [O_Returned (O_Returned | W_Handle leads)* (O_Accepted | W...]  → 600.1s  matches=0  groups=0  FINISHED
+  │    [4/5] [(W_Validate application | A_Incomplete)* W_Call incomplet...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [5/5] [W_Call after offers* W_Handle leads* (W_Handle leads | A_...]  → 600.2s  matches=0  groups=0  FINISHED
+  │  len=14  running 5 queries
+  │    [1/5] [W_Validate application W_Call after offers W_Validate app...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [2/5] [(A_Pending | O_Cancelled) (A_Accepted | O_Accepted) A_Can...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [3/5] [(W_Validate application | A_Accepted) W_Call incomplete f...]  → 600.1s  matches=0  groups=0  FINISHED
+  │    [4/5] [(A_Incomplete | A_Denied) (A_Complete | A_Create Applicat...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [5/5] [W_Handle leads* W_Complete application+ (W_Complete appli...]  → 600.2s  matches=0  groups=0  FINISHED
+  │  len=15  running 5 queries
+  │    [1/5] [O_Sent (mail and online) (O_Sent (mail and online) | O_Ac...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [2/5] [W_Validate application* (W_Validate application | W_Compl...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [3/5] [(W_Validate application | O_Sent (online only))* W_Valida...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [4/5] [W_Call incomplete files+ (W_Validate application | O_Retu...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [5/5] [(A_Validating | A_Incomplete)+ A_Denied* (A_Incomplete | ...]  → 600.2s  matches=0  groups=0  FINISHED
+  └─ Grouping 2/5 complete
+
+  ┌─ Grouping 3/5: 'Action'  (5 distinct values)
+  │  len=8  running 5 queries
+  │    [1/5] [(W_Call incomplete files | O_Created)* W_Complete applica...]  → 600.1s  matches=0  groups=0  FINISHED
+  │    [2/5] [A_Validating* O_Returned (A_Incomplete | O_Created)* (O_A...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [3/5] [O_Create Offer* (W_Call after offers | A_Complete)+ W_Cal...]  → 600.1s  matches=0  groups=0  FINISHED
+  │    [4/5] [(O_Created | A_Create Application)* A_Validating+ (A_Acce...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [5/5] [A_Complete+ A_Incomplete+ (A_Submitted | W_Call after off...]  → 600.2s  matches=0  groups=0  FINISHED
+  │  len=9  running 5 queries
+  │    [1/5] [(A_Complete | O_Sent (online only))+ (O_Created | O_Cance...]  → 600.1s  matches=0  groups=0  FINISHED
+  │    [2/5] [O_Refused (A_Incomplete | O_Accepted)* O_Created* A_Accep...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [3/5] [A_Complete A_Concept* A_Validating* A_Concept+ (A_Accepte...]  → 600.1s  matches=0  groups=0  FINISHED
+  │    [4/5] [(W_Validate application | A_Submitted) (W_Call after offe...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [5/5] [(W_Call incomplete files | W_Validate application) W_Vali...]  → 600.2s  matches=0  groups=0  FINISHED
+  │  len=10  running 5 queries
+  │    [1/5] [(W_Complete application | A_Submitted)* W_Call incomplete...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [2/5] [A_Validating* (A_Accepted | A_Denied)* (O_Accepted | A_Co...]  → 600.1s  matches=0  groups=0  FINISHED
+  │    [3/5] [(A_Submitted | A_Cancelled)+ (A_Concept | A_Complete)* O_...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [4/5] [A_Complete+ (A_Accepted | W_Call incomplete files)+ O_Cre...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [5/5] [W_Validate application (W_Validate application | W_Comple...]  → 600.1s  matches=0  groups=0  FINISHED
+  │  len=11  running 5 queries
+  │    [1/5] [W_Call after offers+ (A_Create Application | W_Validate a...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [2/5] [(O_Create Offer | A_Incomplete)* (W_Call after offers | A...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [3/5] [(O_Created | W_Validate application) (A_Incomplete | A_Ca...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [4/5] [(W_Complete application | W_Validate application)+ (W_Com...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [5/5] [(W_Complete application | O_Cancelled)+ (W_Handle leads |...]  → 600.2s  matches=0  groups=0  FINISHED
+  │  len=12  running 5 queries
+  │    [1/5] [W_Call after offers (W_Validate application | A_Validatin...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [2/5] [(A_Accepted | O_Returned) (O_Accepted | A_Cancelled)+ A_P...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [3/5] [A_Validating* (A_Validating | W_Complete application) O_R...]  → 600.1s  matches=0  groups=0  FINISHED
+  │    [4/5] [W_Call after offers+ W_Call after offers W_Complete appli...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [5/5] [W_Validate application (W_Handle leads | A_Complete)+ (W_...]  → 600.2s  matches=0  groups=0  FINISHED
+  │  len=13  running 5 queries
+  │    [1/5] [(A_Incomplete | W_Handle leads)+ (A_Validating | A_Concep...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [2/5] [(W_Validate application | A_Denied)* (W_Call incomplete f...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [3/5] [W_Call after offers+ W_Call after offers (W_Call after of...]  → 600.1s  matches=0  groups=0  FINISHED
+  │    [4/5] [(W_Complete application | A_Validating) (W_Complete appli...]  → 600.1s  matches=0  groups=0  FINISHED
+  │    [5/5] [(W_Complete application | O_Sent (online only))+ (W_Valid...]  → 600.2s  matches=0  groups=0  FINISHED
+  │  len=14  running 5 queries
+  │    [1/5] [(W_Call after offers | A_Create Application)+ W_Call inco...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [2/5] [(W_Call after offers | A_Submitted)* W_Validate applicati...]  → 600.1s  matches=0  groups=0  FINISHED
+  │    [3/5] [(O_Sent (mail and online) | A_Accepted)+ (A_Complete | W_...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [4/5] [W_Complete application+ W_Validate application+ W_Call in...]  → 600.1s  matches=0  groups=0  FINISHED
+  │    [5/5] [W_Call incomplete files W_Call incomplete files (W_Call i...]  → 600.1s  matches=0  groups=0  FINISHED
+  │  len=15  running 5 queries
+  │    [1/5] [W_Validate application* W_Validate application (W_Validat...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [2/5] [W_Complete application W_Call incomplete files (W_Complet...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [3/5] [(W_Validate application | O_Accepted) (W_Validate applica...]  → 600.1s  matches=0  groups=0  FINISHED
+  │    [4/5] [A_Submitted (O_Created | A_Concept)* A_Accepted* (A_Conce...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [5/5] [A_Incomplete+ (A_Concept | W_Complete application) O_Crea...]  → 600.2s  matches=0  groups=0  FINISHED
+  └─ Grouping 3/5 complete
+
+  ┌─ Grouping 4/5: 'lifecycle:transition'  (7 distinct values)
+  │  len=8  running 5 queries
+  │    [1/5] [(O_Created | O_Sent (online only))* (O_Create Offer | O_C...]  → 600.1s  matches=0  groups=0  FINISHED
+  │    [2/5] [(A_Complete | W_Call after offers)+ A_Validating* A_Valid...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [3/5] [A_Incomplete+ A_Validating* A_Accepted* (W_Validate appli...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [4/5] [(W_Complete application | A_Concept)* W_Complete applicat...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [5/5] [(A_Create Application | A_Concept) A_Concept+ (O_Create O...]  → 600.1s  matches=0  groups=0  FINISHED
+  │  len=9  running 5 queries
+  │    [1/5] [W_Call after offers+ W_Call after offers (W_Validate appl...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [2/5] [A_Accepted (W_Call incomplete files | A_Validating)* A_Va...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [3/5] [(W_Call incomplete files | O_Created) W_Call after offers...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [4/5] [W_Validate application* W_Validate application* A_Incompl...]  → 600.1s  matches=0  groups=0  FINISHED
+  │    [5/5] [W_Call after offers* W_Complete application W_Call after ...]  → 600.2s  matches=0  groups=0  FINISHED
+  │  len=10  running 5 queries
+  │    [1/5] [(A_Complete | A_Validating)+ O_Create Offer+ (O_Created |...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [2/5] [W_Call incomplete files W_Validate application* W_Call in...]  → 600.1s  matches=0  groups=0  FINISHED
+  │    [3/5] [W_Call after offers+ W_Validate application* W_Complete a...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [4/5] [W_Validate application+ W_Call incomplete files (W_Call i...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [5/5] [(A_Incomplete | A_Denied)+ (O_Returned | W_Personal Loan ...]  → 600.2s  matches=0  groups=0  FINISHED
+  │  len=11  running 5 queries
+  │    [1/5] [(W_Call incomplete files | W_Assess potential fraud)+ W_C...]  → 600.1s  matches=0  groups=0  FINISHED
+  │    [2/5] [(A_Submitted | O_Created) A_Concept W_Call incomplete fil...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [3/5] [W_Call after offers W_Validate application W_Validate app...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [4/5] [W_Complete application W_Call incomplete files (W_Validat...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [5/5] [(A_Validating | A_Concept)* (O_Returned | W_Handle leads)...]  → 600.1s  matches=0  groups=0  FINISHED
+  │  len=12  running 5 queries
+  │    [1/5] [(O_Create Offer | O_Refused) O_Created+ O_Create Offer (O...]  → 600.1s  matches=0  groups=0  FINISHED
+  │    [2/5] [A_Create Application (A_Concept | O_Refused)* (A_Accepted...]  → 600.1s  matches=0  groups=0  FINISHED
+  │    [3/5] [O_Sent (mail and online)+ A_Complete* W_Call incomplete f...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [4/5] [(W_Call after offers | W_Handle leads) W_Call incomplete ...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [5/5] [(A_Validating | O_Accepted)+ (A_Validating | W_Complete a...]  → 600.2s  matches=0  groups=0  FINISHED
+  │  len=13  running 5 queries
+  │    [1/5] [W_Complete application+ (W_Handle leads | W_Personal Loan...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [2/5] [(O_Create Offer | O_Refused)+ O_Created A_Incomplete+ (A_...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [3/5] [(W_Call incomplete files | O_Create Offer)+ (W_Call incom...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [4/5] [W_Complete application+ W_Call incomplete files W_Call af...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [5/5] [(O_Returned | A_Complete)* O_Returned+ A_Validating (O_Cr...]  → 600.1s  matches=0  groups=0  FINISHED
+  │  len=14  running 5 queries
+  │    [1/5] [W_Validate application+ W_Validate application+ (W_Valida...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [2/5] [(W_Call after offers | W_Shortened completion ) W_Call af...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [3/5] [(W_Validate application | O_Refused) W_Call incomplete fi...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [4/5] [W_Validate application+ W_Call after offers W_Call after ...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [5/5] [(W_Call incomplete files | A_Incomplete)+ (W_Call after o...]  → 600.1s  matches=0  groups=0  FINISHED
+  │  len=15  running 5 queries
+  │    [1/5] [(W_Handle leads | W_Assess potential fraud)* (W_Complete ...]  → 600.1s  matches=0  groups=0  FINISHED
+  │    [2/5] [W_Call incomplete files W_Validate application+ (W_Call a...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [3/5] [W_Call incomplete files* W_Validate application+ W_Call i...]  → 600.1s  matches=0  groups=0  FINISHED
+  │    [4/5] [(W_Validate application | A_Denied) (W_Handle leads | W_C...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [5/5] [(O_Created | W_Assess potential fraud)* W_Validate applic...]  → 600.2s  matches=0  groups=0  FINISHED
+  └─ Grouping 4/5 complete
+
+  ┌─ Grouping 5/5: 'org:resource'  (149 distinct values)
+  │  len=8  running 5 queries
+  │    [1/5] [(A_Cancelled | A_Create Application)+ O_Cancelled* O_Canc...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [2/5] [(W_Call incomplete files | W_Assess potential fraud)* (O_...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [3/5] [A_Concept* W_Call after offers* (W_Call after offers | W_...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [4/5] [W_Call after offers (W_Call after offers | W_Complete app...]  → 600.1s  matches=0  groups=0  FINISHED
+  │    [5/5] [(W_Complete application | O_Cancelled)* (A_Concept | W_Ca...]  → 600.2s  matches=0  groups=0  FINISHED
+  │  len=9  running 5 queries
+  │    [1/5] [O_Sent (online only) (W_Complete application | A_Complete...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [2/5] [(W_Validate application | W_Complete application)+ W_Vali...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [3/5] [(O_Accepted | O_Cancelled) A_Pending* (W_Validate applica...]  → 600.1s  matches=0  groups=0  FINISHED
+  │    [4/5] [(W_Complete application | A_Pending) (A_Concept | O_Creat...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [5/5] [(O_Returned | W_Complete application)+ (W_Validate applic...]  → 600.2s  matches=0  groups=0  FINISHED
+  │  len=10  running 5 queries
+  │    [1/5] [(A_Validating | W_Shortened completion )* (O_Returned | A...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [2/5] [(W_Validate application | O_Create Offer) W_Call after of...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [3/5] [(W_Complete application | O_Create Offer)+ W_Complete app...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [4/5] [O_Sent (mail and online)+ W_Call incomplete files+ (W_Cal...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [5/5] [A_Cancelled (O_Cancelled | A_Pending)* W_Call after offer...]  → 600.2s  matches=0  groups=0  FINISHED
+  │  len=11  running 5 queries
+  │    [1/5] [W_Call incomplete files A_Create Application* (W_Complete...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [2/5] [(O_Refused | O_Cancelled)+ (O_Refused | O_Sent (mail and ...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [3/5] [(O_Cancelled | O_Create Offer) W_Call after offers+ (O_Ac...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [4/5] [W_Call after offers+ (W_Complete application | O_Accepted...]  → 600.1s  matches=0  groups=0  FINISHED
+  │    [5/5] [(A_Incomplete | A_Complete)+ (W_Call incomplete files | W...]  → 600.2s  matches=0  groups=0  FINISHED
+  │  len=12  running 5 queries
+  │    [1/5] [(W_Complete application | W_Personal Loan collection)* (W...]  → 600.1s  matches=0  groups=0  FINISHED
+  │    [2/5] [(O_Created | W_Shortened completion ) (O_Sent (online onl...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [3/5] [W_Validate application+ (A_Validating | W_Personal Loan c...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [4/5] [O_Create Offer O_Created+ O_Sent (mail and online) (W_Cal...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [5/5] [W_Call incomplete files* W_Complete application O_Create ...]  → 600.2s  matches=0  groups=0  FINISHED
+  │  len=13  running 5 queries
+  │    [1/5] [A_Pending+ (W_Call incomplete files | A_Pending) (O_Cance...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [2/5] [O_Created+ (O_Sent (mail and online) | A_Create Applicati...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [3/5] [(W_Call incomplete files | W_Validate application) (O_Acc...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [4/5] [(A_Complete | W_Call incomplete files) (A_Cancelled | W_C...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [5/5] [(A_Concept | A_Denied)* W_Complete application (W_Handle ...]  → 600.2s  matches=0  groups=0  FINISHED
+  │  len=14  running 5 queries
+  │    [1/5] [(O_Create Offer | A_Incomplete)* O_Created* O_Sent (mail ...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [2/5] [W_Complete application (W_Complete application | O_Cancel...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [3/5] [A_Incomplete W_Call incomplete files O_Accepted+ (A_Pendi...]  → 600.1s  matches=0  groups=0  FINISHED
+  │    [4/5] [W_Handle leads* (W_Handle leads | A_Denied)* W_Call after...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [5/5] [W_Complete application+ (W_Complete application | O_Refus...]  → 600.1s  matches=0  groups=0  FINISHED
+  │  len=15  running 5 queries
+  │    [1/5] [W_Call incomplete files+ (O_Returned | O_Sent (mail and o...]  → 600.1s  matches=0  groups=0  FINISHED
+  │    [2/5] [O_Create Offer+ O_Created+ (O_Sent (online only) | A_Crea...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [3/5] [(O_Cancelled | O_Created)* O_Returned O_Accepted+ (A_Pend...]  → 600.1s  matches=0  groups=0  FINISHED
+  │    [4/5] [W_Call incomplete files* A_Denied* O_Refused* W_Validate ...]  → 600.2s  matches=0  groups=0  FINISHED
+  │    [5/5] [(W_Call after offers | A_Create Application)* (W_Complete...]  → 600.2s  matches=0  groups=0  FINISHED
+  └─ Grouping 5/5 complete
+
+============================================================
+  Done.  Results → /home/balaktsis/Projects/siesta-framework/tests/vldb_eval/results/exp_mr.jsonl
+============================================================

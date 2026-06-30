@@ -70,7 +70,12 @@ REPO_ROOT       = Path(__file__).resolve().parents[2]
 DATASET_DIR     = REPO_ROOT / "datasets"
 CONFIG_DIR      = REPO_ROOT / "config"
 RESULTS_DIR     = REPO_ROOT / "tests" / "eval" / "results"
-RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+try:
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+except PermissionError:
+    # tests/eval/ is root-owned (created by docker volume); fall back to vldb-eval/results/
+    RESULTS_DIR = Path(__file__).resolve().parent / "results"
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -602,7 +607,7 @@ def build_trace_to_perspective_map(
     Use detect_eager_perspective() for a correct eager comparison.
     """
     from collections import Counter
-    from tests.eval.batch_splitter import _iter_log
+    from tests.vldb_eval.batch_splitter import _iter_log
 
     trace_vals: dict[str, Counter] = {}
     for ev in _iter_log(dataset_path):

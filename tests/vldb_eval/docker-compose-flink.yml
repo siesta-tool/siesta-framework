@@ -4,6 +4,7 @@ networks:
 
 services:
 
+
   jobmanager:
     image: flink:1.20-java17
     container_name: siesta_flink_jm

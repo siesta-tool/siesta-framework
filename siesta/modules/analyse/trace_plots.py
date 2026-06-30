@@ -588,7 +588,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     print(f"Loading event log: {args.log}")
     log_df = pd.read_csv(args.log)
     log_df.columns = log_df.columns.str.strip()
-    print(f"  {len(log_df):,} events, "
+    print(f"  {len(log_df):,} events, {log_df[args.activity_col].nunique():,} unique events."
           f"{log_df[args.trace_col].nunique():,} traces.")
 
     run_trace_plots(
