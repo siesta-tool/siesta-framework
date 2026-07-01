@@ -21,6 +21,9 @@ Core data assumptions:
 ## Architecture
 ![Siesta Framework Architecture](siesta_full_lifecycle.png)
 
+## Adaptive Architecture Example
+![Siesta Adaptive Indexing Architecture](adaptive.drawio.png)
+
 ## Project layout
 
 - `main.py`: top-level entrypoint.
