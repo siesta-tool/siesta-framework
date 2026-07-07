@@ -38,6 +38,7 @@ def _force_clean_tables(log_name: str, namespace: str):
     from siesta.model.DataModel import (
         Event, EventPair, Last_Checked_table_schema,
         Trace_metadata_table_schema, count_table_schema,
+        dictionary_table_schema,
     )
 
     spark = get_spark_session()
@@ -58,6 +59,9 @@ def _force_clean_tables(log_name: str, namespace: str):
         (Last_Checked_table_schema, md.last_checked_table_path, None),
         (EventPair.get_schema(), md.pairs_index_path, ("source", "target")),
         (count_table_schema, md.count_table_path, ("source",)),
+        # Dictionary-coding tables: reset so codes don't accumulate across test sessions.
+        (dictionary_table_schema, md.activity_dictionary_path, None),
+        (dictionary_table_schema, md.trace_dictionary_path, None),
     ]
     for schema, path, parts in tables:
         # Physically delete via Hadoop FileSystem API

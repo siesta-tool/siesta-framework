@@ -8,6 +8,7 @@ from pyspark.sql import DataFrame, functions as F
 from pyspark.sql.functions import col
 from siesta.modules.query.parse_seql import split_pattern_to_list
 from siesta.modules.query.processors.detection_query import detect
+from siesta.modules.query.dictionary import load_activity_code_map, decode_column_expr
 
 import logging
 logger = logging.getLogger(__name__)
@@ -23,15 +24,26 @@ def explore(pattern_suffix: str, config: Dict[str, Any], metadata: MetaData,  ca
     :param candidate_targets: Optional list of candidate target activities to filter the results.
     :return: A DataFrame with candidate target activities and their corresponding support values, sorted by support.
     """
-    candidate_targets_df = get_storage_manager().read_count_table(metadata)\
-        .filter(col("source") == pattern_suffix)
-    if candidate_targets is not None:
-        candidate_targets_df = candidate_targets_df.filter(col("target").isin(candidate_targets))
-
     spark = get_spark_session()
 
+    # Dictionary-coding: the count table stores activity codes. Encode the suffix and
+    # any candidate targets to codes for filtering; decode targets back to labels so
+    # candidate patterns are built and returned with the original activity names.
+    code_map = load_activity_code_map(metadata)
+    label_map = {code: label for label, code in code_map.items()}
+
+    suffix_code = code_map.get(pattern_suffix)
+    if suffix_code is None:
+        return spark.createDataFrame([], "next_activity string, support double")
+
+    candidate_targets_df = get_storage_manager().read_count_table(metadata)\
+        .filter(col("source") == suffix_code)
+    if candidate_targets is not None:
+        cand_codes = [code_map[t] for t in candidate_targets if t in code_map]
+        candidate_targets_df = candidate_targets_df.filter(col("target").isin(cand_codes))
+
     target_rows = candidate_targets_df.select("target").distinct().collect()
-    targets = [row["target"] for row in target_rows]
+    targets = [label_map[row["target"]] for row in target_rows if row["target"] in label_map]
     if not targets:
         return spark.createDataFrame([], "next_activity string, support double")
 
@@ -87,31 +99,51 @@ def fast_exploration(config: Dict[str, Any], metadata: MetaData) -> DataFrame:
     spark = get_spark_session()
     storage = get_storage_manager()
 
+    # Dictionary-coding: the count table stores activity codes. Encode the pattern
+    # labels to codes for the joins/filters, decode next_activity back to labels.
+    code_map = load_activity_code_map(metadata)
+    label_map = {code: label for label, code in code_map.items()}
+
     # Extract the current pattern from the config
     pattern_data = split_pattern_to_list(config.get("query", {}).get("alt_pattern", ""))
     activities_pattern = list(map(lambda x: x.get("label"), pattern_data))
     pattern_suffix = activities_pattern[-1] if activities_pattern else ""
-    
-    count_table_df = storage.read_count_table(metadata)
-    
-    # Find an upper bound of the total times the given pattern has been completed,
-    # which is determined by the least frequent consecutive pair in the pattern 
-    upper_bound = float('inf')
-    
-    if len(activities_pattern) > 1:
-        consecutive_pairs_df = spark.createDataFrame(list(zip(activities_pattern, activities_pattern[1:])), ["source", "target"])
-        upper_bound = count_table_df \
-            .join(consecutive_pairs_df, on=["source", "target"], how="inner") \
-            .agg(F.min("total_completions").alias("upper_bound")) \
-            .collect()[0]["upper_bound"]
+    suffix_code = code_map.get(pattern_suffix)
 
-    # Find candidate target activities that follow the last activity in the pattern 
+    count_table_df = storage.read_count_table(metadata)
+
+    # Find an upper bound of the total times the given pattern has been completed,
+    # which is determined by the least frequent consecutive pair in the pattern
+    upper_bound = float('inf')
+
+    if len(activities_pattern) > 1:
+        code_pairs = [
+            (code_map[a], code_map[b])
+            for a, b in zip(activities_pattern, activities_pattern[1:])
+            if a in code_map and b in code_map
+        ]
+        # A label in the chain absent from the log means the pattern never completes.
+        if len(code_pairs) < len(activities_pattern) - 1:
+            upper_bound = 0
+        elif code_pairs:
+            consecutive_pairs_df = spark.createDataFrame(code_pairs, ["source", "target"])
+            upper_bound = count_table_df \
+                .join(consecutive_pairs_df, on=["source", "target"], how="inner") \
+                .agg(F.min("total_completions").alias("upper_bound")) \
+                .collect()[0]["upper_bound"]
+
+    # Find candidate target activities that follow the last activity in the pattern
     # and calculate their support using the upper bound as a heuristic
-    propositions_df = count_table_df.filter(col("source") == pattern_suffix) \
+    propositions_df = count_table_df.filter(col("source") == suffix_code) \
         .withColumn("support", F.min(col("total_completions"), F.lit(upper_bound))) \
         .select(col("target").alias("next_activity"), "support") \
         .sort(col("support"), ascending=False)
-    
+
+    # Decode next_activity codes back to labels for display / downstream use.
+    decode_expr = decode_column_expr(label_map)
+    if decode_expr is not None:
+        propositions_df = propositions_df.withColumn("next_activity", decode_expr[col("next_activity")])
+
     return propositions_df
 
 

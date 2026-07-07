@@ -431,9 +431,9 @@ class Analysing(SiestaModule):
     def _load_analyser_config(self, config: Dict[str, Any]):
         if not self.storage.log_exists(config):
             logger.error(
-                f"Log '{config.get("log_name")}' does not exist in storage. Run indexing first."
+                f"Log '{config.get('log_name')}' does not exist in storage. Run indexing first."
             )
-            raise ValueError(f"Log '{config.get("log_name")}' not found in storage.")
+            raise ValueError(f"Log '{config.get('log_name')}' not found in storage.")
 
         if config.get("log_name") is None:
             raise ValueError("Log name not specified in config.")

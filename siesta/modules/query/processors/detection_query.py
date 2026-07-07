@@ -8,6 +8,7 @@ from pyspark.sql import functions as F
 from pyspark.sql.functions import col
 from siesta.modules.query.parse_seql import Quantifier as SeqlQuantifier, RespondedPair, extract_info_pairs, parse_pattern, extract_responded_pairs
 from siesta.modules.query.CEP_adapter import find_occurrences_dsl
+from siesta.modules.query.dictionary import load_activity_code_map, decode_trace_ids
 import json
 import logging
 from functools import reduce
@@ -20,27 +21,38 @@ def detect(pattern: str, config: Dict[str, Any], metadata: MetaData):
     storage = get_storage_manager()
     support_threshold = config.get("support_threshold", 0.0)
 
+    # Dictionary-coding: encode the pattern's activity labels into the integer codes
+    # stored in the pairs index. The activity dictionary is small enough to collect.
+    code_map = load_activity_code_map(metadata)
+
+    def _code_pair(a_label, b_label):
+        ca, cb = code_map.get(a_label), code_map.get(b_label)
+        return (ca, cb) if ca is not None and cb is not None else None
+
     # lf optimizer
     pair_branches = set(extract_responded_pairs(pattern))
 
-    branch_required: dict[int, set[tuple[str, str]]] = {}
+    branch_required: dict[int, set[tuple[int, int]]] = {}
+    impossible_branches: set[int] = set()
     for rp in pair_branches:
         if rp.source_quantifier == SeqlQuantifier.STAR or rp.target_quantifier == SeqlQuantifier.STAR:
             continue  # STAR-involved pairs are optional -> skip for pruning
-        branch_required.setdefault(rp.branch_id, set()).add(
-            (rp.source.label, rp.target.label)
-        )
+        cp = _code_pair(rp.source.label, rp.target.label)
+        if cp is None:
+            # A required label absent from the log makes this whole branch unmatchable.
+            impossible_branches.add(rp.branch_id)
+            continue
+        branch_required.setdefault(rp.branch_id, set()).add(cp)
+    for bid in impossible_branches:
+        branch_required.pop(bid, None)
 
-    # All responded pairs (including STAR) needed for data fetch
-    all_responded = set(
-        (rp.source.label, rp.target.label, rp.branch_id) for rp in pair_branches
-    )
-    
+    # All label pairs needed for the initial data fetch (responded + info pairs),
+    # encoded to codes; unknown labels are dropped (they can never match a row).
+    label_pairs_2d = {(rp.source.label, rp.target.label) for rp in pair_branches}
     info_pairs = extract_info_pairs(pattern)
-    all_pairs = list(info_pairs.union(all_responded))
-    all_pairs_2d = {(p[0], p[1]) for p in all_pairs}
+    label_pairs_2d |= {(p[0], p[1]) for p in info_pairs}
+    all_pairs_2d = set(filter(None, (_code_pair(a, b) for a, b in label_pairs_2d)))
     all_pred = build_exact_pair_predicate(all_pairs_2d)
-
 
     index_table = storage.read_pairs_index(metadata)
 
@@ -77,6 +89,11 @@ def detect(pattern: str, config: Dict[str, Any], metadata: MetaData):
         .repartition("trace_id")
     )
 
+    # Broadcast the small {code -> label} map so the per-trace CEP validation runs on
+    # the original activity labels and the original pattern string (no re-encoding).
+    label_map = {code: label for label, code in code_map.items()}
+    bc_label = get_spark_session().sparkContext.broadcast(label_map)
+
     matches_df = pair_positions_df.rdd.map(lambda r: (
             r.trace_id,
             {
@@ -104,7 +121,8 @@ def detect(pattern: str, config: Dict[str, Any], metadata: MetaData):
                 pos = r[pos_k]
                 if pos not in seen_positions:
                     seen_positions[pos] = {
-                        "name":       r[name_k],
+                        # decode the activity code back to its label for CEP matching
+                        "name":       bc_label.value.get(r[name_k], r[name_k]),
                         "position":   pos,
                         "timestamp":  r[ts_k],
                     }
@@ -165,8 +183,10 @@ def process_detection_query(config: Dict[str, Any], metadata: MetaData):
     start = time.time()
     result = detect(new_pattern, config, metadata)
     end = time.time()
-    
 
-    result = [{"trace_id": trace_id, "support": len(positions) / metadata.trace_count if metadata.trace_count else 0, "positions": positions} for trace_id, positions in result if len(positions) >= support_threshold]
+    # Decode trace_id codes back to their original strings for display.
+    trace_id_map = decode_trace_ids([trace_id for trace_id, _ in result], metadata)
+
+    result = [{"trace_id": trace_id_map.get(trace_id, trace_id), "support": len(positions) / metadata.trace_count if metadata.trace_count else 0, "positions": positions} for trace_id, positions in result if len(positions) >= support_threshold]
     logger.info(f"Parsing query took: {end - start}")
     return {"code": 200, "total": len(result), "detected": result, "time": end - start}

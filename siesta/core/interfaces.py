@@ -257,6 +257,46 @@ class StorageManager(ABC):
     def read_count_table(self, metadata: MetaData) -> DataFrame:
         pass
 
+    ###########################################
+    ######## Dictionary-coding Methods ########
+    ###########################################
+
+    @abstractmethod
+    def encode_events(self, events_df: DataFrame, metadata: MetaData) -> DataFrame:
+        """Dictionary-encode the activity and trace_id columns of a raw events DataFrame.
+
+        Reads the per-log activity and trace dictionaries, allocates dense integer
+        codes for any strings not yet seen (appending them to the dictionary tables),
+        and returns the events DataFrame with activity/trace_id replaced by their
+        integer codes, projected to Event.get_schema() column order.
+
+        Args:
+            events_df: DataFrame matching Event.get_raw_schema() (string activity/trace_id)
+            metadata: MetaData object containing the metadata
+
+        Returns:
+            DataFrame matching Event.get_schema() (integer-coded activity/trace_id)
+        """
+        pass
+
+    @abstractmethod
+    def read_activity_dictionary(self, metadata: MetaData) -> DataFrame:
+        """Read the activity dictionary (code -> original activity string).
+
+        Returns:
+            DataFrame with columns (code: int, name: string)
+        """
+        pass
+
+    @abstractmethod
+    def read_trace_dictionary(self, metadata: MetaData) -> DataFrame:
+        """Read the trace dictionary (code -> original trace_id string).
+
+        Returns:
+            DataFrame with columns (code: int, name: string)
+        """
+        pass
+
     @abstractmethod
     def write_count_table(self, count_df: DataFrame, metadata: Any) -> None:
         """

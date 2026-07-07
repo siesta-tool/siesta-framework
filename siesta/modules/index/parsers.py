@@ -55,6 +55,10 @@ def process_events_batch(preprocess_config: Dict, batch_df, batch_id=None, metad
         event_config = EventConfig.from_preprocess_config(preprocess_config, "json")
         events_df = _parse_rows(event_config, batch_df)
 
+        # Dictionary-encode activity + trace_id (string -> int codes) before any
+        # downstream table is written, so the whole pipeline runs on integers.
+        events_df = get_storage_manager().encode_events(events_df, metadata)
+
         events_df = update_event_positions(events_df, metadata)
 
         get_storage_manager().write_sequence_table(events_df, metadata)
@@ -155,7 +159,11 @@ def process_event_log(preprocess_config: dict, metadata: MetaData) -> DataFrame:
         events_df = parse_csv(log_path, spark, preprocess_config)
     else:
         raise ValueError(f"Unsupported log format: {log_format}")
-    
+
+    # Dictionary-encode activity + trace_id (string -> int codes) before any
+    # downstream table is written, so the whole pipeline runs on integers.
+    events_df = storage.encode_events(events_df, metadata)
+
     events_df = update_event_positions(events_df, metadata)
 
     storage.write_sequence_table(events_df, metadata)
@@ -307,8 +315,9 @@ def parse_xml(storage_path: str, spark: SparkSession, preprocess_config: dict) -
     pdf['position'] = pdf.groupby('trace_id').cumcount()
 
     # Convert to Spark DataFrame (uses Arrow serialization automatically)
-    # Use intermediate schema with StringType for timestamp fields so Spark can parse them
-    event_schema = Event.get_schema()
+    # Use intermediate schema with StringType for timestamp fields so Spark can parse them.
+    # Parsers emit the raw (string activity/trace_id) schema; encoding happens later.
+    event_schema = Event.get_raw_schema()
     intermediate_schema = StructType([
         StructField(f.name, StringType() if f.name in timestamp_fields else f.dataType, f.nullable)
         for f in event_schema.fields
@@ -431,7 +440,8 @@ def _parse_rows(config: EventConfig, df: DataFrame) -> DataFrame:
 
     df = df.drop("_row_idx")
 
-    schema = Event.get_schema()
+    # Raw schema: activity/trace_id stay strings here; encode_events codes them later.
+    schema = Event.get_raw_schema()
     schema_type_map = {f.name: f.dataType for f in schema.fields}
     result_df = df
 

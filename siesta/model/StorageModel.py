@@ -39,6 +39,12 @@ class MetaData:
     def s3_trace_metadata_table(self) -> str:
         return f"s3a://{self.storage_namespace}/{self.log_name}/trace_metadata_table"
     @property
+    def s3_activity_dictionary(self) -> str:
+        return f"s3a://{self.storage_namespace}/{self.log_name}/activity_dictionary"
+    @property
+    def s3_trace_dictionary(self) -> str:
+        return f"s3a://{self.storage_namespace}/{self.log_name}/trace_dictionary"
+    @property
     def s3_mining(self) -> str:
         return f"s3a://{self.storage_namespace}/{self.log_name}/declare_constraints/"
     @property
@@ -82,6 +88,12 @@ class MetaData:
     @property
     def trace_metadata_table_path(self) -> str:
         return self.s3_trace_metadata_table if self.storage_type == "s3" else ""
+    @property
+    def activity_dictionary_path(self) -> str:
+        return self.s3_activity_dictionary if self.storage_type == "s3" else ""
+    @property
+    def trace_dictionary_path(self) -> str:
+        return self.s3_trace_dictionary if self.storage_type == "s3" else ""
 
 ########################################################
 

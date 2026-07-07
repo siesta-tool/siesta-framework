@@ -87,9 +87,9 @@ def startup(config: Dict[str, Any] = {}) -> None:
             .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
             .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem") \
             .config("spark.hadoop.fs.s3a.path.style.access", "true") \
-            .config("spark.pyspark.python", "/opt/python/bin/python3") \
+            .config("spark.pyspark.python", "python3.12") \
             .config("spark.pyspark.driver.python", "python3") \
-            .config("spark.executorEnv.PYSPARK_PYTHON", "/opt/python/bin/python3") \
+            .config("spark.executorEnv.PYSPARK_PYTHON", "python3.12") \
             .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
             .config("spark.databricks.delta.optimizeWrite.enabled", "true") \
             .config("spark.databricks.delta.autoCompact.enabled", "true") \

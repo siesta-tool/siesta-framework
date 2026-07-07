@@ -104,16 +104,19 @@ class EventConfig:
 
 
 class Event:
-    activity: str
-    
-    trace_id: str
+    # activity and trace_id are dictionary-encoded integer codes in the stored
+    # (encoded) schema. The original strings live in the activity/trace
+    # dictionary tables; see get_raw_schema() for the pre-encoding parse schema.
+    activity: int
+
+    trace_id: int
     position: int
-    
+
     start_timestamp: Optional[int]
 
     attributes: Optional[dict[str, str | int | float | bool]]
 
-    def __init__(self, activity: str = None, trace_id: str = None, position: int = None,
+    def __init__(self, activity: int = None, trace_id: int = None, position: int = None,
                  start_timestamp: Optional[int] = None, attributes: Optional[dict] = None, **kwargs):
         self.activity = activity
         self.trace_id = trace_id
@@ -132,7 +135,27 @@ class Event:
 
     @staticmethod
     def get_schema() -> StructType:
-        """Return the Spark schema for Event serialization."""
+        """Return the stored (dictionary-encoded) Spark schema for Event.
+
+        activity and trace_id are integer codes; use get_raw_schema() for the
+        string-valued schema produced by the parsers before encoding.
+        """
+        return StructType([
+            StructField("activity", IntegerType(), False),
+            StructField("trace_id", IntegerType(), True),
+            StructField("position", IntegerType(), False),
+            StructField("start_timestamp", IntegerType(), True),
+            StructField("attributes", MapType(StringType(), StringType()), True)
+        ])
+
+    @staticmethod
+    def get_raw_schema() -> StructType:
+        """Return the pre-encoding Spark schema for Event.
+
+        This is what the parsers emit: activity and trace_id are still the
+        original strings. The encoding step (StorageManager.encode_events)
+        converts them into the integer codes of get_schema().
+        """
         return StructType([
             StructField("activity", StringType(), False),
             StructField("trace_id", StringType(), True),
@@ -188,9 +211,9 @@ class EventPair:
     @staticmethod
     def get_schema() -> StructType:
         return StructType([
-            StructField("source", StringType(), False),
-            StructField("target", StringType(), False),
-            StructField("trace_id", StringType(), False),
+            StructField("source", IntegerType(), False),
+            StructField("target", IntegerType(), False),
+            StructField("trace_id", IntegerType(), False),
             StructField("source_timestamp", IntegerType(), False),
             StructField("target_timestamp", IntegerType(), False),
             StructField("source_position", IntegerType(), False),
@@ -229,15 +252,15 @@ class Trace:
     
 
 Last_Checked_table_schema = StructType([
-            StructField("trace_id", StringType(), True),
-            StructField("source", StringType(), False),
-            StructField("target", StringType(), False),
+            StructField("trace_id", IntegerType(), True),
+            StructField("source", IntegerType(), False),
+            StructField("target", IntegerType(), False),
             StructField("last_checked_moment", IntegerType(), False)
 ])
 
 count_table_schema = StructType([
-    StructField("source", StringType(), False),
-    StructField("target", StringType(), False),
+    StructField("source", IntegerType(), False),
+    StructField("target", IntegerType(), False),
     StructField("total_duration", FloatType(), False),
     StructField("total_completions", IntegerType(), False),
     StructField("min_duration", FloatType(), False),
@@ -246,6 +269,14 @@ count_table_schema = StructType([
 ])
 
 Trace_metadata_table_schema = StructType([
-    StructField("trace_id", StringType(), False),
+    StructField("trace_id", IntegerType(), False),
     StructField("max_pos", IntegerType(), True)
+])
+
+# Dictionary-coding tables: reverse map from an integer code back to the original
+# string. Used by both the activity dictionary (activity == source/target) and the
+# trace dictionary. code is a dense, per-log integer id starting at 0.
+dictionary_table_schema = StructType([
+    StructField("code", IntegerType(), False),
+    StructField("name", StringType(), False),
 ])

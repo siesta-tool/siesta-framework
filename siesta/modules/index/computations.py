@@ -24,8 +24,8 @@ logger = logging.getLogger(__name__)
 # ])
 
 activity_index_schema = StructType([
-    StructField("activity", StringType(), True),
-    StructField("trace_id", StringType(), True),
+    StructField("activity", IntegerType(), True),
+    StructField("trace_id", IntegerType(), True),
     StructField("position", IntegerType(), True),
     StructField("start_timestamp", IntegerType(), True),
     StructField("attributes", StringType(), True)
@@ -37,8 +37,8 @@ pair_index_schema = EventPair.get_schema()
 # Schema: Source, Target, trace_id, source_timestamp, target_timestamp, source_position, target_position, source_attributes, target_attributes
 
 
-type Trace_ID = str
-type Event_Type = str
+type Trace_ID = int
+type Event_Type = int
 type Timestamp = int
 type Position = int
 type Attributes = str
@@ -179,14 +179,14 @@ def _calculate_pairs_stnm(activity_index: Tuple[Trace_ID, Iterable[Event]], last
 
     
 def createTuples(
-    key1: str, 
-    key2: str, 
-    e_source: List[Tuple[int, int, str]], 
+    key1: int,
+    key2: int,
+    e_source: List[Tuple[int, int, str]],
     e_target: List[Tuple[int, int, str]],
-    lookback: Tuple[int, LookbackType], 
+    lookback: Tuple[int, LookbackType],
     last_checked: Optional[int],
-    trace_id: str
-) -> List[Tuple[str, str, str, str, str, int, int]]:
+    trace_id: int
+) -> List[Tuple[int, int, int, int, int, int, int]]:
     """
     Creates event type pair tuples following Skip-till-next-match policy.
     
@@ -229,7 +229,7 @@ def createTuples(
     return pairs
 
 
-def _findCombinations(event_types: List[str]) -> List[Tuple[str, str]]:
+def _findCombinations(event_types: List[Event_Type]) -> List[Tuple[Event_Type, Event_Type]]:
     """
     Extracts all the possible event type pairs that can occur in a trace based on the unique event types
 

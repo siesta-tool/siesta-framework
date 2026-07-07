@@ -10,7 +10,7 @@ from pyspark.sql import SparkSession, DataFrame, functions as F
 from pyspark.sql.streaming import StreamingQuery
 from siesta.core.interfaces import StorageManager
 from siesta.model.StorageModel import MetaData, hash_str
-from siesta.model.DataModel import Event, EventConfig, Last_Checked_table_schema, EventPair, count_table_schema, Trace_metadata_table_schema
+from siesta.model.DataModel import Event, EventConfig, Last_Checked_table_schema, EventPair, count_table_schema, Trace_metadata_table_schema, dictionary_table_schema
 from siesta.core.config import get_system_config
 import siesta.core.sparkManager as SparkManager
 from delta.tables import DeltaTable
@@ -195,6 +195,20 @@ class S3Manager(StorageManager):
                 .partitionBy("source") \
                 .partitionBy("target") \
                 .save(metadata.count_table_path)
+
+        # Check if the dictionary-coding tables already exist before creating
+        for dict_path in (metadata.activity_dictionary_path, metadata.trace_dictionary_path):
+            try:
+                self.spark.read.format("delta").load(dict_path)
+                logger.info(f"Dictionary table already exists at {dict_path}")
+            except Exception:
+                logger.info(f"Dictionary table does not exist, will create new one at {dict_path}")
+
+                empty_dict_df = self.spark.createDataFrame([], schema=dictionary_table_schema)
+                empty_dict_df.write \
+                    .format("delta") \
+                    .mode("overwrite") \
+                    .save(dict_path)
 
         logger.info(f"Database structure initialized at {metadata.count_table_path}")
 
@@ -679,6 +693,77 @@ class S3Manager(StorageManager):
         
         except Exception as e:
             logger.info(f"S3Manager: Error writing Count Table: {e}")
+
+    #################################################
+    ########### Dictionary-coding Methods ###########
+    #################################################
+
+    def _read_dictionary(self, dict_path: str) -> DataFrame:
+        try:
+            return self.spark.read.format("delta").load(dict_path)
+        except Exception as e:
+            logger.info(f"Error reading dictionary at {dict_path}: {e}")
+            return self.spark.createDataFrame([], schema=dictionary_table_schema)
+
+    def read_activity_dictionary(self, metadata: MetaData) -> DataFrame:
+        return self._read_dictionary(metadata.activity_dictionary_path)
+
+    def read_trace_dictionary(self, metadata: MetaData) -> DataFrame:
+        return self._read_dictionary(metadata.trace_dictionary_path)
+
+    def encode_events(self, events_df: DataFrame, metadata: MetaData) -> DataFrame:
+        """See StorageManager.encode_events."""
+        df = self._encode_column(events_df, "activity", metadata.activity_dictionary_path)
+        df = self._encode_column(df, "trace_id", metadata.trace_dictionary_path)
+        # Re-project to the encoded Event schema (integer types + column order).
+        return df.select([
+            F.col(f.name).cast(f.dataType).alias(f.name) for f in Event.get_schema().fields
+        ])
+
+    def _encode_column(self, df: DataFrame, column: str, dict_path: str) -> DataFrame:
+        """Replace the string values of ``column`` with dense integer dictionary codes.
+
+        Strings not yet present in the dictionary at ``dict_path`` are assigned codes
+        starting at ``max(existing code) + 1`` via a distributed ``zipWithIndex``,
+        appended to the dictionary table, and then the (re-read) dictionary is joined
+        back onto ``df``. Appending the dictionary keeps the encoding stable and
+        incremental across batches and streaming micro-batches (which are serialized).
+        """
+        existing = self._read_dictionary(dict_path)
+
+        # Distinct non-null strings present in this batch that are not yet encoded.
+        batch_names = (
+            df.select(F.col(column).cast("string").alias("name"))
+              .where(F.col("name").isNotNull())
+              .distinct()
+        )
+        new_names = batch_names.join(existing, on="name", how="left_anti")
+
+        # Allocate dense codes starting after the current maximum.
+        max_code = existing.agg(F.max("code").alias("m")).collect()[0]["m"]
+        start = (max_code + 1) if max_code is not None else 0
+
+        new_dict_rdd = (
+            new_names.rdd
+            .map(lambda r: r["name"])
+            .zipWithIndex()
+            .map(lambda name_idx: (int(name_idx[1] + start), name_idx[0]))
+        )
+        new_dict = self.spark.createDataFrame(new_dict_rdd, schema=dictionary_table_schema).cache()
+
+        if new_dict.head(1):  # only append when there are unseen strings
+            new_dict.write.format("delta").mode("append").save(dict_path)
+
+        # Re-read the updated dictionary so the join uses each code exactly once
+        # (avoids double-counting the freshly appended rows).
+        full_dict = self._read_dictionary(dict_path)
+
+        encoded = (
+            df.join(full_dict, df[column].cast("string") == full_dict["name"], how="left")
+              .drop(column, "name")
+              .withColumnRenamed("code", column)
+        )
+        return encoded
 
     def log_exists(self, task_config: Dict[str, Any]) -> bool:
         """

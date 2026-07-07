@@ -5,7 +5,7 @@
   "s3_secret_key": "minioadmin",
   "s3_endpoint": "http://localhost:9000",
   "s3_region": "us-east-1",
-  "spark_master": "spark://localhost:7077",
+  "spark_master": "local[*]",
   "spark_app_name": "SiestaFramework",
   "spark_driver_memory": "8g",
   "spark_executor_memory": "4g",
