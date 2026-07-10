@@ -223,3 +223,8 @@ acc.json
 com*.json
 docker-compose-com.yml
 nginx.conf
+
+datasets/los*
+datasets/acc*
+
+**/modules/compare/acc*

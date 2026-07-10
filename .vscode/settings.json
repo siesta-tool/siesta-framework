@@ -1,9 +1,10 @@
 {
     "files.exclude": {
-        // "**/__init__.py": true,
+        "**/__init__.py": true,
         "**/__pycache__": true
     },
     "python.analysis.extraPaths": [
         "siesta/modules/Query/OpenCEP"
-    ]
+    ],
+    "python.defaultInterpreterPath": "${workspaceFolder}/venv/bin/python"
 }

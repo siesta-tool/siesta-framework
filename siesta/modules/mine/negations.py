@@ -2,13 +2,13 @@ from siesta.core.storageFactory import get_storage_manager
 from siesta.model.StorageModel import MetaData
 from siesta.model.MiningModel import Constraint
 from pyspark.sql import DataFrame
-from pyspark.sql.functions import col, max as _max, lit, coalesce, countDistinct
+from pyspark.sql.functions import col, max as _max, lit, coalesce, count_distinct
 
 import logging
 logger = logging.getLogger(__name__)
 
 
-def _update_all_activity_pairs(metadata: MetaData) -> DataFrame:
+def _update_all_activity_pairs(metadata: MetaData) -> tuple[DataFrame, DataFrame]:
     """
     Incrementally maintain the all_activity_pairs Delta table.
     Detects new activities from the current activity index that don't yet
@@ -82,7 +82,7 @@ def discover_negations(evolved_df: DataFrame, metadata: MetaData,
     # ------------------------------------------------------------------
     if not include_trace_lists:
         coex_counts = coex.groupBy("source", "target").agg(
-            countDistinct("trace_id").alias("coex_count")
+            count_distinct("trace_id").alias("coex_count")
         )
 
         total_traces = metadata.trace_count

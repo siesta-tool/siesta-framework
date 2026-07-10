@@ -7,7 +7,7 @@ from pyspark.sql.functions import col, lit
 from pyspark import RDD
 from siesta.model.StorageModel import MetaData, hash_str, ConstraintEntry
 from pyspark.sql import SparkSession, DataFrame, functions as F
-from pyspark.sql.streaming import StreamingQuery
+from pyspark.sql.streaming.query import StreamingQuery
 from siesta.core.interfaces import StorageManager
 from siesta.model.StorageModel import MetaData, hash_str
 from siesta.model.DataModel import Event, EventConfig, Last_Checked_table_schema, EventPair, count_table_schema, Trace_metadata_table_schema
@@ -32,7 +32,7 @@ class S3Manager(StorageManager):
     version = "1.0.0"
     type = "s3"
     
-    spark: SparkSession
+    spark: SparkSession | None
     config: Dict[str, Any]
     s3_client: boto3.Session.client
    
@@ -422,7 +422,7 @@ class S3Manager(StorageManager):
             new_pairs.write.partitionBy("source").format("delta").mode("append").save(metadata.pairs_index_path)
             
             # Update metadata
-            # metadata.pair_count = new_pairs.count()
+            metadata.pair_count = new_pairs.count()
             logger.info(f"Wrote new pairs to {metadata.pairs_index_path}")
         except Exception as e:
             logger.info(f"Error writing IndexTable: {e}")
@@ -679,6 +679,42 @@ class S3Manager(StorageManager):
         
         except Exception as e:
             logger.info(f"S3Manager: Error writing Count Table: {e}")
+
+    def list_namespaces(self) -> list[str]:
+        """
+        List all S3 buckets accessible to the configured client.
+
+        Returns:
+            List of bucket names.
+        """
+        try:
+            response = self.s3_client.list_buckets()
+            return [b["Name"] for b in response.get("Buckets", [])]
+        except ClientError as e:
+            logger.error(f"Error listing buckets: {e}")
+            return []
+
+    def list_logs(self, storage_namespace: str) -> list[str]:
+        """
+        List all log names (top-level prefixes) stored under an S3 bucket.
+
+        Args:
+            storage_namespace: Name of the bucket to list logs from.
+
+        Returns:
+            List of log names.
+        """
+        try:
+            paginator = self.s3_client.get_paginator("list_objects_v2")
+            pages = paginator.paginate(Bucket=storage_namespace, Delimiter="/")
+            log_names = []
+            for page in pages:
+                for prefix in page.get("CommonPrefixes", []):
+                    log_names.append(prefix["Prefix"].rstrip("/"))
+            return log_names
+        except ClientError as e:
+            logger.error(f"Error listing logs in bucket '{storage_namespace}': {e}")
+            return []
 
     def log_exists(self, task_config: Dict[str, Any]) -> bool:
         """

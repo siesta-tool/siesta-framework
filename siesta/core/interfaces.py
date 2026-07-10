@@ -82,7 +82,7 @@ class StorageManager(ABC):
         pass
     
     @abstractmethod
-    def initialize_db(self) -> None:
+    def initialize_db(self, preprocess_config: Dict[str, Any] = {}) -> None:
         """
         Create the appropriate tables and remove previous ones if necessary.
         
@@ -113,7 +113,7 @@ class StorageManager(ABC):
         pass
     
     @abstractmethod
-    def get_checkpoint_location(self, metadata: MetaData, checkpoint_type: str = "table") -> str:
+    def get_checkpoint_location(self, metadata: MetaData, checkpoint_table: str = "table") -> str:
         """
         Get the S3 path for streaming checkpoint location.
         
@@ -126,6 +126,29 @@ class StorageManager(ABC):
         """
         pass
     
+    @abstractmethod
+    def list_namespaces(self) -> list[str]:
+        """
+        List all storage namespaces (e.g. S3 buckets) available in the storage backend.
+
+        Returns:
+            List of namespace names.
+        """
+        pass
+
+    @abstractmethod
+    def list_logs(self, storage_namespace: str) -> list[str]:
+        """
+        List all log names stored under a given storage namespace.
+
+        Args:
+            storage_namespace: Name of the storage namespace to list logs from.
+
+        Returns:
+            List of log names.
+        """
+        pass
+
     @abstractmethod
     def log_exists(self, task_config: Dict[str, Any]) -> bool:
         """
@@ -368,6 +391,25 @@ class StorageManager(ABC):
             metadata: MetaData object containing the metadata of the log dataset
         Returns:
             DataFrame with columns (template, source, target, trace_id)
+        """
+        pass
+
+    @abstractmethod
+    def read_unordered_constraints(self, metadata: MetaData) -> DataFrame:
+        """
+        Read existing unordered constraints from storage as flat ConstraintEntry rows.
+
+        Args:
+            metadata: MetaData object containing the metadata of the log dataset
+        Returns:
+            DataFrame with columns (template, source, target, trace_id, occurrences)
+        """
+        pass
+    
+    @abstractmethod
+    def write_unordered_constraints(self, metadata: MetaData, df: DataFrame) -> None:
+        """
+        Write unordered constraints to storage.
         """
         pass
 

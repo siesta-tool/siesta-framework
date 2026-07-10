@@ -32,6 +32,7 @@ class MiningConfig(BaseModel):
     grouping: str = Field("trace", description="Grouping strategy: 'trace' or 'window'")
     window_size: int = Field(30, description="Position-based window size when grouping='window'")
     support_threshold: float = Field(0.0, description="Minimum support fraction [0,1] to retain constraints")
+    confidence_threshold: float = Field(0.0, description="Minimum confidence fraction [0,1] to retain constraints")
     include_trace_lists: bool = Field(False, description="Append a pipe-delimited trace_ids column per constraint")
     force_recompute: bool = Field(False, description="Remine all traces ignoring previous mining state")
     output_path: str = Field("output/example_log", description="Local path prefix for the output CSV")
@@ -93,6 +94,7 @@ class Mining(SiestaModule):
         - `grouping` *(str, default: `"trace"`)* - grouping strategy: `"trace"` or `"window"`.
         - `window_size` *(int, default: `30`)* - position-based window size when `grouping="window"`.
         - `support_threshold` *(float [0,1], default: `0.0`)* - minimum support fraction to retain constraints.
+        - `confidence_threshold` *(float [0,1], default: `0.0`)* - minimum confidence fraction to retain constraints.
         - `include_trace_lists` *(bool, default: `false`)* - append a pipe-delimited `trace_ids` column per constraint.
         - `force_recompute` *(bool, default: `false`)* - remine all traces ignoring previous mining state.
         """
@@ -182,8 +184,12 @@ class Mining(SiestaModule):
         if not set(self.mining_config["categories"]).issubset(valid_categories):
             raise ValueError(f"Invalid categories specified in mining_config: {self.mining_config['categories']}. Valid options are: {valid_categories}.")
 
+        # If the caller left output_path at its default, derive it from log_name instead.
+        if config.get("output_path") is None or config.get("output_path") == "output/example_log":
+            config["output_path"] = "output/" + config.get("log_name", "mining_results")
+
         # Ensure output_path is unique for each run to avoid overwriting results
-        given_output_path = config.get("output_path", "../output/" + config.get("log_name", "mining_results"))
+        given_output_path = config.get("output_path")
         Path(given_output_path).parent.mkdir(parents=True, exist_ok=True)
         self.mining_config["output_path"] = given_output_path + "_" + str(datetime.datetime.now().timestamp()) + ".csv"
 
@@ -191,7 +197,8 @@ class Mining(SiestaModule):
     def mine(self, caller: str):
         """
         Permorms incremental mining on the log data based on the provided mining configuration and metadata.
-        The method loads evolved traces since the last mining, discovers new constraints and keeps only valid old ones and new ones in storage (by overwrite mode), and outputs the results to a CSV file on the driver's local filesystem.
+        The method loads evolved traces since the last mining, discovers new constraints and keeps only valid 
+        old ones and new ones in storage (by overwrite mode), and outputs the results to a CSV file on the driver's local filesystem.
 
         :param caller: a string indicating the caller of the mining process (e.g. "cli", "api") for logging purposes.
         """
@@ -283,6 +290,7 @@ class Mining(SiestaModule):
             F.collect_list("trace_id").alias("trace_ids")
         )
 
+
         # Calculate support: len(trace_ids) / trace_count
         grouped_constraints = grouped_constraints.withColumn(
             "support",
@@ -300,6 +308,32 @@ class Mining(SiestaModule):
 
         grouped_constraints = grouped_constraints.filter(F.col("support") >= self.mining_config.get("support_threshold", 0.0))
 
+        # Calculate confidence:
+        #   for unordered: #traces_ab ^ 2 / (#traces_a * #traces_b)
+        #   for ordered: #traces_ab / #traces_a
+        activity_counts = self.storage.read_activity_index(metadata=self.metadata).groupBy("activity").agg(F.count_distinct("trace_id").alias("activity_trace_count"))
+        grouped_constraints = grouped_constraints.join(
+            activity_counts.withColumnRenamed("activity", "source").withColumnRenamed("activity_trace_count", "source_trace_count"),
+            on="source",
+            how="left"
+        ).join(
+            activity_counts.withColumnRenamed("activity", "target").withColumnRenamed("activity_trace_count", "target_trace_count"),
+            on="target",
+            how="left"
+        ).withColumn(
+            "confidence",
+            F.when(
+                F.col("category") == "unordered",
+                (F.size(F.col("trace_ids")) ** 2) / (F.col("source_trace_count") * F.col("target_trace_count"))
+            ).when(
+                (F.col("category") == "ordered") | (F.col("category") == "positional") | (F.col("category") == "existential"),
+                F.size(F.col("trace_ids")) / F.col("source_trace_count")
+            )
+            .otherwise(F.lit(None))
+        )
+
+        grouped_constraints = grouped_constraints.filter(F.col("confidence") >= self.mining_config.get("confidence_threshold", 0.0))
+
         # Prepare a CSV-friendly DataFrame
         select_cols = [
             F.col("category"),
@@ -308,6 +342,7 @@ class Mining(SiestaModule):
             F.col("target"),
             F.col("occurrences").cast("string"),
             F.col("support").cast("string"),
+            F.col("confidence").cast("string"),
         ]
         
         # Optionally include the list of trace_ids supporting each constraint, serialized as a pipe-delimited string. 

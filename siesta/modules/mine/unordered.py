@@ -18,7 +18,7 @@ def _mine_trace_unordered_pandas(pdf: pd.DataFrame) -> pd.DataFrame:
     Returns a DataFrame with columns (template, source, trace_id, target, occurrences).
     """
     if pdf.empty:
-        return pd.DataFrame(columns=["template", "source", "trace_id", "target", "occurrences"])
+        return pd.DataFrame(columns=["template", "source", "trace_id", "target", "occurrences", "count_source", "count_target"])
     
     trace_id = pdf["trace_id"].iloc[0]
     trace_activities: Set[str] = set(pdf["activity"].unique())
