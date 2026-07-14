@@ -325,7 +325,7 @@ class Mining(SiestaModule):
         ).withColumn(
             "confidence",
             F.when(
-                (F.col("category") == "unordered" | F.col("category") == "negation"),
+                (F.col("category") == "unordered") | (F.col("category") == "negation"),
                 (F.size(F.col("trace_ids")) ** 2) / (F.col("source_trace_count") * F.col("target_trace_count"))
             ).when(
                 (F.col("category") == "ordered") | (F.col("category") == "positional") | (F.col("category") == "existential"),
@@ -340,7 +340,7 @@ class Mining(SiestaModule):
         grouped_constraints = grouped_constraints.withColumn(
             "interest",
             F.when(
-                F.col("source_trace_count") != 0 & F.col("target_trace_count") != 0,
+                (F.col("source_trace_count") != 0) & (F.col("target_trace_count") != 0),
                 F.col("support") / (F.col("source_trace_count") / F.lit(trace_count) * F.col("target_trace_count") / F.lit(trace_count))
             )
             .otherwise(F.lit(None))
