@@ -325,7 +325,7 @@ class Mining(SiestaModule):
         ).withColumn(
             "confidence",
             F.when(
-                F.col("category") == "unordered",
+                (F.col("category") == "unordered" | F.col("category") == "negation"),
                 (F.size(F.col("trace_ids")) ** 2) / (F.col("source_trace_count") * F.col("target_trace_count"))
             ).when(
                 (F.col("category") == "ordered") | (F.col("category") == "positional") | (F.col("category") == "existential"),
