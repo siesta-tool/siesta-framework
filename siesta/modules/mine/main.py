@@ -333,6 +333,17 @@ class Mining(SiestaModule):
         )
 
         grouped_constraints = grouped_constraints.filter(F.col("confidence") >= self.mining_config.get("confidence_threshold", 0.0))
+        
+        # Calculate interest = support(rule) / (support(source) * support(target))
+        grouped_constraints = grouped_constraints.withColumn(
+            "interest",
+            F.when(
+                F.col("source_trace_count") != 0 & F.col("target_trace_count") != 0,
+                F.col("support") / (F.col("source_trace_count") / F.lit(trace_count) * F.col("target_trace_count") / F.lit(trace_count))
+            )
+            .otherwise(F.lit(None))
+        )
+
 
         # Prepare a CSV-friendly DataFrame
         select_cols = [

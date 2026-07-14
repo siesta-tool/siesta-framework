@@ -21,6 +21,7 @@ class Constraint:
         self.occurrences = None
         self.support = 0.0
         self.confidence = 0.0
+        self.interest = 0.0
         self.trace_ids = []
     
     @property   # For existence constraints, since they only have one source, we can refer to it as the activity
