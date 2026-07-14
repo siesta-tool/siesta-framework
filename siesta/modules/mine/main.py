@@ -33,6 +33,7 @@ class MiningConfig(BaseModel):
     window_size: int = Field(30, description="Position-based window size when grouping='window'")
     support_threshold: float = Field(0.0, description="Minimum support fraction [0,1] to retain constraints")
     confidence_threshold: float = Field(0.0, description="Minimum confidence fraction [0,1] to retain constraints")
+    interest_threshold: float = Field(0.0, description="Minimum interest fraction [0,1] to retain constraints")
     include_trace_lists: bool = Field(False, description="Append a pipe-delimited trace_ids column per constraint")
     force_recompute: bool = Field(False, description="Remine all traces ignoring previous mining state")
     output_path: str = Field("output/example_log", description="Local path prefix for the output CSV")
@@ -95,6 +96,7 @@ class Mining(SiestaModule):
         - `window_size` *(int, default: `30`)* - position-based window size when `grouping="window"`.
         - `support_threshold` *(float [0,1], default: `0.0`)* - minimum support fraction to retain constraints.
         - `confidence_threshold` *(float [0,1], default: `0.0`)* - minimum confidence fraction to retain constraints.
+        - `interest_threshold` *(float [0,1], default: `0.0`)* - minimum interest fraction to retain constraints.
         - `include_trace_lists` *(bool, default: `false`)* - append a pipe-delimited `trace_ids` column per constraint.
         - `force_recompute` *(bool, default: `false`)* - remine all traces ignoring previous mining state.
         """
@@ -344,6 +346,8 @@ class Mining(SiestaModule):
             .otherwise(F.lit(None))
         )
 
+        grouped_constraints = grouped_constraints.filter(F.col("confidence") >= self.mining_config.get("confidence_threshold", 0.0))
+        grouped_constraints = grouped_constraints.filter(F.col("interest") >= self.mining_config.get("interest_threshold", 0.0))
 
         # Prepare a CSV-friendly DataFrame
         select_cols = [
