@@ -365,6 +365,7 @@ class Mining(SiestaModule):
             F.col("occurrences").cast("string"),
             F.col("support").cast("string"),
             F.col("confidence").cast("string"),
+            F.col("interest").cast("string"),
         ]
         
         # Optionally include the list of trace_ids supporting each constraint, serialized as a pipe-delimited string. 
