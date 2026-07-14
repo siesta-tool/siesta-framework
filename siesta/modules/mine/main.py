@@ -292,11 +292,17 @@ class Mining(SiestaModule):
             F.collect_list("trace_id").alias("trace_ids")
         )
 
+        # Track the actual match count separately from trace_ids, since precomputed
+        # negation rows have no trace_id list (only an aggregate support count) and
+        # would otherwise look like zero matches when computing confidence below.
+        grouped_constraints = grouped_constraints.withColumn(
+            "match_count", F.size(F.col("trace_ids"))
+        )
 
         # Calculate support: len(trace_ids) / trace_count
         grouped_constraints = grouped_constraints.withColumn(
             "support",
-            (F.size(F.col("trace_ids")) / F.lit(trace_count))
+            (F.col("match_count") / F.lit(trace_count))
         )
 
         if precomputed is not None:
@@ -305,6 +311,7 @@ class Mining(SiestaModule):
                 F.col("target"), F.col("occurrences"),
                 (F.col("_support_count") / F.lit(trace_count)).alias("support"),
                 F.array().cast("array<string>").alias("trace_ids"),
+                F.col("_support_count").alias("match_count"),
             )
             grouped_constraints = grouped_constraints.unionByName(grouped_pre)
 
@@ -326,10 +333,10 @@ class Mining(SiestaModule):
             "confidence",
             F.when(
                 (F.col("category") == "unordered") | (F.col("category") == "negation"),
-                (F.size(F.col("trace_ids")) ** 2) / (F.col("source_trace_count") * F.col("target_trace_count"))
+                (F.col("match_count") ** 2) / (F.col("source_trace_count") * F.col("target_trace_count"))
             ).when(
                 (F.col("category") == "ordered") | (F.col("category") == "positional") | (F.col("category") == "existential"),
-                F.size(F.col("trace_ids")) / F.col("source_trace_count")
+                F.col("match_count") / F.col("source_trace_count")
             )
             .otherwise(F.lit(None))
         )
