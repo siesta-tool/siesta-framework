@@ -293,8 +293,7 @@ class Mining(SiestaModule):
         )
 
         # Track the actual match count separately from trace_ids, since precomputed
-        # negation rows have no trace_id list (only an aggregate support count) and
-        # would otherwise look like zero matches when computing confidence below.
+        # negation rows have no trace_id list (only an aggregate support count).
         grouped_constraints = grouped_constraints.withColumn(
             "match_count", F.size(F.col("trace_ids"))
         )
@@ -318,8 +317,11 @@ class Mining(SiestaModule):
         grouped_constraints = grouped_constraints.filter(F.col("support") >= self.mining_config.get("support_threshold", 0.0))
 
         # Calculate confidence:
-        #   for unordered: #traces_ab ^ 2 / (#traces_a * #traces_b)
-        #   for ordered: #traces_ab / #traces_a
+        #   for ordered: #traces_ab / #traces_a                          (P(target|source))
+        #   for unordered: #traces_ab / sqrt(#traces_a * #traces_b)      (geometric mean of both directed confidences)
+        #   for negation: match_count is the *complement* of coexistence (N - #traces_ab), so the
+        #     coexistence count must be recovered as N - match_count before reusing the directed
+        #     formulas, applied to the negated events P(not target|source) and P(not source|target).
         activity_counts = self.storage.read_activity_index(metadata=self.metadata).groupBy("activity").agg(F.count_distinct("trace_id").alias("activity_trace_count"))
         grouped_constraints = grouped_constraints.join(
             activity_counts.withColumnRenamed("activity", "source").withColumnRenamed("activity_trace_count", "source_trace_count"),
@@ -329,11 +331,22 @@ class Mining(SiestaModule):
             activity_counts.withColumnRenamed("activity", "target").withColumnRenamed("activity_trace_count", "target_trace_count"),
             on="target",
             how="left"
-        ).withColumn(
+        )
+
+        coexist_count = F.lit(trace_count) - F.col("match_count")
+        negation_confidence = F.sqrt(
+            ((F.col("source_trace_count") - coexist_count) / F.col("source_trace_count"))
+            * ((F.col("target_trace_count") - coexist_count) / F.col("target_trace_count"))
+        )
+
+        grouped_constraints = grouped_constraints.withColumn(
             "confidence",
             F.when(
-                (F.col("category") == "unordered") | (F.col("category") == "negation"),
-                (F.col("match_count") ** 2) / (F.col("source_trace_count") * F.col("target_trace_count"))
+                F.col("category") == "unordered",
+                F.col("match_count") / F.sqrt(F.col("source_trace_count") * F.col("target_trace_count"))
+            ).when(
+                F.col("category") == "negation",
+                negation_confidence
             ).when(
                 (F.col("category") == "ordered") | (F.col("category") == "positional") | (F.col("category") == "existential"),
                 F.col("match_count") / F.col("source_trace_count")
@@ -342,18 +355,22 @@ class Mining(SiestaModule):
         )
 
         grouped_constraints = grouped_constraints.filter(F.col("confidence") >= self.mining_config.get("confidence_threshold", 0.0))
-        
-        # Calculate interest = support(rule) / (support(source) * support(target))
+
+        # Calculate interest = support(rule) / (expected support under independence).
+        # For positive-event categories the independence baseline is P(source) * P(target).
+        # For negation the mined event is "source and target do NOT coexist", whose independence
+        # baseline is 1 - P(source) * P(target), not P(source) * P(target).
+        independence_support = (F.col("source_trace_count") / F.lit(trace_count)) * (F.col("target_trace_count") / F.lit(trace_count))
+        expected_support = F.when(F.col("category") == "negation", F.lit(1.0) - independence_support).otherwise(independence_support)
         grouped_constraints = grouped_constraints.withColumn(
             "interest",
             F.when(
-                (F.col("source_trace_count") != 0) & (F.col("target_trace_count") != 0),
-                F.col("support") / (F.col("source_trace_count") / F.lit(trace_count) * F.col("target_trace_count") / F.lit(trace_count))
+                (F.col("source_trace_count") != 0) & (F.col("target_trace_count") != 0) & (expected_support != 0),
+                F.col("support") / expected_support
             )
             .otherwise(F.lit(None))
         )
 
-        grouped_constraints = grouped_constraints.filter(F.col("confidence") >= self.mining_config.get("confidence_threshold", 0.0))
         grouped_constraints = grouped_constraints.filter(F.col("interest") >= self.mining_config.get("interest_threshold", 0.0))
 
         # Prepare a CSV-friendly DataFrame
