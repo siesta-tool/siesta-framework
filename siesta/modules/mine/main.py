@@ -16,6 +16,7 @@ from siesta.modules.mine.positional import discover_positional
 from siesta.modules.mine.ordered import discover_ordered
 from siesta.modules.mine.unordered import discover_unordered
 from siesta.modules.mine.negations import discover_negations
+from siesta.modules.mine.branching import apply_branching
 from pyspark.sql import SparkSession, DataFrame, functions as F
 
 import csv
@@ -36,6 +37,10 @@ class MiningConfig(BaseModel):
     interest_threshold: float = Field(0.0, description="Minimum interest fraction [0,1] to retain constraints")
     include_trace_lists: bool = Field(False, description="Append a pipe-delimited trace_ids column per constraint")
     force_recompute: bool = Field(False, description="Remine all traces ignoring previous mining state")
+    branching_type: str = Field("none", description="Branching mode: 'none' (off), 'target' (branch over targets per source), or 'source' (branch over sources per target)")
+    branching_policy: str = Field("or", description="Logical relation for merging singular constraints: 'and' (intersection), 'or' (union), or 'xor' (exclusive)")
+    branching_bound: int = Field(0, description="Maximum number of activities in a branched set; 0 = unbounded (stop on support drop)")
+    branching_approach: str = Field("auto", description="Greedy merge direction: 'bottomup', 'topdown', or 'auto' (topdown for OR, bottomup for AND/XOR)")
     output_path: str = Field("output/example_log", description="Local path prefix for the output CSV")
 
 
@@ -99,6 +104,14 @@ class Mining(SiestaModule):
         - `interest_threshold` *(float [0,1], default: `0.0`)* - minimum interest fraction to retain constraints.
         - `include_trace_lists` *(bool, default: `false`)* - append a pipe-delimited `trace_ids` column per constraint.
         - `force_recompute` *(bool, default: `false`)* - remine all traces ignoring previous mining state.
+        - `branching_type` *(str, default: `"none"`)* - branch singular constraints into branched ones:
+            `"none"` = off, `"target"` = branch over targets sharing a source, `"source"` = branch over sources sharing a target.
+        - `branching_policy` *(str, default: `"or"`)* - logical relation merging the singular trace sets:
+            `"and"` (intersection), `"or"` (union), or `"xor"` (exclusive/symmetric difference).
+        - `branching_bound` *(int, default: `0`)* - max activities in a branched set; `0` = unbounded (stop on support drop).
+        - `branching_approach` *(str, default: `"auto"`)* - greedy merge direction: `"bottomup"`, `"topdown"`,
+            or `"auto"` (top-down for OR, bottom-up for AND/XOR). Branched constraints report support only
+            (confidence/interest are undefined for an activity set) and replace the singular constraints they absorb.
         """
         logger.info(f"{self.name} is running via API request.")
 
@@ -185,6 +198,26 @@ class Mining(SiestaModule):
         valid_categories = {"positional", "existential", "ordered", "unordered", "negation", "*"}
         if not set(self.mining_config["categories"]).issubset(valid_categories):
             raise ValueError(f"Invalid categories specified in mining_config: {self.mining_config['categories']}. Valid options are: {valid_categories}.")
+
+        # Validate branching options. Branching merges singular constraints into
+        # branched ones over the source or target activity side.
+        branching_type = str(self.mining_config.get("branching_type", "none")).lower()
+        if branching_type not in {"none", "source", "target"}:
+            raise ValueError(f"Invalid branching_type: {self.mining_config.get('branching_type')}. Valid options are: none, source, target.")
+        self.mining_config["branching_type"] = branching_type
+
+        branching_policy = str(self.mining_config.get("branching_policy", "or")).lower()
+        if branching_policy not in {"and", "or", "xor"}:
+            raise ValueError(f"Invalid branching_policy: {self.mining_config.get('branching_policy')}. Valid options are: and, or, xor.")
+        self.mining_config["branching_policy"] = branching_policy
+
+        branching_approach = str(self.mining_config.get("branching_approach", "auto")).lower()
+        if branching_approach not in {"auto", "bottomup", "topdown"}:
+            raise ValueError(f"Invalid branching_approach: {self.mining_config.get('branching_approach')}. Valid options are: auto, bottomup, topdown.")
+        self.mining_config["branching_approach"] = branching_approach
+
+        if int(self.mining_config.get("branching_bound", 0)) < 0:
+            raise ValueError("branching_bound must be >= 0 (0 = unbounded).")
 
         # If the caller left output_path at its default, derive it from log_name instead.
         if config.get("output_path") is None or config.get("output_path") == "output/example_log":
@@ -298,6 +331,30 @@ class Mining(SiestaModule):
             "match_count", F.size(F.col("trace_ids"))
         )
 
+        # Optional branching stage: merge singular constraints that share a fixed
+        # activity into a single branched constraint over the variable activity
+        # side, under the configured logical policy. Pair constraints (ordered,
+        # unordered) branch over the selected source/target side; existential
+        # extends the activity per occurrence count; positional extends the
+        # activity (OR/XOR only); negations are never branched. Merged singulars
+        # are replaced by their branched constraint; unmerged singulars pass
+        # through. Branched rows carry a multi-activity source/target ("A|B|C")
+        # and report support only. When branching is off, every row is flagged
+        # not-branched.
+        branching_type = self.mining_config.get("branching_type", "none")
+        if branching_type in ("source", "target"):
+            grouped_constraints = apply_branching(
+                grouped_constraints,
+                branching_type=branching_type,
+                branching_policy=self.mining_config.get("branching_policy", "or"),
+                branching_approach=self.mining_config.get("branching_approach", "auto"),
+                branching_bound=int(self.mining_config.get("branching_bound", 0)),
+                trace_count=trace_count,
+                support_threshold=self.mining_config.get("support_threshold", 0.0),
+            )
+        else:
+            grouped_constraints = grouped_constraints.withColumn("is_branched", F.lit(False))
+
         # Calculate support: len(trace_ids) / trace_count
         grouped_constraints = grouped_constraints.withColumn(
             "support",
@@ -311,6 +368,7 @@ class Mining(SiestaModule):
                 (F.col("_support_count") / F.lit(trace_count)).alias("support"),
                 F.array().cast("array<string>").alias("trace_ids"),
                 F.col("_support_count").alias("match_count"),
+                F.lit(False).alias("is_branched"),
             )
             grouped_constraints = grouped_constraints.unionByName(grouped_pre)
 
@@ -339,9 +397,14 @@ class Mining(SiestaModule):
             * ((F.col("target_trace_count") - coexist_count) / F.col("target_trace_count"))
         )
 
+        # Branched constraints combine multiple activities on one side, so the
+        # single-activity confidence/interest formulas do not apply: they report
+        # support only, with confidence/interest left null.
         grouped_constraints = grouped_constraints.withColumn(
             "confidence",
             F.when(
+                F.col("is_branched"), F.lit(None)
+            ).when(
                 F.col("category") == "unordered",
                 F.col("match_count") / F.sqrt(F.col("source_trace_count") * F.col("target_trace_count"))
             ).when(
@@ -354,7 +417,11 @@ class Mining(SiestaModule):
             .otherwise(F.lit(None))
         )
 
-        grouped_constraints = grouped_constraints.filter(F.col("confidence") >= self.mining_config.get("confidence_threshold", 0.0))
+        # A null confidence never satisfies `>=`; branched rows (and any other
+        # null-confidence rows) must pass through rather than being dropped.
+        grouped_constraints = grouped_constraints.filter(
+            F.col("confidence").isNull() | (F.col("confidence") >= self.mining_config.get("confidence_threshold", 0.0))
+        )
 
         # Calculate interest = support(rule) / (expected support under independence).
         # For positive-event categories the independence baseline is P(source) * P(target).

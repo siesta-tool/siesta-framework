@@ -353,6 +353,12 @@ def render(base_url: str) -> None:
         value=False,
         help="Activate window grouping and enable the window size field."
     )
+    enable_branching = st.checkbox(
+        "Enable branching",
+        value=False,
+        help="Merge singular constraints that share an activity into branched ones "
+        "(a set of activities combined under a logical policy). Enables the branching fields below.",
+    )
 
     with st.form("miner_form"):
         col1, col2 = st.columns(2)
@@ -400,6 +406,47 @@ def render(base_url: str) -> None:
             )
             include_trace_lists = st.checkbox("Include trace lists", value=False)
 
+        st.divider()
+        st.markdown(
+            "**Branching** — merge singular constraints into branched ones over a set of "
+            "activities. Fields are only used when *Enable branching* is checked."
+        )
+        bcol1, bcol2 = st.columns(2)
+        with bcol1:
+            branching_type = st.selectbox(
+                "Branch over",
+                ["target", "source"],
+                index=0,
+                disabled=not enable_branching,
+                help="Pair constraints (ordered/unordered) branch over the chosen side: "
+                "'target' merges targets sharing a source, 'source' merges sources sharing a target. "
+                "Existential/positional always extend the activity regardless.",
+            )
+            branching_policy = st.selectbox(
+                "Policy",
+                ["or", "and", "xor"],
+                index=0,
+                disabled=not enable_branching,
+                help="Logical relation merging the satisfying trace sets: 'or' (union), "
+                "'and' (intersection), 'xor' (exclusive). Positional constraints allow only or/xor.",
+            )
+        with bcol2:
+            branching_approach = st.selectbox(
+                "Approach",
+                ["auto", "bottomup", "topdown"],
+                index=0,
+                disabled=not enable_branching,
+                help="Greedy merge direction. 'auto' = top-down for OR, bottom-up for AND/XOR.",
+            )
+            branching_bound = st.number_input(
+                "Bound",
+                value=0,
+                min_value=0,
+                step=1,
+                disabled=not enable_branching,
+                help="Maximum number of activities in a branched set. 0 = unbounded "
+                "(stop only when support would drop below the support threshold).",
+            )
 
         submit = st.form_submit_button("Run miner", disabled=st.session_state.miner_running, key="run_miner_button")
         if submit:
@@ -419,6 +466,10 @@ def render(base_url: str) -> None:
             "interest_threshold": interest_threshold,
             "include_trace_lists": include_trace_lists,
             "force_recompute": force_recompute,
+            "branching_type": branching_type if enable_branching else "none",
+            "branching_policy": branching_policy,
+            "branching_bound": int(branching_bound),
+            "branching_approach": branching_approach,
             "output_path": f"output/{log_name}",
         }
         with st.spinner("Running miner..."):
@@ -435,5 +486,8 @@ def render(base_url: str) -> None:
             "- `Support`/`Confidence`/`Interest` thresholds are applied on the backend before results are "
             "returned; `Interest` isn't defined for positional/existential rules, so it doesn't filter them.\n"
             "- `Force recompute` overrides any cached results on the backend.\n"
-            "- `Include trace lists` can produce more detailed results at the cost of larger responses."
+            "- `Include trace lists` can produce more detailed results at the cost of larger responses.\n"
+            "- `Enable branching` merges singular constraints into branched ones whose source/target is a "
+            "set of activities (shown pipe-delimited, e.g. `A|B|C`). Branched rules report support only "
+            "(confidence/interest are undefined for an activity set). Negations are never branched."
         )

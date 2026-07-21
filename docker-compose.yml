@@ -42,8 +42,11 @@ services:
     build:
       context: .
       dockerfile: siesta/dockerbase/UI/UI.dockerfile
+    command: ["--server.runOnSave=true", "--server.fileWatcherType=poll"]
     environment:
       - SIESTA_API_URL=http://siesta-api:8000
+    volumes:
+      - ./ui:/workspace/ui
     depends_on:
       - siesta-api
     networks:
