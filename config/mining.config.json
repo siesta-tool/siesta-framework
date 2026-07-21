@@ -1,5 +1,5 @@
 {
-    "log_name": "example_log",
+    "log_name": "bpi2017",
     "storage_namespace": "siesta",
     "storage_type": "s3",
     "force_recompute": true

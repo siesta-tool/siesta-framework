@@ -16,6 +16,9 @@ from siesta.modules.mine.positional import discover_positional
 from siesta.modules.mine.ordered import discover_ordered
 from siesta.modules.mine.unordered import discover_unordered
 from siesta.modules.mine.negations import discover_negations
+from siesta.modules.mine.causal import (
+    discover_causal_support, DEFAULT_ALPHA, DEFAULT_MIN_SAMPLES, DEFAULT_MAX_COND,
+)
 from pyspark.sql import SparkSession, DataFrame, functions as F
 
 import csv
@@ -401,3 +404,105 @@ class Mining(SiestaModule):
             writer.writerow(col_names)
             for row in constraints_csv.toLocalIterator(prefetchPartitions=True):
                 writer.writerow([row[c] for c in col_names])
+
+
+class CausalConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    log_name: str = Field("example_log", description="Name of the indexed log")
+    storage_namespace: str = Field("siesta", description="Storage namespace")
+    storage_type: str = Field("s3", description="Storage backend type")
+    alpha: float = Field(DEFAULT_ALPHA, description="Significance level for the Fisher-z CI tests")
+    min_samples: int = Field(DEFAULT_MIN_SAMPLES, description="Min trace instances for a variant to be used")
+    max_cond: int = Field(DEFAULT_MAX_COND, description="Max conditioning-set size in the PC skeleton")
+    output_path: str | None = Field(None, description="Local CSV output path (auto-derived if omitted)")
+
+
+class Causal(SiestaModule):
+    """Ad-hoc causal support for ``Response(a,b)`` constraints.
+
+    Standalone companion to the ``miner`` module: computes Plain/Max/Diff causal
+    support per activity pair (see :mod:`siesta.modules.mine.causal`) and annotates
+    the mined Response constraints, without touching the mining scoring pipeline.
+
+    CLI::
+
+        python main.py causal --config config/siesta.config.json \\
+                              --causal_config config/causal.config.json
+    """
+
+    name = "causal"
+    version = "1.0.0"
+
+    def __init__(self):
+        super().__init__()
+        self.causal_config: Dict[str, Any] = {}
+        self.metadata: MetaData | None = None
+
+    def register_routes(self) -> SiestaModule.ApiRoutes | None:
+        return {"run": ('POST', self.api_run)}
+
+    def startup(self):
+        logger.info("Causal module startup complete.")
+
+    def _prepare(self, config: Dict[str, Any]) -> None:
+        self.siesta_config = get_system_config()
+        self.storage = get_storage_manager()
+        if not self.storage.log_exists(config):
+            raise ValueError(
+                f"Log '{config.get('log_name')}' does not exist in storage. Run indexing first."
+            )
+        self.causal_config = CausalConfig().model_dump()
+        self.causal_config.update(config)
+        self.metadata = MetaData(
+            storage_namespace=self.causal_config["storage_namespace"],
+            log_name=self.causal_config["log_name"],
+            storage_type=self.causal_config.get("storage_type", "s3"),
+        )
+        self.metadata = self.storage.read_metadata_table(self.metadata)
+
+    def _run(self) -> str:
+        # Whole-log sequence table (with the attributes map) drives the PC step.
+        sequence_df = self.storage.read_sequence_table(self.metadata)
+        result_df = discover_causal_support(
+            sequence_df,
+            self.metadata,
+            alpha=self.causal_config["alpha"],
+            min_samples=self.causal_config["min_samples"],
+            max_cond=self.causal_config["max_cond"],
+            output_path=self.causal_config.get("output_path"),
+        )
+        n = result_df.count()
+        logger.info(f"Causal support computed for {n} activity pairs.")
+        return self.causal_config.get("output_path") or f"output/{self.metadata.log_name}_causal.csv"
+
+    def api_run(self, causal_config: Annotated[CausalConfig, Body()]) -> Any:
+        """Compute causal support for the indexed log and return the result rows."""
+        logger.info(f"{self.name} is running via API request.")
+        try:
+            self._prepare(causal_config.model_dump())
+        except ValueError as e:
+            return {"code": 400, "message": str(e)}
+        start = time.time()
+        output_path = self._run()
+        return {"code": 200, "output_path": output_path, "time": time.time() - start}
+
+    def cli_run(self, args: Any, **kwargs: Any) -> Any:
+        """Entry point for the Causal module via the command line."""
+        logger.info(f"{self.name} is running with args: {args}")
+        parser = argparse.ArgumentParser(description="Siesta Causal-support module")
+        parser.add_argument('--causal_config', type=str, required=False,
+                            help='Path to causal configuration JSON file')
+        parsed_args, _ = parser.parse_known_args(args)
+
+        config: Dict[str, Any] = {}
+        if parsed_args.causal_config:
+            if not Path(parsed_args.causal_config).exists():
+                raise FileNotFoundError(f"Config file {parsed_args.causal_config} not found.")
+            with open(parsed_args.causal_config, 'r') as f:
+                config = json.load(f)
+
+        self._prepare(config)
+        start = time.time()
+        output_path = self._run()
+        logger.info(f"Completed in {time.time() - start:.2f} seconds. Results at {output_path}.")
+        return output_path

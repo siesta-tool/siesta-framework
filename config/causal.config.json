@@ -1,0 +1,9 @@
+{
+    "log_name": "bpi2017",
+    "storage_namespace": "siesta",
+    "storage_type": "s3",
+    "alpha": 0.01,
+    "min_samples": 20,
+    "max_cond": 2,
+    "output_path": "output/bpi2017_causal.csv"
+}

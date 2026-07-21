@@ -1,6 +1,6 @@
 {
-  "log_name": "test_quick",
-  "log_path": "datasets/test_quick.csv",
+  "log_name": "bpi2017",
+  "log_path": "datasets/BPI2017.xes",
   "storage_namespace": "siesta",
   "overwrite_data": false,
   "enable_streaming": false,
