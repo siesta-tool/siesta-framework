@@ -371,7 +371,12 @@ class Mining(SiestaModule):
             .otherwise(F.lit(None))
         )
 
-        grouped_constraints = grouped_constraints.filter(F.col("interest") >= self.mining_config.get("interest_threshold", 0.0))
+        # Interest is only defined for categories with a target (ordered/unordered/negation);
+        # for unary categories (positional/existential) it's NULL by design, and a NULL
+        # never satisfies `>=`, so those rows must pass through rather than being dropped.
+        grouped_constraints = grouped_constraints.filter(
+            F.col("interest").isNull() | (F.col("interest") >= self.mining_config.get("interest_threshold", 0.0))
+        )
 
         # Prepare a CSV-friendly DataFrame
         select_cols = [

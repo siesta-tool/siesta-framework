@@ -4,6 +4,7 @@ import boto3
 from botocore.exceptions import ClientError
 from fastapi import UploadFile
 from pyspark.sql.functions import col, lit
+from pyspark.sql.types import StructType
 from pyspark import RDD
 from siesta.model.StorageModel import MetaData, hash_str, ConstraintEntry
 from pyspark.sql import SparkSession, DataFrame, functions as F
@@ -31,11 +32,28 @@ class S3Manager(StorageManager):
     name = "S3 Storage Manager"
     version = "1.0.0"
     type = "s3"
-    
+
     spark: SparkSession | None
     config: Dict[str, Any]
     s3_client: boto3.Session.client
-   
+
+    # Canonical table names exposed for ad-hoc administrative access, mapped to the
+    # MetaData path property and Spark file format used to read them.
+    _ADMIN_TABLES: Dict[str, tuple] = {
+        "sequence_table": ("sequence_table_path", "delta"),
+        "activity_index": ("activity_index_path", "delta"),
+        "pairs_index": ("pairs_index_path", "delta"),
+        "count_table": ("count_table_path", "delta"),
+        "metadata_table": ("metadata_table_path", "delta"),
+        "last_checked_table": ("last_checked_table_path", "delta"),
+        "trace_metadata_table": ("trace_metadata_table_path", "delta"),
+        "all_activity_pairs": ("all_activity_pairs_path", "delta"),
+        "positional_constraints": ("positional_constraints_path", "parquet"),
+        "existential_constraints": ("existential_constraints_path", "parquet"),
+        "ordered_constraints": ("ordered_constraints_path", "parquet"),
+        "unordered_constraints": ("unordered_constraints_path", "parquet"),
+        "negation_constraints": ("negation_constraints_path", "parquet"),
+    }
 
     def __init__(self):
         """Initialize the S3Manager with a spark manager instance and configuration."""
@@ -87,22 +105,11 @@ class S3Manager(StorageManager):
 
             # If clear_existing is True, delete all objects of the specified log
             if preprocess_config.get("clear_existing", False):
-                prefix = f"{preprocess_config.get('log_name', 'default_log')}/"
-                try:
-                    paginator = self.s3_client.get_paginator('list_objects_v2')
-                    pages = paginator.paginate(Bucket=preprocess_config.get("storage_namespace", "siesta"), Prefix=prefix)
-                    
-                    for page in pages:
-                        if 'Contents' in page:
-                            objects = [{'Key': obj['Key']} for obj in page['Contents']]
-                            if objects:
-                                self.s3_client.delete_objects(
-                                    Bucket=preprocess_config.get("storage_namespace", "siesta"),
-                                    Delete={'Objects': objects}
-                                )
-                    logger.info(f"Cleared existing log data in '{prefix}'")
-                except ClientError as e:
-                    logger.error(f"Error clearing existing data: {e}")
+                self.delete_log(MetaData(
+                    storage_namespace=preprocess_config.get("storage_namespace", "siesta"),
+                    log_name=preprocess_config.get("log_name", "default_log"),
+                    storage_type="s3",
+                ))
         except ClientError as e:
             error_code = e.response['Error']['Code']
             if error_code == '404':
@@ -744,6 +751,69 @@ class S3Manager(StorageManager):
             logger.warning(f"Could not verify existence of log '{log_name}' in bucket '{namespace}': {e}")
             return False
 
+
+    def _delete_prefix(self, bucket: str, prefix: str = "") -> bool:
+        """
+        Delete every object under a given prefix in a bucket (the whole bucket if prefix is empty).
+        """
+        try:
+            paginator = self.s3_client.get_paginator('list_objects_v2')
+            pages = paginator.paginate(Bucket=bucket, Prefix=prefix)
+            for page in pages:
+                objects = [{'Key': obj['Key']} for obj in page.get('Contents', [])]
+                if objects:
+                    self.s3_client.delete_objects(Bucket=bucket, Delete={'Objects': objects})
+            return True
+        except ClientError as e:
+            logger.error(f"Error deleting objects under '{bucket}/{prefix}': {e}")
+            return False
+
+    def delete_log(self, metadata: MetaData) -> bool:
+        """
+        Permanently delete all objects stored under a log's prefix in its namespace bucket.
+        """
+        namespace = metadata.storage_namespace
+        prefix = f"{metadata.log_name}/"
+        deleted = self._delete_prefix(namespace, prefix)
+        if deleted:
+            logger.info(f"Deleted log '{metadata.log_name}' from bucket '{namespace}'.")
+        return deleted
+
+    def delete_namespace(self, storage_namespace: str) -> bool:
+        """
+        Permanently delete a bucket and all objects stored within it.
+        """
+        if not self._delete_prefix(storage_namespace):
+            return False
+        try:
+            self.s3_client.delete_bucket(Bucket=storage_namespace)
+            logger.info(f"Deleted namespace '{storage_namespace}'.")
+            return True
+        except ClientError as e:
+            logger.error(f"Error deleting bucket '{storage_namespace}': {e}")
+            return False
+
+    def list_tables(self, metadata: MetaData) -> list[str]:
+        """
+        List the canonical table names available for ad-hoc administrative access.
+        """
+        return list(self._ADMIN_TABLES.keys())
+
+    def read_table(self, metadata: MetaData, table_name: str) -> DataFrame:
+        """
+        Load an arbitrary named table for ad-hoc administrative access via Spark.
+        """
+        if table_name not in self._ADMIN_TABLES:
+            raise ValueError(
+                f"Unknown table '{table_name}'. Available tables: {', '.join(self._ADMIN_TABLES)}"
+            )
+        path_attr, file_format = self._ADMIN_TABLES[table_name]
+        path = getattr(metadata, path_attr)
+        try:
+            return self.spark.read.format(file_format).load(path)
+        except Exception as e:
+            logger.info(f"Error reading table '{table_name}' from {path}: {e}")
+            return self.spark.createDataFrame([], schema=StructType([]))
 
     ###########################################
     ##### Declarative Mining Constraints ######

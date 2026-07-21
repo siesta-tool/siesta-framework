@@ -228,3 +228,5 @@ datasets/los*
 datasets/acc*
 
 **/modules/compare/acc*
+
+.claude

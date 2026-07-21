@@ -1,11 +1,14 @@
 """Miner module page."""
 
+import hashlib
 import json
+import re
+from pathlib import Path
 
 import streamlit as st
 from streamlit.components.v1 import html as components_html
 
-from common import api_post, format_response
+from common import api_post, format_response, log_options, namespace_options
 
 
 CATEGORY_COLORS = {
@@ -16,9 +19,25 @@ CATEGORY_COLORS = {
     "negation": "red",
 }
 
+RULES_PAGE_SIZE = 50
+MAX_VISUALIZED_RULES = 300
+
 
 def _rule_color(category: str) -> str:
     return CATEGORY_COLORS.get(category, "black")
+
+
+def _to_number(value: str) -> float | None:
+    """Coerce a CSV-sourced numeric field to float, treating "" (e.g. interest on
+    positional/existential rules, which have no target) as missing rather than as a
+    string - a column mixing numeric and empty strings breaks st.dataframe's Arrow
+    conversion."""
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _build_rule_graph(mined: list[dict]) -> str:
@@ -51,6 +70,49 @@ def _build_rule_graph(mined: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _load_local_vis_assets() -> tuple[str, str] | None:
+    """Locate pyvis's own bundled vis-network JS/CSS, so the graph doesn't depend on
+    a CDN. If that CDN is slow or blocked (e.g. restricted egress from the container
+    this UI runs in), the iframe just hangs waiting for it - which looks exactly like
+    a freeze, and wouldn't be fixed by anything on the layout/physics side."""
+    try:
+        import pyvis
+    except ImportError:
+        return None
+
+    lib_dir = Path(pyvis.__file__).parent / "lib"
+    for candidate in sorted(lib_dir.glob("vis-*"), reverse=True):
+        js_path = candidate / "vis-network.min.js"
+        css_path = candidate / "vis-network.css"
+        if js_path.exists() and css_path.exists():
+            return js_path.read_text(), css_path.read_text()
+    return None
+
+
+def _inline_vis_assets(html: str) -> str:
+    assets = _load_local_vis_assets()
+    if assets:
+        vis_js, vis_css = assets
+        html = re.sub(
+            r'<link rel="stylesheet" href="https://cdnjs\.cloudflare\.com/ajax/libs/vis-network/[^"]+"[^>]*/>',
+            lambda _match: f"<style>{vis_css}</style>",
+            html,
+        )
+        html = re.sub(
+            r'<script src="https://cdnjs\.cloudflare\.com/ajax/libs/vis-network/[^"]+"[^>]*></script>',
+            lambda _match: f"<script>{vis_js}</script>",
+            html,
+        )
+
+    # Drop dependencies that don't matter here: a relative path only valid when pyvis
+    # writes a companion lib/ folder to disk (not when embedded as a raw HTML string),
+    # and Bootstrap, which only styles chrome (buttons, cards) this view doesn't use.
+    html = re.sub(r'<script src="lib/bindings/utils\.js"></script>', "", html)
+    html = re.sub(r'<link\s[^>]*jsdelivr\.net/npm/bootstrap[^>]*/>', "", html)
+    html = re.sub(r'<script\s[^>]*jsdelivr\.net/npm/bootstrap[^>]*></script>', "", html)
+    return html
+
+
 def _build_pyvis_html(mined: list[dict]) -> str | None:
     try:
         from pyvis.network import Network
@@ -58,8 +120,34 @@ def _build_pyvis_html(mined: list[dict]) -> str | None:
         return None
 
     net = Network(height="650px", width="100%", directed=True)
-    net.toggle_physics(True)
-    net.barnes_hut()
+    # A force-directed layout (pyvis's default) runs an iterative physics simulation
+    # on the main thread - even bounded to a modest iteration count, that's still a
+    # blocking computation whose cost grows with graph size, and it's what freezes
+    # the page for anything but a handful of nodes. A hierarchical layout is a single
+    # deterministic pass with no simulation loop, so there's no freeze risk at all
+    # regardless of how many rules are visualized.
+    net.set_options("""
+    {
+      "layout": {
+        "hierarchical": {
+          "enabled": true,
+          "direction": "LR",
+          "sortMethod": "directed",
+          "levelSeparation": 150,
+          "nodeSpacing": 120
+        }
+      },
+      "physics": {
+        "enabled": false
+      },
+      "edges": {
+        "smooth": {
+          "enabled": true,
+          "type": "cubicBezier"
+        }
+      }
+    }
+    """)
 
     for item in mined:
         category = item.get("category", "")
@@ -67,23 +155,28 @@ def _build_pyvis_html(mined: list[dict]) -> str | None:
         target = item.get("target", "")
         template = item.get("template", "")
         support = item.get("support", "")
+        confidence = item.get("confidence", "")
+        interest = item.get("interest", "")
         color = _rule_color(category)
 
         title_text = (
-            f"Category: {category} Template: {template} Support: {support} Source: {source}"
+            f"Category: {category} Template: {template} Support: {support} "
+            f"Confidence: {confidence} Interest: {interest} Source: {source}"
         )
         net.add_node(source, label=source, title=title_text, color=color)
 
         if target:
             target_title = (
-                f"Category: {category} Template: {template} Support: {support} Target: {target}"
+                f"Category: {category} Template: {template} Support: {support} "
+                f"Confidence: {confidence} Interest: {interest} Target: {target}"
             )
             net.add_node(target, label=target, title=target_title, color=color)
             edge_label = f"{template} ({support})"
-            net.add_edge(source, target, label=edge_label, title=edge_label, color=color)
+            edge_title = f"{edge_label} - confidence: {confidence}, interest: {interest}"
+            net.add_edge(source, target, label=edge_label, title=edge_title, color=color)
 
     html = net.generate_html()
-    return html
+    return _inline_vis_assets(html)
 
 
 def render_miner_response(response: dict) -> None:
@@ -126,8 +219,10 @@ def render_miner_response(response: dict) -> None:
                     "template": item.get("template", ""),
                     "source": item.get("source", ""),
                     "target": item.get("target", ""),
-                    "support": item.get("support", ""),
-                    "occurrences": item.get("occurrences", ""),
+                    "occurrences": _to_number(item.get("occurrences", "")),
+                    "support": _to_number(item.get("support", "")),
+                    "confidence": _to_number(item.get("confidence", "")),
+                    "interest": _to_number(item.get("interest", "")),
                 }
             )
 
@@ -151,9 +246,28 @@ def render_miner_response(response: dict) -> None:
                 filtered_rows.append(row)
 
         if filtered_rows:
-            st.table(filtered_rows)
+            total_pages = max(1, (len(filtered_rows) + RULES_PAGE_SIZE - 1) // RULES_PAGE_SIZE)
+            page_key = "miner_rules_page"
+            if page_key not in st.session_state:
+                st.session_state[page_key] = 1
+            elif st.session_state[page_key] > total_pages:
+                st.session_state[page_key] = total_pages
+
+            if total_pages > 1:
+                page = st.number_input(
+                    "Page", min_value=1, max_value=total_pages, step=1, key=page_key,
+                    help=f"{len(filtered_rows)} rules match; {RULES_PAGE_SIZE} shown per page.",
+                )
+            else:
+                page = 1
+
+            start = (page - 1) * RULES_PAGE_SIZE
+            page_rows = filtered_rows[start:start + RULES_PAGE_SIZE]
+            st.caption(f"Showing rules {start + 1}-{start + len(page_rows)} of {len(filtered_rows)}")
+            st.dataframe(page_rows, width="stretch")
+
             supports = {}
-            for row in filtered_rows:
+            for row in page_rows:
                 support_val = float(row["support"])
                 supports[f"{row['source']}→{row['target']} ({row['template']})"] = support_val
 
@@ -162,28 +276,54 @@ def render_miner_response(response: dict) -> None:
         elif rows:
             st.info(f"No rules match support threshold >= {min_support:.2f}.")
 
-        filtered_mined = []
-        for item in mined:
-            try:
-                support_val = float(item.get("support", 0))
-            except (TypeError, ValueError):
-                support_val = 0.0
-            if support_val >= min_support:
-                filtered_mined.append(item)
+        show_visualization = st.checkbox(
+            "Show rule visualization",
+            value=False,
+            key="miner_show_visualization",
+            help="Builds a network diagram of the currently filtered rules. Off by default since it's "
+            "expensive to (re)build and can lag the page for large rule sets.",
+        )
+        if show_visualization:
+            filtered_mined = []
+            for item in mined:
+                try:
+                    support_val = float(item.get("support", 0))
+                except (TypeError, ValueError):
+                    support_val = 0.0
+                if support_val >= min_support:
+                    filtered_mined.append(item)
 
-        graph_html = _build_pyvis_html(filtered_mined)
-        with st.expander("Rule visualization"):
+            visualized_mined = filtered_mined[:MAX_VISUALIZED_RULES]
+            if len(filtered_mined) > MAX_VISUALIZED_RULES:
+                st.caption(
+                    f"Visualization limited to the first {MAX_VISUALIZED_RULES} of {len(filtered_mined)} "
+                    "filtered rules for performance. Raise the support filter to narrow further."
+                )
+
             st.markdown(
                 "Each node represents an activity value. "
                 "Edges represent rules between a source and target activity, labelled with the rule template and support. "
                 "If a rule has no target, the node itself shows the template and support for that activity. "
                 "Edge color indicates the rule category."
             )
+
+            # Streamlit reruns this whole function on any widget interaction, even ones
+            # unrelated to the visualization (e.g. changing the table page). Rebuilding
+            # and re-embedding the network on every one of those is what actually makes
+            # the page feel frozen, so only rebuild when the visualized rule set changes.
+            cache_key = hashlib.sha1(
+                json.dumps(visualized_mined, sort_keys=True, default=str).encode()
+            ).hexdigest()
+            if st.session_state.get("miner_graph_cache_key") != cache_key:
+                st.session_state["miner_graph_cache_key"] = cache_key
+                st.session_state["miner_graph_html"] = _build_pyvis_html(visualized_mined)
+                st.session_state["miner_graph_code"] = _build_rule_graph(visualized_mined)
+
+            graph_html = st.session_state["miner_graph_html"]
             if graph_html:
                 components_html(graph_html, height=700, scrolling=True)
             else:
-                graph_code = _build_rule_graph(filtered_mined)
-                st.graphviz_chart(graph_code)
+                st.graphviz_chart(st.session_state["miner_graph_code"])
 
         with st.expander("Raw response"):
             st.json(response)
@@ -203,27 +343,29 @@ def render(base_url: str) -> None:
     st.title("⛏️ Miner")
     st.markdown("Mine declarative constraints from an indexed log and inspect the configuration before sending it.")
 
+    # Kept outside the form: form widgets only rerun the script on submit, so these
+    # need to live outside it to dynamically enable/disable the window size field
+    # and refresh the log dropdown as namespace/grouping choices change.
+    storage_namespace = st.selectbox("Storage namespace", namespace_options(), accept_new_options=True)
+    log_name = st.selectbox("Log name", log_options(storage_namespace), accept_new_options=True)
+    use_window_grouping = st.checkbox(
+        "Enable window grouping",
+        value=False,
+        help="Activate window grouping and enable the window size field."
+    )
+
     with st.form("miner_form"):
         col1, col2 = st.columns(2)
         with col1:
-            log_name = st.text_input("Log name", "example_log")
-            storage_namespace = st.text_input("Storage namespace", "siesta")
             categories = st.multiselect(
                 "Categories",
                 ["*", "positional", "existential", "ordered", "unordered", "negation"],
                 default=["*"],
             )
-            use_window_grouping = st.checkbox(
-                "Enable window grouping",
-                value=False,
-                help="Activate window grouping and enable the window size field."
-            )
             grouping_options = ["trace"]
             if use_window_grouping:
                 grouping_options.append("window")
             grouping = st.selectbox("Grouping", grouping_options, index=0)
-
-        with col2:
             window_size = st.number_input(
                 "Window size",
                 value=30,
@@ -231,6 +373,9 @@ def render(base_url: str) -> None:
                 disabled=not use_window_grouping,
                 help="Only active when window grouping is enabled.",
             )
+            force_recompute = st.checkbox("Force recompute", value=False)
+
+        with col2:
             support_threshold = st.number_input(
                 "Support threshold",
                 value=0.0,
@@ -238,8 +383,23 @@ def render(base_url: str) -> None:
                 max_value=1.0,
                 format="%.2f",
             )
+            confidence_threshold = st.number_input(
+                "Confidence threshold",
+                value=0.0,
+                min_value=0.0,
+                max_value=1.0,
+                format="%.2f",
+            )
+            interest_threshold = st.number_input(
+                "Interest threshold",
+                value=0.0,
+                min_value=0.0,
+                format="%.2f",
+                help="Minimum interest (support relative to the independence baseline). "
+                "Not defined for positional/existential rules, which are unaffected by this threshold.",
+            )
             include_trace_lists = st.checkbox("Include trace lists", value=False)
-            force_recompute = st.checkbox("Force recompute", value=False)
+
 
         submit = st.form_submit_button("Run miner", disabled=st.session_state.miner_running, key="run_miner_button")
         if submit:
@@ -255,6 +415,8 @@ def render(base_url: str) -> None:
             "grouping": grouping,
             "window_size": window_size,
             "support_threshold": support_threshold,
+            "confidence_threshold": confidence_threshold,
+            "interest_threshold": interest_threshold,
             "include_trace_lists": include_trace_lists,
             "force_recompute": force_recompute,
             "output_path": f"output/{log_name}",
@@ -270,6 +432,8 @@ def render(base_url: str) -> None:
     with st.expander("Need help?"):
         st.markdown(
             "- Use `categories` to narrow the mining output by constraint type.\n"
+            "- `Support`/`Confidence`/`Interest` thresholds are applied on the backend before results are "
+            "returned; `Interest` isn't defined for positional/existential rules, so it doesn't filter them.\n"
             "- `Force recompute` overrides any cached results on the backend.\n"
             "- `Include trace lists` can produce more detailed results at the cost of larger responses."
         )

@@ -164,6 +164,61 @@ class StorageManager(ABC):
         pass
 
     @abstractmethod
+    def delete_log(self, metadata: MetaData) -> bool:
+        """
+        Permanently delete all stored tables for a single log within a namespace.
+
+        Args:
+            metadata: MetaData object identifying the storage_namespace and log_name to delete.
+
+        Returns:
+            True if the deletion completed successfully, False otherwise.
+        """
+        pass
+
+    @abstractmethod
+    def delete_namespace(self, storage_namespace: str) -> bool:
+        """
+        Permanently delete an entire storage namespace (e.g. an S3 bucket) and everything under it.
+
+        Args:
+            storage_namespace: Name of the namespace to delete.
+
+        Returns:
+            True if the deletion completed successfully, False otherwise.
+        """
+        pass
+
+    @abstractmethod
+    def list_tables(self, metadata: MetaData) -> list[str]:
+        """
+        List the canonical table names available for a given log, for ad-hoc administrative
+        access independent of the analytical pipelines.
+
+        Args:
+            metadata: MetaData object identifying the storage_namespace and log_name.
+
+        Returns:
+            List of table names that can be passed to `read_table`.
+        """
+        pass
+
+    @abstractmethod
+    def read_table(self, metadata: MetaData, table_name: str) -> DataFrame:
+        """
+        Load an arbitrary named table (as returned by `list_tables`) as a DataFrame, for
+        ad-hoc SQL access independent of the analytical pipelines.
+
+        Args:
+            metadata: MetaData object identifying the storage_namespace and log_name.
+            table_name: One of the names returned by `list_tables`.
+
+        Returns:
+            DataFrame containing the raw contents of the requested table.
+        """
+        pass
+
+    @abstractmethod
     def read_metadata_table(self, metadata: MetaData) -> MetaData:
         """
         Construct metadata based on data already stored in the database and new configuration.
