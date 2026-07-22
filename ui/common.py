@@ -4,14 +4,18 @@ from typing import Any
 import requests
 import streamlit as st
 
+# Indexing and other long-running jobs can legitimately run for hours, so
+# requests that trigger backend work stay open long enough to see them through.
+LONG_REQUEST_TIMEOUT = 60 * 60 * 24  # 24h
+
 
 def api_post(endpoint: str, base_url: str, payload: dict | None = None, files: dict | None = None) -> Any:
     url = f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
     try:
         if files:
-            response = requests.post(url, data=payload or {}, files=files, timeout=120)
+            response = requests.post(url, data=payload or {}, files=files, timeout=LONG_REQUEST_TIMEOUT)
         else:
-            response = requests.post(url, json=payload or {}, timeout=120)
+            response = requests.post(url, json=payload or {}, timeout=LONG_REQUEST_TIMEOUT)
     except Exception as error:
         return {"error": str(error)}
 
@@ -32,7 +36,7 @@ def api_post_binary(endpoint: str, base_url: str, payload: dict | None = None) -
     """
     url = f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
     try:
-        response = requests.post(url, json=payload or {}, timeout=120)
+        response = requests.post(url, json=payload or {}, timeout=LONG_REQUEST_TIMEOUT)
         response.raise_for_status()
         return response.content
     except Exception as error:
@@ -43,7 +47,7 @@ def api_post_binary(endpoint: str, base_url: str, payload: dict | None = None) -
 def api_get(endpoint: str, base_url: str, params: dict | None = None) -> Any:
     url = f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
     try:
-        response = requests.get(url, params=params or {}, timeout=10)
+        response = requests.get(url, params=params or {}, timeout=LONG_REQUEST_TIMEOUT)
     except Exception as error:
         return {"error": str(error)}
 
@@ -59,7 +63,7 @@ def api_get(endpoint: str, base_url: str, params: dict | None = None) -> Any:
 def api_delete(endpoint: str, base_url: str, params: dict | None = None) -> Any:
     url = f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
     try:
-        response = requests.delete(url, params=params or {}, timeout=60)
+        response = requests.delete(url, params=params or {}, timeout=LONG_REQUEST_TIMEOUT)
     except Exception as error:
         return {"error": str(error)}
 

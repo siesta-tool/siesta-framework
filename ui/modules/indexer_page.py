@@ -68,13 +68,18 @@ def render(base_url: str) -> None:
         },
     }
 
+    enable_streaming = st.checkbox(
+        "Enable streaming",
+        value=False,
+        help="Outside the form so the Kafka topic field below can react immediately.",
+    )
+
     with st.form("indexer_form"):
         col1, col2 = st.columns(2)
         with col1:
             log_name = st.text_input("Log name", "example_log")
             storage_namespace = st.text_input("Storage namespace", "siesta")
             clear_existing = st.checkbox("Clear existing index", value=False)
-            enable_streaming = st.checkbox("Enable streaming", value=False)
             kafka_topic = st.text_input(
                 "Kafka topic",
                 value="example_log" if enable_streaming else "",
@@ -136,6 +141,7 @@ def render(base_url: str) -> None:
                     help="Comma-separated attribute keys, or leave blank if none.",
                 )
 
+            
             log_file = st.file_uploader("Upload log file (XES, CSV, JSON)", type=["xes", "csv", "json"])
 
         submit = st.form_submit_button(
