@@ -227,6 +227,8 @@ class Indexing(SiestaModule):
 
             timed(build_count_table, "Indexing.", self.index_config, self.metadata, pairs_df)
 
+            self.storage.write_metadata_table(self.metadata)
+
             # Release the memory occupied by pairs_df now it's not needed
             pairs_df.unpersist()
 

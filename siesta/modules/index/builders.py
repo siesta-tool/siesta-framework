@@ -74,9 +74,8 @@ def build_activity_index(metadata: MetaData, events_df: DataFrame | StreamingQue
 
         def process_microbatch(batch_df, batch_id):
             storage.write_activity_index(batch_df, metadata)
-            storage.write_metadata_table(metadata) #temporary for dev
 
-    
+
         write_activity_index_job = (sequence_table_df.writeStream
             .queryName("build_activity_index")
             .foreachBatch(process_microbatch)
@@ -84,11 +83,10 @@ def build_activity_index(metadata: MetaData, events_df: DataFrame | StreamingQue
             .option("checkpointLocation", storage.get_checkpoint_location(metadata, "activity_index"))
             .start())
         return write_activity_index_job
-    
+
     else:
-    
+
         storage.write_activity_index(events_df=events_df, metadata=metadata)
-        storage.write_metadata_table(metadata) #temporary for dev
 
         return events_df
 
@@ -223,6 +221,8 @@ def build_last_checked_index_and_count_streamed(index_config: Dict, metadata: Me
         storage.write_count_table(count_df=count_df, metadata=metadata)
 
         pairs_df.unpersist()
+
+        storage.write_metadata_table(metadata)
 
 
     job = (
