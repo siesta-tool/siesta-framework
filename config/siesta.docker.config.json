@@ -1,6 +1,7 @@
 {
   "App Name": "Siesta Framework",
   "storage_type": "s3",
+  "storage_namespace_default": "siesta",
   "s3_access_key": "minioadmin",
   "s3_secret_key": "minioadmin",
   "s3_endpoint": "http://minio:9000",
