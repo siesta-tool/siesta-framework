@@ -8,7 +8,7 @@ from fastapi import Body
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 from pyspark.sql import SparkSession, functions as F
-from siesta.core.config import get_system_config
+from siesta.core.config import get_system_config, get_config_value
 from siesta.core.interfaces import SiestaModule, StorageManager
 from siesta.core.storageFactory import get_storage_manager
 from siesta.model.StorageModel import MetaData
@@ -20,7 +20,7 @@ import os
 class ModelerConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
     log_name: str = Field("example_log", description="Name of the indexed log")
-    storage_namespace: str = Field("siesta", description="Storage namespace")
+    storage_namespace: str = Field(default_factory=lambda: get_config_value("storage_namespace_default", "siesta"), description="Storage namespace")
     end_time: str | None = Field(None, description="Attribute key for event end timestamp. null = transition time (next_start - start)")
     output_format: str = Field("xml", description="Output format: 'xml' (default), 'png', 'html'")
     output_path: str = Field("output/example_log", description="Local path prefix for the output file")
@@ -69,7 +69,6 @@ class Modeling(SiestaModule):
             "summary": "Discover DFG with default settings",
             "value": {
                 "log_name": "example_log",
-                "storage_namespace": "siesta",
                 "end_time": None,
                 "output_format": "xml",
             },
@@ -81,7 +80,7 @@ class Modeling(SiestaModule):
 
         **Config fields:**
         - `log_name` *(str)* - name of the indexed log. **Required.**
-        - `storage_namespace` *(str, default: `"siesta"`)* - storage namespace.
+        - `storage_namespace` *(str, default: system config `storage_namespace_default`)* - storage namespace.
         - `end_time` *(str | null, default: `null`)* - event attribute key for the activity end
             timestamp. If set, average activity duration is computed and shown inside each node.
             If null, no duration annotation is added.
@@ -111,7 +110,6 @@ class Modeling(SiestaModule):
             "summary": "Discover BPMN model with default settings",
             "value": {
                 "log_name": "example_log",
-                "storage_namespace": "siesta",
                 "end_time": None,
                 "output_format": "xml",
             },
@@ -123,7 +121,7 @@ class Modeling(SiestaModule):
 
         **Config fields:**
         - `log_name` *(str)* - name of the indexed log. **Required.**
-        - `storage_namespace` *(str, default: `"siesta"`)* - storage namespace.
+        - `storage_namespace` *(str, default: system config `storage_namespace_default`)* - storage namespace.
         - `end_time` *(str | null, default: `null`)* - event attribute key for the activity end
             timestamp. If set, average activity duration is computed and shown inside each node.
             If null, no duration annotation is added.
@@ -213,7 +211,7 @@ class Modeling(SiestaModule):
 
     def _load_metadata(self):
         self.metadata = MetaData(
-            storage_namespace=self.modeler_config.get("storage_namespace", "siesta"),
+            storage_namespace=self.modeler_config.get("storage_namespace", get_config_value("storage_namespace_default", "siesta")),
             log_name=self.modeler_config.get("log_name", "default_log"),
             storage_type=self.modeler_config.get("storage_type", "s3"),
         )

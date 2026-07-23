@@ -3,7 +3,10 @@
     "allow": [
       "Bash(docker compose *)",
       "Bash(docker run *)",
-      "Bash(echo \"EXIT CODE: $?\")"
+      "Bash(echo \"EXIT CODE: $?\")",
+      "Read(//usr/bin/**)",
+      "Bash(apt list *)",
+      "Bash(/home/balaktsis/siesta-framework/venv/bin/python3 siesta/install_dependencies.py)"
     ]
   }
 }

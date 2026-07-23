@@ -7,7 +7,7 @@ from siesta.core.sparkManager import get_spark_session, cleanup as spark_cleanup
 from siesta.model.StorageModel import MetaData
 from pydantic import BaseModel, ConfigDict, Field
 from siesta.core.interfaces import SiestaModule, StorageManager
-from siesta.core.config import get_system_config
+from siesta.core.config import get_system_config, get_config_value
 from siesta.core.logger import timed
 from siesta.core.storageFactory import get_storage_manager
 from siesta.modules.index.parsers import upload_log_file_object
@@ -22,7 +22,7 @@ class IndexConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
     log_name: str = Field("example_log", description="Name for the log in storage")
     log_path: str = Field("../datasets/test.xes", description="Path to the local log file (XES, CSV, or JSON)")
-    storage_namespace: str = Field("siesta", description="Storage namespace / bucket prefix")
+    storage_namespace: str = Field(default_factory=lambda: get_config_value("storage_namespace_default", "siesta"), description="Storage namespace / bucket prefix")
     clear_existing: bool = Field(False, description="Drop and rebuild the existing index")
     enable_streaming: bool = Field(False, description="Start a Kafka streaming collector instead of batch processing")
     kafka_topic: str = Field("example_log", description="Kafka topic to consume in streaming mode")
@@ -87,11 +87,11 @@ class Indexing(SiestaModule):
             openapi_examples={
                 "batch": {
                     "summary": "Batch indexing",
-                    "value": '{"log_name": "example_log", "storage_namespace": "siesta", "clear_existing": false, "field_mappings": {"csv": {"trace_id": "case:concept:name", "activity": "concept:name", "start_timestamp": "time:timestamp"}}}',
+                    "value": '{"log_name": "example_log", "clear_existing": false, "field_mappings": {"csv": {"trace_id": "case:concept:name", "activity": "concept:name", "start_timestamp": "time:timestamp"}}}',
                 },
                 "streaming": {
                     "summary": "Kafka streaming",
-                    "value": '{"log_name": "example_log", "storage_namespace": "siesta", "enable_streaming": true, "kafka_topic": "example_log"}',
+                    "value": '{"log_name": "example_log", "enable_streaming": true, "kafka_topic": "example_log"}',
                 },
             },
         )],
@@ -110,7 +110,7 @@ class Indexing(SiestaModule):
 
         **Config fields (`index_config`):**
         - `log_name` *(str, default: `"example_log"`)* - name for the log in storage.
-        - `storage_namespace` *(str, default: `"siesta"`)* - storage namespace / bucket prefix.
+        - `storage_namespace` *(str, default: system config `storage_namespace_default`)* - storage namespace / bucket prefix.
         - `clear_existing` *(bool, default: `false`)* - drop and rebuild the existing index.
         - `enable_streaming` *(bool, default: `false`)* - start a Kafka streaming collector instead of batch processing.
         - `kafka_topic` *(str, default: `"example_log"`)* - Kafka topic to consume in streaming mode.
@@ -201,7 +201,7 @@ class Indexing(SiestaModule):
         # Create a metadata object that will overwrite existing metadata 
         # according to new indexing task (based on the index_config)
         self.metadata = MetaData(
-            storage_namespace=self.index_config.get("storage_namespace", "siesta"),
+            storage_namespace=self.index_config.get("storage_namespace", get_config_value("storage_namespace_default", "siesta")),
             log_name=self.index_config.get("log_name", "default_log"),
             storage_type=self.index_config.get("storage_type", "s3")
         )

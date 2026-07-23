@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from siesta.core.interfaces import SiestaModule, StorageManager
 from pyspark.sql import SparkSession
 from siesta.core.storageFactory import get_storage_manager
-from siesta.core.config import get_system_config
+from siesta.core.config import get_system_config, get_config_value
 from siesta.core.logger import timed
 from siesta.model.StorageModel import MetaData
 import json
@@ -29,7 +29,7 @@ class QueryMethodInput(BaseModel):
 class QueryConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
     log_name: str = Field("example_log", description="Name of the indexed log")
-    storage_namespace: str = Field("siesta", description="Storage namespace")
+    storage_namespace: str = Field(default_factory=lambda: get_config_value("storage_namespace_default", "siesta"), description="Storage namespace")
     method: str = Field("statistics", description="'statistics', 'detection', or 'exploration'. Ignored by API endpoints - set automatically.")
     query: QueryMethodInput = Field(default_factory=QueryMethodInput, description="Query-specific parameters")
     support_threshold: float = Field(0.0, description="Minimum support fraction [0,1] for results")
@@ -117,7 +117,7 @@ class Querying(SiestaModule):
 
         **Request body (`QueryConfig`):**
         - `log_name` *(str, default: `"example_log"`)* - name of the indexed log.
-        - `storage_namespace` *(str, default: `"siesta"`)* - storage namespace.
+        - `storage_namespace` *(str, default: system config `storage_namespace_default`)* - storage namespace.
         - `query.pattern` *(str)* - pattern string, e.g. `"A B"` or `"A B C"`.
         - `support_threshold` *(float [0,1], default: `0.0`)* - minimum support fraction to include a pair in results.
         """
@@ -154,7 +154,7 @@ class Querying(SiestaModule):
 
         **Request body (`QueryConfig`):**
         - `log_name` *(str, default: `"example_log"`)* - name of the indexed log.
-        - `storage_namespace` *(str, default: `"siesta"`)* - storage namespace.
+        - `storage_namespace` *(str, default: system config `storage_namespace_default`)* - storage namespace.
         - `query.pattern` *(str)* - pattern to detect, e.g. `"A B* C"` or `"A[pos=?1]+ B[pos=?1+5]"`.
         - `support_threshold` *(float [0,1], default: `0.0`)* - minimum per-trace support to include a match.
         """
@@ -191,7 +191,7 @@ class Querying(SiestaModule):
 
         **Request body (`QueryConfig`):**
         - `log_name` *(str, default: `"example_log"`)* - name of the indexed log.
-        - `storage_namespace` *(str, default: `"siesta"`)* - storage namespace.
+        - `storage_namespace` *(str, default: system config `storage_namespace_default`)* - storage namespace.
         - `query.pattern` *(str)* - prefix pattern to continue from, e.g. `"A B"`.
         - `query.explore_mode` *(str, default: `"accurate"`)* - `"accurate"` (full index scan), `"fast"` (count table only), or `"hybrid"` (fast pre-filter + accurate top-k).
         - `query.explore_k` *(int, default: `10`)* - number of candidates to evaluate accurately in `"hybrid"` mode (`0` = pure fast mode).
@@ -228,7 +228,7 @@ class Querying(SiestaModule):
 
     def _load_metadata(self):
         self.metadata = MetaData(
-            storage_namespace=self.query_config.get("storage_namespace", "siesta"),
+            storage_namespace=self.query_config.get("storage_namespace", get_config_value("storage_namespace_default", "siesta")),
             log_name=self.query_config.get("log_name", "default_log"),
             storage_type=self.query_config.get("storage_type", "s3"),
         )
