@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 from typing import Annotated, Any, Dict
 from fastapi import Body
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from siesta.model.StorageModel import MetaData
 from siesta.core.interfaces import SiestaModule, StorageManager
@@ -131,13 +132,29 @@ class Mining(SiestaModule):
         end_time = time.time()
 
         logger.info(f"Completed in {end_time - start_time} seconds. Results available at {self.mining_config['output_path']}.")
-        
-        with open(self.mining_config["output_path"], 'r', newline="") as f:
-            try:
-                return {"code": 200, "mined": list(csv.DictReader(f)), "time": end_time - start_time}
-            except Exception:
-                logger.error(f"Failed to parse mining results from {self.mining_config['output_path']}. Check if the file is a valid CSV and inspect logs for details.")
-                return {"code": 500, "message": f"Cannot parse mining results. Check logs and {self.mining_config['output_path']} for details."}
+
+        return StreamingResponse(
+            self._stream_mining_results(self.mining_config["output_path"], end_time - start_time),
+            media_type="application/json",
+        )
+
+    def _stream_mining_results(self, output_path: str, elapsed: float):
+        """Stream the mining CSV as a JSON body without holding the full result in memory.
+
+        Constraints with high support can pack tens of thousands of trace IDs into a
+        single `trace_ids` field, well past csv's default 128KB field-size guard, so
+        that limit is raised here to a size comfortably above realistic field sizes.
+        """
+        csv.field_size_limit(10_000_000)
+        yield f'{{"code": 200, "time": {json.dumps(elapsed)}, "mined": ['
+        try:
+            with open(output_path, "r", newline="") as f:
+                for i, row in enumerate(csv.DictReader(f)):
+                    yield ("," if i else "") + json.dumps(row)
+        except Exception:
+            logger.exception(f"Failed to parse mining results from {output_path} while streaming.")
+            raise
+        yield "]}"
 
 
     def cli_run(self, args: Any, **kwargs: Any) -> Any:
