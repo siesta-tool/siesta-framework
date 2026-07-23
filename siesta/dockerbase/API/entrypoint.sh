@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROJECT_ROOT="${SIESTA_PROJECT_ROOT:-/workspace}"
-PYTHON_BIN="${SIESTA_PYTHON_BIN:-/opt/bitnami/python/bin/python3}"
+PYTHON_BIN="${SIESTA_PYTHON_BIN:-/usr/bin/python3.12}"
 ENTRYPOINT_SCRIPT="${SIESTA_ENTRYPOINT_SCRIPT:-${PROJECT_ROOT}/main.py}"
 DEFAULT_CONFIG_PATH="${SIESTA_DEFAULT_CONFIG_PATH:-${PROJECT_ROOT}/config/siesta.config.json}"
 CONFIG_PATH="${SIESTA_CONFIG:-}"

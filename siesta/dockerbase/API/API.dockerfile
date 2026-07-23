@@ -19,7 +19,7 @@ COPY siesta/modules/index/requirements.txt /tmp/req/siesta/modules/index/require
 COPY siesta/modules/model/requirements.txt /tmp/req/siesta/modules/model/requirements.txt
 COPY siesta/modules/mine/requirements.txt /tmp/req/siesta/modules/mine/requirements.txt
 
-RUN /opt/bitnami/python/bin/python3 -m pip install --prefer-binary \
+RUN /usr/bin/python3.12 -m pip install --prefer-binary \
       -r /tmp/req/siesta/requirements.txt \
       -r /tmp/req/siesta/api/requirements.txt \
       -r /tmp/req/siesta/core/requirements.txt \
