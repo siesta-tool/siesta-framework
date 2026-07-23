@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 from pyspark.sql import SparkSession, functions as F
 
-from siesta.core.config import get_system_config
+from siesta.core.config import get_system_config, get_config_value
 from siesta.core.interfaces import SiestaModule, StorageManager
 from siesta.core.storageFactory import get_storage_manager
 from siesta.model.StorageModel import MetaData
@@ -25,7 +25,7 @@ from siesta.modules.mine.ordered import discover_ordered
 class DirectlyFollowsConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
     log_name: str = Field("example_log", description="Name of the indexed log")
-    storage_namespace: str = Field("siesta", description="Storage namespace")
+    storage_namespace: str = Field(default_factory=lambda: get_config_value("storage_namespace_default", "siesta"), description="Storage namespace")
     min_timestamp: str | None = Field(None, description="Lower bound on start_timestamp as ISO 8601 datetime with millisecond precision (e.g. '2024-01-15T10:30:45.123Z')")
     end_time: str | None = Field(None, description="Attribute key for event end timestamp. null = transition time (next_start - start)")
     support_threshold: float | None = Field(None, description="Min support fraction [0,1]; null = no filtering")
@@ -38,7 +38,7 @@ class DirectlyFollowsConfig(BaseModel):
 class LoopDetectionConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
     log_name: str = Field("example_log", description="Name of the indexed log")
-    storage_namespace: str = Field("siesta", description="Storage namespace")
+    storage_namespace: str = Field(default_factory=lambda: get_config_value("storage_namespace_default", "siesta"), description="Storage namespace")
     grouping_key: str | list[str] | None = Field(None, description="Attribute key(s) to group by; null = trace_id")
     grouping_value: str | list[str] | dict | None = Field(None, description="Restrict to groups with matching key value(s)")
     min_timestamp: str | None = Field(None, description="Lower bound on start_timestamp as ISO 8601 datetime with millisecond precision (e.g. '2024-01-15T10:30:45.123Z')")
@@ -52,7 +52,7 @@ class LoopDetectionConfig(BaseModel):
 class DurationsConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
     log_name: str = Field("example_log", description="Name of the indexed log")
-    storage_namespace: str = Field("siesta", description="Storage namespace")
+    storage_namespace: str = Field(default_factory=lambda: get_config_value("storage_namespace_default", "siesta"), description="Storage namespace")
     min_timestamp: str | None = Field(None, description="Lower bound on start_timestamp as ISO 8601 datetime with millisecond precision (e.g. '2024-01-15T10:30:45.123Z')")
     duration_mode: str = Field("activity", description="'activity' (per activity type) or 'group' (per group instance)")
     end_time: str | None = Field(None, description="Attribute key for event end timestamp. null = transition / span time")
@@ -66,7 +66,7 @@ class DurationsConfig(BaseModel):
 class AttributeDeviationsConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
     log_name: str = Field("example_log", description="Name of the indexed log. **Required.**")
-    storage_namespace: str = Field("siesta", description="Storage namespace.")
+    storage_namespace: str = Field(default_factory=lambda: get_config_value("storage_namespace_default", "siesta"), description="Storage namespace.")
     min_timestamp: str | None = Field(None, description="Lower bound on start_timestamp as ISO 8601 datetime with millisecond precision (e.g. '2024-01-15T10:30:45.123Z')")
     steps: list[int] = Field(
         list(ALL_STEPS),
@@ -173,7 +173,6 @@ class Analysing(SiestaModule):
             "summary": "Find directly-following pairs with default settings",
             "value": {
                 "log_name": "example_log",
-                "storage_namespace": "siesta",
                 "min_timestamp": None,
                 "end_time": None,
                 "support_threshold": None,
@@ -190,7 +189,7 @@ class Analysing(SiestaModule):
 
         **Config fields:**
         - `log_name` *(str)* - name of the indexed log. **Required.**
-        - `storage_namespace` *(str, default: `"siesta"`)* - storage namespace.
+        - `storage_namespace` *(str, default: system config `storage_namespace_default`)* - storage namespace.
         - `min_timestamp` *(str | null, default: `null`)* - lower bound on `start_timestamp` as ISO 8601 with millisecond precision (e.g. `"2024-01-15T10:30:45.123Z"`). Events before this datetime are excluded.
         - `end_time` *(str | null, default: `null`)* - attribute key for event end timestamp.
             If set, duration = `end_time - start_timestamp` (activity duration).
@@ -219,7 +218,6 @@ class Analysing(SiestaModule):
             "summary": "Compute duration statistics with default settings",
             "value": {
                 "log_name": "example_log",
-                "storage_namespace": "siesta",
                 "min_timestamp": None,
                 "duration_mode": "activity",
                 "end_time": None,
@@ -238,7 +236,7 @@ class Analysing(SiestaModule):
 
         **Config fields:**
         - `log_name` *(str)* - name of the indexed log. **Required.**
-        - `storage_namespace` *(str, default: `"siesta"`)* - storage namespace.
+        - `storage_namespace` *(str, default: system config `storage_namespace_default`)* - storage namespace.
         - `min_timestamp` *(str | null, default: `null`)* - lower bound on `start_timestamp` as ISO 8601 with millisecond precision (e.g. `"2024-01-15T10:30:45.123Z"`). Events before this datetime are excluded.
         - `duration_mode` *(str, default: `"activity"`)* - `"activity"` or `"group"`.
         - `end_time` *(str | null, default: `null`)* - attribute key for event end timestamp.
@@ -268,7 +266,6 @@ class Analysing(SiestaModule):
             "summary": "Detect loops with default settings",
             "value": {
                 "log_name": "example_log",
-                "storage_namespace": "siesta",
                 "grouping_key": None,
                 "grouping_value": None,
                 "min_timestamp": None,
@@ -289,7 +286,7 @@ class Analysing(SiestaModule):
 
         **Config fields:**
         - `log_name` *(str)* - name of the indexed log. **Required.**
-        - `storage_namespace` *(str, default: `"siesta"`)* - storage namespace.
+        - `storage_namespace` *(str, default: system config `storage_namespace_default`)* - storage namespace.
         - `grouping_key` *(str | list | null, default: `null`)* - attribute key(s) to group by. `null` = `trace_id`.
         - `grouping_value` *(str | list | dict | null, default: `null`)* - restrict to specific group values.
         - `min_timestamp` *(str | null, default: `null`)* - lower bound on `start_timestamp` as ISO 8601 with millisecond precision (e.g. `"2024-01-15T10:30:45.123Z"`). Events before this datetime are excluded.
@@ -318,7 +315,6 @@ class Analysing(SiestaModule):
             "summary": "Detect attribute deviations with default settings",
             "value": {
                 "log_name": "example_log",
-                "storage_namespace": "siesta",
                 "min_timestamp": None,
                 "steps": [0, 1, 2, 3, 4],
                 "excluded_attributes": None,
@@ -350,7 +346,7 @@ class Analysing(SiestaModule):
 
         **Config fields:**
         - `log_name` *(str)* - name of the indexed log. **Required.**
-        - `storage_namespace` *(str, default: `"siesta"`)* - storage namespace.
+        - `storage_namespace` *(str, default: system config `storage_namespace_default`)* - storage namespace.
         - `min_timestamp` *(str | null, default: `null`)* - lower bound on `start_timestamp` as ISO 8601 with millisecond precision (e.g. `"2024-01-15T10:30:45.123Z"`). Events before this datetime are excluded.
         - `steps` *(list[int], default: `[0,1,2,3,4]`)* - which steps to run.
         - `excluded_attributes` *(list[str] | null)* - attribute keys to skip (auto-excludes timestamp keys).
@@ -453,7 +449,7 @@ class Analysing(SiestaModule):
 
     def _load_metadata(self):
         self.metadata = MetaData(
-            storage_namespace=self.analyser_config.get("storage_namespace", "siesta"),
+            storage_namespace=self.analyser_config.get("storage_namespace", get_config_value("storage_namespace_default", "siesta")),
             log_name=self.analyser_config.get("log_name", "default_log"),
             storage_type=self.analyser_config.get("storage_type", "s3"),
         )

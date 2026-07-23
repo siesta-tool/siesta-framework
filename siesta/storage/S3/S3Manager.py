@@ -42,7 +42,8 @@ class S3Manager(StorageManager):
         
         self.spark = SparkManager.get_spark_session()
         self.config = get_system_config()
-        
+        self.default_namespace = self.config.get("storage_namespace_default", "siesta")
+
         # Initialize boto3 S3 client
         try:
             self.s3_client = self._create_s3_client()
@@ -82,22 +83,22 @@ class S3Manager(StorageManager):
 
         # Ensure bucket exists
         try:
-            self.s3_client.head_bucket(Bucket=preprocess_config.get("storage_namespace", "siesta"))
-            logger.info(f"Using existing bucket '{preprocess_config.get('storage_namespace', 'siesta')}'")
+            self.s3_client.head_bucket(Bucket=preprocess_config.get("storage_namespace", self.default_namespace))
+            logger.info(f"Using existing bucket '{preprocess_config.get('storage_namespace', self.default_namespace)}'")
 
             # If clear_existing is True, delete all objects of the specified log
             if preprocess_config.get("clear_existing", False):
                 prefix = f"{preprocess_config.get('log_name', 'default_log')}/"
                 try:
                     paginator = self.s3_client.get_paginator('list_objects_v2')
-                    pages = paginator.paginate(Bucket=preprocess_config.get("storage_namespace", "siesta"), Prefix=prefix)
+                    pages = paginator.paginate(Bucket=preprocess_config.get("storage_namespace", self.default_namespace), Prefix=prefix)
                     
                     for page in pages:
                         if 'Contents' in page:
                             objects = [{'Key': obj['Key']} for obj in page['Contents']]
                             if objects:
                                 self.s3_client.delete_objects(
-                                    Bucket=preprocess_config.get("storage_namespace", "siesta"),
+                                    Bucket=preprocess_config.get("storage_namespace", self.default_namespace),
                                     Delete={'Objects': objects}
                                 )
                     logger.info(f"Cleared existing log data in '{prefix}'")
@@ -108,8 +109,8 @@ class S3Manager(StorageManager):
             if error_code == '404':
                 # Bucket doesn't exist, create it
                 try:
-                    self.s3_client.create_bucket(Bucket=preprocess_config.get("storage_namespace", "siesta"))
-                    logger.info(f"Created bucket '{preprocess_config.get('storage_namespace', 'siesta')}'")
+                    self.s3_client.create_bucket(Bucket=preprocess_config.get("storage_namespace", self.default_namespace))
+                    logger.info(f"Created bucket '{preprocess_config.get('storage_namespace', self.default_namespace)}'")
                 except ClientError as create_error:
                     logger.error(f"Error creating bucket: {create_error}")
                     raise
@@ -119,7 +120,7 @@ class S3Manager(StorageManager):
         
 
         metadata = MetaData(
-            storage_namespace=preprocess_config.get("storage_namespace", "siesta"),
+            storage_namespace=preprocess_config.get("storage_namespace", self.default_namespace),
             log_name=preprocess_config.get("log_name", "default_log"),
             storage_type="s3"
         )
@@ -274,7 +275,7 @@ class S3Manager(StorageManager):
             .writeStream
             .format("json")
             .option("path", self.get_steaming_collector_path(preprocess_config))
-            .option("checkpointLocation", f"s3a://{self.config.get('storage_namespace', 'siesta')}/{preprocess_config.get('log_name', 'default_log')}/{self.config.get('checkpoint_dir', 'checkpoints')}/")
+            .option("checkpointLocation", f"s3a://{self.config.get('storage_namespace', self.default_namespace)}/{preprocess_config.get('log_name', 'default_log')}/{self.config.get('checkpoint_dir', 'checkpoints')}/")
             .outputMode("append")
             .trigger(processingTime='10 seconds')
             .start())
@@ -292,7 +293,7 @@ class S3Manager(StorageManager):
         Returns:
             Path as a string
         """
-        return f"s3a://{preprocess_config.get('storage_namespace', 'siesta')}/{preprocess_config.get('log_name', 'default_log')}/{preprocess_config.get('raw_events_dir', 'raw_events')}/"
+        return f"s3a://{preprocess_config.get('storage_namespace', self.default_namespace)}/{preprocess_config.get('log_name', 'default_log')}/{preprocess_config.get('raw_events_dir', 'raw_events')}/"
     
     def get_checkpoint_location(self, metadata: MetaData, checkpoint_table: str = "example_table") -> str:
         """
@@ -328,13 +329,13 @@ class S3Manager(StorageManager):
             key = key.split("/")[-1]
         key = f"{preprocess_config.get('log_name', 'default_log')}/batches/{key}"
             
-        logger.info(f"Uploading '{local_path}' to bucket '{preprocess_config.get('storage_namespace', 'siesta')}' with key '{key}'...")
+        logger.info(f"Uploading '{local_path}' to bucket '{preprocess_config.get('storage_namespace', self.default_namespace)}' with key '{key}'...")
         try:
-            self.s3_client.upload_file(local_path, preprocess_config.get('storage_namespace', 'siesta'), key)
+            self.s3_client.upload_file(local_path, preprocess_config.get('storage_namespace', self.default_namespace), key)
             logger.info("Upload successful.")
             
             # Construct S3A URI for Spark
-            return f"s3a://{preprocess_config.get('storage_namespace', 'siesta')}/{key}"
+            return f"s3a://{preprocess_config.get('storage_namespace', self.default_namespace)}/{key}"
         except Exception as e:
             logger.info(f"Upload failed: {e}")
             raise
@@ -356,13 +357,13 @@ class S3Manager(StorageManager):
             key = key[1:]
         key = f"{preprocess_config.get('log_name', 'default_log')}/batches/{key}"
 
-        logger.info(f"Uploading in-memory file to bucket '{preprocess_config.get('storage_namespace', 'siesta')}' with key '{key}'...")
+        logger.info(f"Uploading in-memory file to bucket '{preprocess_config.get('storage_namespace', self.default_namespace)}' with key '{key}'...")
         try:
-            self.s3_client.upload_fileobj(file_obj.file, preprocess_config.get('storage_namespace', 'siesta'), key)
+            self.s3_client.upload_fileobj(file_obj.file, preprocess_config.get('storage_namespace', self.default_namespace), key)
             logger.info("Upload successful.")
             
             # Construct S3A URI for Spark
-            return f"s3a://{preprocess_config.get('storage_namespace', 'siesta')}/{key}"
+            return f"s3a://{preprocess_config.get('storage_namespace', self.default_namespace)}/{key}"
         except Exception as e:
             logger.info(f"Upload failed: {e}")
             raise
@@ -691,7 +692,7 @@ class S3Manager(StorageManager):
         Returns:
             True if at least one object is found under the log prefix, False otherwise.
         """
-        namespace = task_config.get("storage_namespace", "siesta")
+        namespace = task_config.get("storage_namespace", self.default_namespace)
         log_name = task_config.get("log_name", "default_log")
         prefix = f"{log_name}/"
         try:

@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 class SystemConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
     storage_type: str = Field("s3", description="Storage backend type")
+    storage_namespace_default: str = Field("siesta", description="Default storage namespace used by modules when a module-level config does not specify one")
     api: dict = Field(default_factory=lambda: {"host": "0.0.0.0", "port": 8000}, description="API host and port")
     s3_access_key: str = Field("minioadmin", description="S3/MinIO access key")
     s3_secret_key: str = Field("minioadmin", description="S3/MinIO secret key")

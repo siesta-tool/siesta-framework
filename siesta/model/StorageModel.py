@@ -1,5 +1,6 @@
 from pyspark.sql.types import StructType, StructField, StringType, IntegerType
 from . import DataModel
+from siesta.core.config import get_config_value
 import xxhash
 
 class MetaData:
@@ -129,8 +130,8 @@ class MetaData:
         return self.s3_mining + "unordered.parquet" if self.storage_type == "s3" else ""
 
 
-    def __init__(self, storage_namespace: str = "siesta", storage_type: str = "s3", log_name: str = "default_log"):
-        self.storage_namespace = storage_namespace
+    def __init__(self, storage_namespace: str | None = None, storage_type: str = "s3", log_name: str = "default_log"):
+        self.storage_namespace = storage_namespace if storage_namespace is not None else get_config_value("storage_namespace_default", "siesta")
         self.log_name = log_name
         self.storage_type = storage_type
 

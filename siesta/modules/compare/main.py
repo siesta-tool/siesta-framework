@@ -8,7 +8,7 @@ from fastapi import Body
 from pydantic import BaseModel, ConfigDict, Field
 from siesta.model.StorageModel import MetaData
 from siesta.core.interfaces import SiestaModule, StorageManager
-from siesta.core.config import get_system_config
+from siesta.core.config import get_system_config, get_config_value
 from siesta.core.logger import timed
 from siesta.core.storageFactory import get_storage_manager
 from pyspark.sql import SparkSession, functions as F
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 class ComparatorConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
     log_name: str = Field("example_log", description="Name of the indexed log")
-    storage_namespace: str = Field("siesta", description="Storage namespace")
+    storage_namespace: str = Field(default_factory=lambda: get_config_value("storage_namespace_default", "siesta"), description="Storage namespace")
     method: str = Field("ngrams", description="Comparison method: 'ngrams', 'rare_rules', or 'targeted_rules'. Ignored by API endpoints - set automatically.")
     method_params: dict = Field(default_factory=lambda: {"n": 2}, description="Method-specific params. ngrams: {n}. targeted_rules: {target_label, filtering_support}")
     separating_key: str = Field("activity", description="Column used to label traces into groups")
@@ -104,7 +104,6 @@ class Comparing(SiestaModule):
                 "summary": "Compare n-gram frequencies with default settings",
                 "value": {
                     "log_name": "example_log",
-                    "storage_namespace": "siesta",
                     "method_params": {"n": 2},
                     "separating_key": "activity",
                     "separating_groups": [],
@@ -120,7 +119,7 @@ class Comparing(SiestaModule):
 
         **Request body (`ComparatorConfig`):**
         - `log_name` *(str, default: `"example_log"`)* - name of the indexed log.
-        - `storage_namespace` *(str, default: `"siesta"`)* - storage namespace.
+        - `storage_namespace` *(str, default: system config `storage_namespace_default`)* - storage namespace.
         - `method_params` *(object, default: `{"n": 2}`)* - `n` (int) = gram length; `vis` (bool) = generate HTML network.
         - `separating_key` *(str, default: `"activity"`)* - column used to label traces into groups.
         - `separating_groups` *(list[list[str]])* - group definitions, e.g. `[["fail", "error"]]`.
@@ -153,7 +152,6 @@ class Comparing(SiestaModule):
                 "summary": "Discover rare rules with default settings",
                 "value": {
                     "log_name": "example_log",
-                    "storage_namespace": "siesta",
                     "method_params": {"n": 2},
                     "separating_key": "activity",
                     "separating_groups": [],
@@ -169,7 +167,7 @@ class Comparing(SiestaModule):
 
         **Request body (`ComparatorConfig`):**
         - `log_name` *(str, default: `"example_log"`)* - name of the indexed log.
-        - `storage_namespace` *(str, default: `"siesta"`)* - storage namespace.
+        - `storage_namespace` *(str, default: system config `storage_namespace_default`)* - storage namespace.
         - `separating_key` *(str, default: `"activity"`)* - column used to label traces into groups.
         - `separating_groups` *(list[list[str]])* - group definitions, e.g. `[["fail", "error"]]`.
         - `support_threshold` *(float [0,1], default: `0.0`)* - minimum support fraction threshold.
@@ -202,7 +200,6 @@ class Comparing(SiestaModule):
                 "summary": "Discover targeted rules with default settings",
                 "value": {
                     "log_name": "example_log",
-                    "storage_namespace": "siesta",
                     "method_params": {"n": 2},
                     "separating_key": "activity",
                     "separating_groups": [],
@@ -218,7 +215,7 @@ class Comparing(SiestaModule):
 
         **Request body (`ComparatorConfig`):**
         - `log_name` *(str, default: `"example_log"`)* - name of the indexed log.
-        - `storage_namespace` *(str, default: `"siesta"`)* - storage namespace.
+        - `storage_namespace` *(str, default: system config `storage_namespace_default`)* - storage namespace.
         - `method_params` *(object)* - `target_label` (int, default: `1`), `filtering_support` (float, default: `1`).
         - `separating_key` *(str, default: `"activity"`)* - column used to label traces into groups.
         - `separating_groups` *(list[list[str]])* - group definitions, e.g. `[["fail", "error"]]`.
@@ -269,7 +266,7 @@ class Comparing(SiestaModule):
         logger.info(f"Beginning comparator process initiated by {caller}.")
 
         self.metadata = MetaData(
-            storage_namespace=self.comparator_config.get("storage_namespace", "siesta"),
+            storage_namespace=self.comparator_config.get("storage_namespace", get_config_value("storage_namespace_default", "siesta")),
             log_name=self.comparator_config.get("log_name", "default_log"),
             storage_type=self.comparator_config.get("storage_type", "s3")
         )

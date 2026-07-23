@@ -7,7 +7,7 @@ from fastapi import Body
 from pydantic import BaseModel, ConfigDict, Field
 from siesta.model.StorageModel import MetaData
 from siesta.core.interfaces import SiestaModule, StorageManager
-from siesta.core.config import get_system_config
+from siesta.core.config import get_system_config, get_config_value
 from siesta.core.logger import timed
 from siesta.core.storageFactory import get_storage_manager
 from siesta.core.sparkManager import cleanup as spark_cleanup
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 class MiningConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
     log_name: str = Field("example_log", description="Name of the indexed log")
-    storage_namespace: str = Field("siesta", description="Storage namespace")
+    storage_namespace: str = Field(default_factory=lambda: get_config_value("storage_namespace_default", "siesta"), description="Storage namespace")
     categories: list[str] = Field(["*"], description="Constraint categories: 'positional', 'existential', 'ordered', 'unordered', 'negation', or '*' for all")
     grouping: str = Field("trace", description="Grouping strategy: 'trace' or 'window'")
     window_size: int = Field(30, description="Position-based window size when grouping='window'")
@@ -68,7 +68,6 @@ class Mining(SiestaModule):
             "summary": "Mine all constraint categories with default settings",
             "value": {
                 "log_name": "example_log",
-                "storage_namespace": "siesta",
                 "categories": ["*"],
                 "grouping": "trace",
                 "window_size": 30,
@@ -87,7 +86,7 @@ class Mining(SiestaModule):
 
         **Config fields:**
         - `log_name` *(str, default: `"example_log"`)* - name of the indexed log. **Required.**
-        - `storage_namespace` *(str, default: `"siesta"`)* - storage namespace.
+        - `storage_namespace` *(str, default: system config `storage_namespace_default`)* - storage namespace.
         - `categories` *(list, default: `["*"]`)* - constraint categories to mine.
             `"*"` = all. Options: `"positional"`, `"existential"`, `"ordered"`, `"unordered"`, `"negation"`.
         - `grouping` *(str, default: `"trace"`)* - grouping strategy: `"trace"` or `"window"`.
@@ -200,7 +199,7 @@ class Mining(SiestaModule):
 
         # Load metadata if available, and evolved traces since last mining from storage
         self.metadata = MetaData(
-            storage_namespace=self.mining_config.get("storage_namespace", "siesta"),
+            storage_namespace=self.mining_config.get("storage_namespace", get_config_value("storage_namespace_default", "siesta")),
             log_name=self.mining_config.get("log_name", "default_log"),
             storage_type=self.mining_config.get("storage_type", "s3")
         )
