@@ -163,6 +163,19 @@ def get_spark_session() -> SparkSession:
     """
     if spark_session is None:
         raise RuntimeError("SparkSession not initialized. Call startup() first.")
+    # The session is created on the startup thread, so other threads (e.g. an API
+    # request handler) have no active thread-local session -- only the global
+    # default. Structured Streaming spawns its microbatch/offset threads from the
+    # thread that calls query.start(), inheriting that thread's active session via
+    # an InheritableThreadLocal. Delta-source offset planning runs *outside*
+    # foreachBatch (which is the only place Spark sets `withActive`), so without
+    # this it raises "No active or default Spark session found". Setting the active
+    # session on every caller thread makes streams started here resolve correctly;
+    # it does not change any pipeline stage, order, trigger, or output.
+    try:
+        SparkSession.setActiveSession(spark_session)
+    except Exception:
+        pass
     return spark_session
 
 
