@@ -43,6 +43,9 @@ activity *set* and left null, mirroring the standalone miners.
 from typing import Dict, List, Optional, Set
 
 import pandas as pd
+from siesta.modules.mine.pandas_udf_utils import (
+    sanitize_udf_output, find_chunked_output_columns,
+)
 from pyspark.sql import DataFrame, Column, functions as F
 from pyspark.sql.types import (
     StructType, StructField, StringType, IntegerType, LongType,
@@ -222,13 +225,22 @@ def _select_branch(
 
 
 def _make_branching_udf(fixed_col: Optional[str], branch_col: str, policy: str,
-                        approach: str, bound: int, min_traces: int):
+                        approach: str, bound: int, min_traces: int,
+                        emit_trace_ids: bool):
     """
     Build the pandas grouped-map function applied per branching group.
 
     ``branch_col`` is the activity side that varies (and is merged into a set);
     ``fixed_col`` is the activity side held constant across the group, or ``None``
     for unary categories that have no second activity.
+
+    The full trace sets are always consumed *inside* the UDF to score the greedy
+    merge, but they are only echoed back on the output when ``emit_trace_ids`` is
+    set. High-support constraints pack millions of IDs into that list column, and
+    a single group's output can exceed PyArrow's 2 GiB contiguous-buffer limit,
+    which fails the ``StructArray.from_arrays`` step of Spark's Arrow serializer.
+    Since ``match_count`` (computed here) drives support/confidence/interest
+    downstream, the lists are dropped unless the caller asked to keep them.
     """
     def _udf(pdf: pd.DataFrame) -> pd.DataFrame:
         category = pdf["category"].iloc[0]
@@ -257,7 +269,7 @@ def _make_branching_udf(fixed_col: Optional[str], branch_col: str, policy: str,
                 "source": None,
                 "target": None,
                 "occurrences": occ,
-                "trace_ids": sorted(combined),
+                "trace_ids": sorted(combined) if emit_trace_ids else [],
                 "match_count": len(combined),
                 "is_branched": True,
             }
@@ -279,24 +291,44 @@ def _make_branching_udf(fixed_col: Optional[str], branch_col: str, policy: str,
                 "source": r["source"],
                 "target": r["target"],
                 "occurrences": None if pd.isna(r_occ) else int(r_occ),
-                "trace_ids": list(r["trace_ids"]) if r["trace_ids"] is not None else [],
+                "trace_ids": (list(r["trace_ids"]) if r["trace_ids"] is not None else []) if emit_trace_ids else [],
                 "match_count": int(r["match_count"]),
                 "is_branched": False,
             })
 
-        return pd.DataFrame(rows, columns=[
+        result_df = pd.DataFrame(rows, columns=[
             "category", "template", "source", "target",
             "occurrences", "trace_ids", "match_count", "is_branched",
         ])
+
+        # Unary categories (existential, positional) branch on their own stream
+        # with target always None; pandas types that all-None column as float64,
+        # and other string columns can carry a multi-chunk PyArrow backing. Both
+        # serialise to a ChunkedArray that PySpark's Arrow output cannot handle,
+        # so coerce the schema's string/array columns to safe object dtypes.
+        # TEMP: log which column(s) would have tripped the serializer, to confirm
+        # the fix in production; remove once validated.
+        schema = _branched_schema()
+        offenders = find_chunked_output_columns(result_df, schema)
+        if offenders:
+            logger.error(
+                "branching-udf pre-sanitize ChunkedArray offenders category=%s "
+                "template=%s fixed[%s]=%s rows=%d: %s",
+                category, template, fixed_col, fixed_val, len(result_df),
+                " | ".join(offenders),
+            )
+        return sanitize_udf_output(result_df, schema)
 
     return _udf
 
 
 def _branch_stream(branchable: DataFrame, group_keys: List[str],
                    fixed_col: Optional[str], branch_col: str, policy: str,
-                   approach: str, bound: int, min_traces: int) -> DataFrame:
+                   approach: str, bound: int, min_traces: int,
+                   emit_trace_ids: bool) -> DataFrame:
     """Run one branching UDF over a filtered, grouped constraint stream."""
-    udf = _make_branching_udf(fixed_col, branch_col, policy, approach, bound, min_traces)
+    udf = _make_branching_udf(fixed_col, branch_col, policy, approach, bound,
+                              min_traces, emit_trace_ids)
     return branchable.groupBy(*group_keys).applyInPandas(udf, _branched_schema())
 
 
@@ -308,6 +340,7 @@ def apply_branching(
     branching_bound: int,
     trace_count: int,
     support_threshold: float,
+    include_trace_lists: bool = False,
 ) -> DataFrame:
     """
     Merge singular constraints into branched ones over the aggregated set.
@@ -321,6 +354,10 @@ def apply_branching(
     :param branching_bound: max activities in a branched set, or 0 for unbounded.
     :param trace_count: total number of traces (for the support floor).
     :param support_threshold: minimum support fraction; the branching floor.
+    :param include_trace_lists: keep the merged ``trace_ids`` list on branched and
+        passed-through UDF output. Defaults to ``False``: only ``match_count`` is
+        retained, which avoids materialising multi-gigabyte list columns that
+        overflow PyArrow's contiguous-buffer limit during Arrow serialisation.
     :return: aggregated constraints where merged singulars are replaced by their
         branched constraint, carrying an ``is_branched`` boolean column.
     """
@@ -329,10 +366,21 @@ def apply_branching(
     bound = branching_bound if branching_bound and branching_bound > 0 else 0
     min_traces = int(support_threshold * trace_count)
 
-    logger.info(
-        "Applying %s-branching (policy=%s, approach=%s, bound=%s, floor=%d traces).",
-        branching_type, policy, approach, bound if bound else "unbounded", min_traces,
+    large_var = grouped_constraints.sparkSession.conf.get(
+        "spark.sql.execution.arrow.useLargeVarTypes", "false"
     )
+    logger.info(
+        "Applying %s-branching (policy=%s, approach=%s, bound=%s, floor=%d traces, "
+        "include_trace_lists=%s, arrow.useLargeVarTypes=%s).",
+        branching_type, policy, approach, bound if bound else "unbounded", min_traces,
+        include_trace_lists, large_var,
+    )
+    if include_trace_lists and large_var.lower() != "true":
+        logger.warning(
+            "Branching will emit full trace_ids lists but arrow.useLargeVarTypes is "
+            "off; large groups may overflow PyArrow's 2 GiB buffer and abort the "
+            "Arrow output serializer. Restart the driver so the config takes effect."
+        )
 
     # Normalise occurrences to a nullable integer so every branched/passthrough
     # stream shares a type when unioned (occurrences is added as a string
@@ -360,6 +408,7 @@ def apply_branching(
     pair_out = _branch_stream(
         grouped_constraints.filter(pair_pred), pair_keys,
         pair_fixed, pair_branch, policy, approach, bound, min_traces,
+        include_trace_lists,
     )
 
     # --- Unary branching (existential, positional) over the activity ----------
@@ -379,6 +428,7 @@ def apply_branching(
         grouped_constraints.filter(unary_pred),
         ["category", "template", "occurrences"],
         None, "source", policy, approach, bound, min_traces,
+        include_trace_lists,
     )
 
     # --- Passthrough: everything not eligible for branching -------------------

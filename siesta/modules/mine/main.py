@@ -266,6 +266,13 @@ class Mining(SiestaModule):
 
         self.metadata = self.storage.read_metadata_table(self.metadata) 
         evolved_df = self.storage.read_sequence_table(self.metadata, filter_out="mined" if not self.mining_config.get("force_recompute", False) else None)
+        # Drop per-event attributes (and any other unused columns) right after the
+        # fetch: no miner consumes them, but the sequence table's `attributes` map
+        # is heavy and would otherwise be materialised by the cache below and
+        # carried through every shuffle/UDF. Keep only what mining and the
+        # last-mined-timestamp bookkeeping actually need. Projecting before the
+        # cache also lets Catalyst prune `attributes` from the Delta scan.
+        evolved_df = evolved_df.select("trace_id", "activity", "position", "start_timestamp")
         evolved_df.cache()  # Cache evolved traces as they will be used multiple times during mining
 
         # Perform mining based on the specified categories in the mining configuration. 
@@ -368,6 +375,7 @@ class Mining(SiestaModule):
                 branching_bound=int(self.mining_config.get("branching_bound", 0)),
                 trace_count=trace_count,
                 support_threshold=self.mining_config.get("support_threshold", 0.0),
+                include_trace_lists=self.mining_config.get("include_trace_lists", False),
             )
         else:
             grouped_constraints = grouped_constraints.withColumn("is_branched", F.lit(False))

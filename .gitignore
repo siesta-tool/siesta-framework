@@ -229,4 +229,9 @@ datasets/acc*
 
 **/modules/compare/acc*
 
-.claude
+.claude/
+
+demo-eval/*csv
+demo-eval/*jsonl
+
+bpic*
