@@ -4,7 +4,7 @@ import datetime
 import json
 from pathlib import Path
 from typing import Annotated, Any, Dict
-from fastapi import Body
+from fastapi import Body, Form, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 from pyspark.sql import SparkSession, functions as F
@@ -19,6 +19,7 @@ from siesta.modules.analyse.durations import compute_activity_durations, compute
 from siesta.modules.analyse.attribute_deviations import (
     compute_attribute_deviations, render_html, ALL_STEPS,
 )
+from siesta.modules.analyse.form_analysis import DATE_GROUPINGS, run_form_analysis
 from siesta.modules.mine.ordered import discover_ordered
 
 
@@ -116,6 +117,22 @@ class AttributeDeviationsConfig(BaseModel):
     output_format: str = Field("json", description="Output format: 'json' (default), 'csv', or 'html'.")
     output_path: str = Field("output/example_log", description="Local path prefix for csv/html output files.")
 
+
+class FormAnalysisConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    log_name: str = Field("form_log", description="Name used for the produced trace log")
+    input_path: str | None = Field(None, description="Path to the local .xlsx file (CLI only; the API takes an upload)")
+    header_row: int = Field(1, description="Zero-indexed row of the sheet holding the column names")
+    sheet_name: str | int = Field(0, description="Sheet name or zero-indexed sheet position")
+    date_grouping: str = Field("dow", description=f"Bucketing applied to date columns. One of {list(DATE_GROUPINGS)}")
+    numeric_bins: int = Field(5, description="Number of equal-width buckets for numeric columns")
+    retain_threshold: float = Field(0.05, ge=0.0, le=1.0, description="Columns whose distinct-value ratio exceeds this are collapsed to filled/unfilled")
+    drop_constant: bool = Field(True, description="Drop columns holding a single distinct value")
+    drop_unique: bool = Field(True, description="Drop string columns where every row holds a different value")
+    return_csv: bool = Field(True, description="Return the CSV file; when false, return the preprocessing report and a preview")
+    output_path: str = Field("output/form_log", description="Local path prefix for the output file")
+
+
 import logging
 
 logger = logging.getLogger(__name__)
@@ -162,6 +179,7 @@ class Analysing(SiestaModule):
             "loop_detection":        ("POST", self.api_loop_detection),
             "durations":             ("POST", self.api_durations),
             "attribute_deviations":  ("POST", self.api_attribute_deviations),
+            "form_analysis":         ("POST", self.api_form_analysis),
         }
 
     # ------------------------------------------------------------------
@@ -376,6 +394,73 @@ class Analysing(SiestaModule):
         
         return self._run_attribute_deviations(caller="api")
 
+    def api_form_analysis(
+        self,
+        analyser_config: Annotated[str, Form(
+            description="JSON configuration object - see endpoint description for all supported fields.",
+            openapi_examples={
+                "dow": {
+                    "summary": "Bucket date columns by day of week",
+                    "value": '{"log_name": "forms", "date_grouping": "dow", "numeric_bins": 5}',
+                },
+                "month": {
+                    "summary": "Bucket date columns by month, keep rarer values",
+                    "value": '{"log_name": "forms", "date_grouping": "month", "retain_threshold": 0.1}',
+                },
+            },
+        )],
+        form_file: UploadFile,
+    ) -> Any:
+        """ Extracting pairwise rules from form data inputs.
+        
+        Columns are reduced first: constant and all-distinct columns are dropped,
+        date columns are bucketed according to `date_grouping`, numeric columns are
+        cut into `numeric_bins` equal-width buckets, and columns with more than
+        `retain_threshold` distinct values collapse to `filled` / unfilled.
+
+        Columns scoped to a country contribute an event only when the cell carries a
+        `yes` or a digit, keeping the bulk of "not registered here" answers out of the
+        traces. Country names are matched against `siesta/modules/analyse/countries.txt`.
+
+        Returns the resulting CSV (`trace_id,position,activity,timestamp`) as a download, or
+        the per-column report when `return_csv` is `false`.
+        
+
+        **Form fields:**
+        - `form_file` *(file)* - the `.xlsx` file to preprocess. **Required.**
+        - `analyser_config` *(JSON string)* - configuration; fields below.
+
+        **Config fields (`analyser_config`):**
+        - `log_name` *(str, default: `"form_log"`)* - name used for the produced trace log.
+        - `header_row` *(int, default: `1`)* - zero-indexed row of the sheet holding the column names.
+        - `sheet_name` *(str | int, default: `0`)* - sheet name or zero-indexed sheet position.
+        - `date_grouping` *(str, default: `"dow"`)* - bucketing for date columns:
+            `"dow"`, `"month"`, `"quarter"`, `"year"`, `"hour"`, `"date"`, or `"none"` (drops them).
+        - `numeric_bins` *(int, default: `5`)* - equal-width buckets for numeric columns.
+        - `retain_threshold` *(float [0,1], default: `0.05`)* - above this distinct-value ratio a column
+            collapses to `filled` / unfilled; at or below it the values are kept verbatim.
+        - `drop_constant` *(bool, default: `true`)* - drop columns holding a single distinct value.
+        - `drop_unique` *(bool, default: `true`)* - drop string columns where every row differs.
+        - `return_csv` *(bool, default: `true`)* - when `false`, return the per-column report plus a 20-row preview.
+        """
+        logger.info(f"{self.name} running form_analysis via API.")
+
+        try:
+            self._load_form_analysis_config(json.loads(analyser_config))
+        except Exception as e:
+            logger.exception(f"Error loading analyser config: {e}")
+            return {"code": 400, "message": f"Invalid config: {e}"}
+
+        if not form_file.filename:
+            logger.error("Form analysis: uploaded file has no filename. Aborting.")
+            return {"code": 400, "message": "Uploaded file has no filename. Aborting."}
+
+        try:
+            return self._run_form_analysis(caller="api", source=form_file.file)
+        except Exception as e:
+            logger.exception(f"Error running form_analysis: {e}")
+            return {"code": 400, "message": f"Form analysis failed: {e}"}
+
     # ------------------------------------------------------------------
     # CLI entry point
     # ------------------------------------------------------------------
@@ -399,6 +484,10 @@ class Analysing(SiestaModule):
 
         with open(config_path, "r") as f:
             user_config = json.load(f)
+
+        if user_config.get("method") == "form_analysis":
+            self._load_form_analysis_config(user_config)
+            return self._run_form_analysis(caller="cli")
 
         try:
             self._load_analyser_config(user_config)
@@ -445,6 +534,20 @@ class Analysing(SiestaModule):
         Path(given_output).parent.mkdir(parents=True, exist_ok=True)
         self.analyser_config["output_path"] = (
             given_output + "_" + str(datetime.datetime.now().timestamp())
+        )
+
+    def _load_form_analysis_config(self, config: Dict[str, Any]):
+        self.analyser_config = FormAnalysisConfig().model_dump()
+        self.analyser_config.update(config)
+        self.analyser_config["method"] = "form_analysis"
+
+        given_output = self.analyser_config.get("output_path") or "output/form_log"
+        if given_output == "output/form_log":
+            given_output = "output/" + self.analyser_config.get("log_name", "form_log")
+
+        Path(given_output).parent.mkdir(parents=True, exist_ok=True)
+        self.analyser_config["output_path"] = (
+            given_output + "_" + str(datetime.datetime.now().timestamp()) + ".csv"
         )
 
     def _load_metadata(self):
@@ -745,3 +848,45 @@ class Analysing(SiestaModule):
             logger.info(f"Results written to {output_path}.")
             return output_path
         return result
+
+    def _run_form_analysis(self, caller: str, source: Any = None) -> Any:
+        logger.info(f"Running form_analysis initiated by {caller}.")
+
+        if source is None:
+            input_path = self.analyser_config.get("input_path")
+            if not input_path:
+                raise ValueError("No input file given. Set 'input_path' in the config.")
+            if not Path(input_path).exists():
+                raise FileNotFoundError(f"Input file {input_path} not found.")
+            source = input_path
+
+        summary = run_form_analysis(
+            source,
+            self.analyser_config["output_path"],
+            header_row=self.analyser_config.get("header_row", 1),
+            sheet_name=self.analyser_config.get("sheet_name", 0),
+            date_grouping=self.analyser_config.get("date_grouping", "dow"),
+            numeric_bins=self.analyser_config.get("numeric_bins", 5),
+            retain_threshold=self.analyser_config.get("retain_threshold", 0.05),
+            drop_constant=self.analyser_config.get("drop_constant", True),
+            drop_unique=self.analyser_config.get("drop_unique", True),
+        )
+
+        output_path = summary["output_path"]
+        logger.info(
+            f"Completed. {summary['event_count']} event(s) across {summary['trace_count']} trace(s) "
+            f"written to {output_path}."
+        )
+
+        if caller == "api":
+            if self.analyser_config.get("return_csv", True):
+                return FileResponse(
+                    output_path,
+                    media_type="text/csv",
+                    filename=Path(output_path).name,
+                )
+            with open(output_path, "r", newline="") as f:
+                preview = [row for _, row in zip(range(20), csv.DictReader(f))]
+            return {"code": 200, "log_name": self.analyser_config.get("log_name"), **summary, "preview": preview}
+
+        return output_path
