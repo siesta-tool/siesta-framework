@@ -12,6 +12,9 @@ wexperimental
 # C extensions
 *.so
 venv.*
+tmp/
+*.csv
+*.format
 # Distribution / packaging
 .Python
 build/

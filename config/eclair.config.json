@@ -1,0 +1,8 @@
+{
+    "log_name": "example_log",
+    "traces_path": "./tmp/mining_geolife_1776798959.137337.csv",
+    "S_r": 0.0,
+    "S_a": 0.0,
+    "cell_size": 0.01,
+    "group_by": "day_of_week"
+}
