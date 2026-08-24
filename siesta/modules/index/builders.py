@@ -1,5 +1,7 @@
 from typing import Any, Dict, Tuple
 import threading
+import os
+import time
 
 from pyspark.sql import DataFrame
 from siesta.core.sparkManager import get_spark_session
@@ -13,6 +15,72 @@ from siesta.modules.index.computations import extract_last_checked_and_all_pairs
 from pyspark.sql.functions import min
 import logging
 logger = logging.getLogger(__name__)
+
+
+def _log_ttq_batch(index_config: Dict, micro_batch_df: DataFrame, batch_id: int, commit_time: float) -> None:
+    """Time-to-Queryable instrumentation (experiment-only, off by default).
+
+    Emits one per-micro-batch record measuring the delay between when an event
+    was handed to the Kafka producer (its ``_produced_at`` wall-clock marker,
+    carried through as an attribute) and ``commit_time`` -- the moment the
+    CountTable write for this batch completed, i.e. when the batch became
+    visible to detection/stats queries.
+
+    Enabled only when ``index_config['ttq_logging']`` is truthy, so the normal
+    ingestion path is untouched. ``commit_time`` must be captured by the caller
+    immediately after the CountTable write (no other step in between); the
+    aggregation below runs afterwards and does not affect that measurement.
+    """
+    if not index_config.get("ttq_logging", False):
+        return
+    try:
+        from pyspark.sql.functions import (
+            count as _count, min as _min, max as _max, avg as _avg,
+        )
+        produced_at = col("attributes")["_produced_at"].cast("double")
+        lam_col = col("attributes")["_lambda"].cast("double")
+        stats = micro_batch_df.select(
+            _count("*").alias("n"),
+            _min(produced_at).alias("min_pa"),
+            _max(produced_at).alias("max_pa"),
+            _avg(produced_at).alias("avg_pa"),
+            _max(lam_col).alias("lam"),
+        ).collect()[0]
+
+        n_events = stats["n"] or 0
+        avg_pa = stats["avg_pa"]
+        min_pa = stats["min_pa"]
+        if not n_events or avg_pa is None or min_pa is None:
+            # No instrumented events in this batch (e.g. warm-up); nothing to log.
+            return
+
+        # lambda: prefer the marker carried in the payload, else the config hint.
+        lam = stats["lam"]
+        if lam is None:
+            lam = index_config.get("ttq_lambda", -1)
+
+        batch_ttq_avg = commit_time - float(avg_pa)
+        batch_ttq_tail = commit_time - float(min_pa)  # earliest event = worst case
+
+        logger.info(
+            f"ttq_batch lambda={lam:g} batch_id={batch_id} n_events={n_events} "
+            f"avg_ttq={batch_ttq_avg:.6f} tail_ttq={batch_ttq_tail:.6f} "
+            f"commit_time={commit_time:.6f}"
+        )
+
+        ttq_log_path = index_config.get("ttq_log_path")
+        if ttq_log_path:
+            new_file = not os.path.exists(ttq_log_path)
+            os.makedirs(os.path.dirname(os.path.abspath(ttq_log_path)) or ".", exist_ok=True)
+            with open(ttq_log_path, "a") as fh:
+                if new_file:
+                    fh.write("lambda,batch_id,n_events,avg_ttq,tail_ttq,commit_time\n")
+                fh.write(
+                    f"{lam:g},{batch_id},{n_events},{batch_ttq_avg:.6f},"
+                    f"{batch_ttq_tail:.6f},{commit_time:.6f}\n"
+                )
+    except Exception as e:  # never let instrumentation break ingestion
+        logger.warning(f"ttq_batch logging failed for batch {batch_id}: {e}")
 
 
 
@@ -74,9 +142,8 @@ def build_activity_index(metadata: MetaData, events_df: DataFrame | StreamingQue
 
         def process_microbatch(batch_df, batch_id):
             storage.write_activity_index(batch_df, metadata)
-            storage.write_metadata_table(metadata) #temporary for dev
 
-    
+
         write_activity_index_job = (sequence_table_df.writeStream
             .queryName("build_activity_index")
             .foreachBatch(process_microbatch)
@@ -84,11 +151,10 @@ def build_activity_index(metadata: MetaData, events_df: DataFrame | StreamingQue
             .option("checkpointLocation", storage.get_checkpoint_location(metadata, "activity_index"))
             .start())
         return write_activity_index_job
-    
+
     else:
-    
+
         storage.write_activity_index(events_df=events_df, metadata=metadata)
-        storage.write_metadata_table(metadata) #temporary for dev
 
         return events_df
 
@@ -222,7 +288,17 @@ def build_last_checked_index_and_count_streamed(index_config: Dict, metadata: Me
         count_df = extract_counts(pairs_df)
         storage.write_count_table(count_df=count_df, metadata=metadata)
 
+        # Queryability boundary: the CountTable write above is the last of the
+        # five structures to be persisted and is what detection/stats queries
+        # read. Capture the commit instant here, before any further work.
+        commit_time = time.time()
+
         pairs_df.unpersist()
+
+        storage.write_metadata_table(metadata)
+
+        # Time-to-Queryable instrumentation (no-op unless ttq_logging is set).
+        _log_ttq_batch(index_config, micro_batch_df, batch_id, commit_time)
 
 
     job = (

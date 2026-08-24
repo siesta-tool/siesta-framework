@@ -4,14 +4,18 @@ from typing import Any
 import requests
 import streamlit as st
 
+# Indexing and other long-running jobs can legitimately run for hours, so
+# requests that trigger backend work stay open long enough to see them through.
+LONG_REQUEST_TIMEOUT = 60 * 60 * 24  # 24h
+
 
 def api_post(endpoint: str, base_url: str, payload: dict | None = None, files: dict | None = None) -> Any:
     url = f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
     try:
         if files:
-            response = requests.post(url, data=payload or {}, files=files, timeout=120)
+            response = requests.post(url, data=payload or {}, files=files, timeout=LONG_REQUEST_TIMEOUT)
         else:
-            response = requests.post(url, json=payload or {}, timeout=120)
+            response = requests.post(url, json=payload or {}, timeout=LONG_REQUEST_TIMEOUT)
     except Exception as error:
         return {"error": str(error)}
 
@@ -22,12 +26,28 @@ def api_post(endpoint: str, base_url: str, payload: dict | None = None, files: d
             "status_code": response.status_code,
             "text": response.text,
         }
+
+
+def api_post_binary(endpoint: str, base_url: str, payload: dict | None = None) -> bytes | None:
+    """Like api_post, but returns raw response bytes instead of parsing as JSON/text.
+
+    Use for binary downloads (e.g. PNG images): api_post's fallback decodes the
+    response as text on a non-JSON body, which corrupts binary content.
+    """
+    url = f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
+    try:
+        response = requests.post(url, json=payload or {}, timeout=LONG_REQUEST_TIMEOUT)
+        response.raise_for_status()
+        return response.content
+    except Exception as error:
+        st.error(f"Request failed: {error}")
+        return None
 
 
 def api_get(endpoint: str, base_url: str, params: dict | None = None) -> Any:
     url = f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
     try:
-        response = requests.get(url, params=params or {}, timeout=10)
+        response = requests.get(url, params=params or {}, timeout=LONG_REQUEST_TIMEOUT)
     except Exception as error:
         return {"error": str(error)}
 
@@ -38,6 +58,46 @@ def api_get(endpoint: str, base_url: str, params: dict | None = None) -> Any:
             "status_code": response.status_code,
             "text": response.text,
         }
+
+
+def api_delete(endpoint: str, base_url: str, params: dict | None = None) -> Any:
+    url = f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
+    try:
+        response = requests.delete(url, params=params or {}, timeout=LONG_REQUEST_TIMEOUT)
+    except Exception as error:
+        return {"error": str(error)}
+
+    try:
+        return response.json()
+    except ValueError:
+        return {
+            "status_code": response.status_code,
+            "text": response.text,
+        }
+
+
+def fetch_namespace_catalog(base_url: str) -> dict[str, list[str]]:
+    """Query the manager module for existing storage namespaces and the logs within each."""
+    response = api_get("manager/namespaces", base_url)
+    catalog: dict[str, list[str]] = {}
+    if isinstance(response, dict) and isinstance(response.get("namespaces"), list):
+        for namespace in response["namespaces"]:
+            name = namespace.get("name")
+            if name:
+                catalog[name] = sorted(namespace.get("logs") or [])
+    return catalog
+
+
+def namespace_options() -> list[str]:
+    """Known storage namespaces from the last-fetched catalog, falling back to a sane default."""
+    catalog = st.session_state.get("namespace_catalog") or {}
+    return sorted(catalog.keys()) or ["siesta"]
+
+
+def log_options(storage_namespace: str) -> list[str]:
+    """Known log names for a namespace from the last-fetched catalog, falling back to a sane default."""
+    catalog = st.session_state.get("namespace_catalog") or {}
+    return catalog.get(storage_namespace) or ["example_log"]
 
 
 def health_check(base_url: str) -> dict[str, Any]:
@@ -121,6 +181,11 @@ def _display_response_time(response: dict) -> None:
 
 
 def format_response(response: Any) -> None:
+    if response is None:
+        # Nothing to render - the caller (e.g. a failed binary/image request)
+        # has already surfaced its own error via st.error.
+        return
+
     if isinstance(response, dict) and response.get("error"):
         st.error(response["error"])
         return

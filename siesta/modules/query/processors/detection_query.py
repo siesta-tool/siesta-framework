@@ -120,7 +120,8 @@ def detect(pattern: str, config: Dict[str, Any], metadata: MetaData):
             [e["name"] for e in events], pattern, events=events
         )
 
-        return (trace_id, positions)
+        real_positions = [int(events[i]["position"]) for i in positions]
+        return (trace_id, real_positions)
     
     return matches_df.groupByKey().map(validate_trace).filter(lambda result: len(result[1]) > support_threshold * metadata.trace_count if metadata.trace_count else 0).collect()
 

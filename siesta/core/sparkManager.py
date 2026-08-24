@@ -100,7 +100,8 @@ def startup(config: Dict[str, Any] = {}) -> None:
             .config("spark.sql.adaptive.enabled", "true") \
             .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
             .config("spark.sql.adaptive.coalescePartitions.minPartitionNum", "6") \
-            .config("spark.sql.execution.pyspark.udf.faulthandler.enabled", "true")
+            .config("spark.sql.execution.pyspark.udf.faulthandler.enabled", "true") \
+            .config("spark.sql.execution.arrow.useLargeVarTypes", "true")
 
         if os.getenv("SPARK_IVY_DIR"):
             builder = builder.config("spark.jars.ivy", os.getenv("SPARK_IVY_DIR"))
@@ -123,6 +124,13 @@ def startup(config: Dict[str, Any] = {}) -> None:
         
         spark_session = builder.getOrCreate()
         spark_session.sparkContext.setLogLevel("ERROR")
+        # Builder .config() is ignored when getOrCreate() returns a pre-existing
+        # session, so set the Arrow large-var-types flag on the live session too.
+        # It widens Arrow string/list offsets to 64-bit, which stops PyArrow from
+        # splitting oversized varlen columns (e.g. large trace_ids lists returned
+        # by the branching UDF) into a ChunkedArray that its StructArray output
+        # serializer then rejects. It is a dynamic SQL conf, applied per job.
+        spark_session.conf.set("spark.sql.execution.arrow.useLargeVarTypes", "true")
         logger.info(f"SparkSession initialized and connected to Spark Master at {spark_master_url}.")
         
         # Ship code to executors
@@ -155,6 +163,19 @@ def get_spark_session() -> SparkSession:
     """
     if spark_session is None:
         raise RuntimeError("SparkSession not initialized. Call startup() first.")
+    # The session is created on the startup thread, so other threads (e.g. an API
+    # request handler) have no active thread-local session -- only the global
+    # default. Structured Streaming spawns its microbatch/offset threads from the
+    # thread that calls query.start(), inheriting that thread's active session via
+    # an InheritableThreadLocal. Delta-source offset planning runs *outside*
+    # foreachBatch (which is the only place Spark sets `withActive`), so without
+    # this it raises "No active or default Spark session found". Setting the active
+    # session on every caller thread makes streams started here resolve correctly;
+    # it does not change any pipeline stage, order, trigger, or output.
+    try:
+        SparkSession.setActiveSession(spark_session)
+    except Exception:
+        pass
     return spark_session
 
 

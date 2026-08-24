@@ -1,0 +1,7 @@
+pm4py==2.7.19.5
+pyvis
+matplotlib
+networkx
+numpy
+pyarrow>=11.0.0
+pandas

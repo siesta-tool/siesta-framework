@@ -18,7 +18,7 @@ Grammar
     atom       ::= activity | '(' or_expr ')'
     activity   ::= LABEL ('[' attr_list ']')?
     attr_list  ::= attr (',' attr)*
-    attr       ::= LABEL '=' attr_value
+    attr       ::= LABEL ('=' | '!=') attr_value
     attr_value ::= STRING | var_expr
     var_expr   ::= '$' NUMBER (('+' | '-') NUMBER)?
 
@@ -104,12 +104,13 @@ AttrValue = Union[StringLiteral, VarExpr]
 
 @dataclass(frozen=True)
 class AttrConstraint:
-    """A single ``name = value`` constraint inside an activity's ``[…]``."""
+    """A single ``name (= | !=) value`` constraint inside an activity's ``[…]``."""
     name: str
     value: AttrValue
+    op: str = "="          # "=" (equality) or "!=" (inequality)
 
     def __str__(self) -> str:
-        return f"{self.name}={self.value}"
+        return f"{self.name}{self.op}{self.value}"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -261,6 +262,7 @@ class TT(Enum):
     MINUS    = "MINUS"
     OPT      = "OPT"
     EQ       = "EQ"
+    NEQ      = "NEQ"      # != - attribute inequality
     COMMA    = "COMMA"
     STRING   = "STRING"
     VAR      = "VAR"
@@ -270,6 +272,7 @@ class TT(Enum):
 
 _RAW_PATTERNS: List[Tuple[TT, str]] = [
     (TT.OR,     r'\|\|'),
+    (TT.NEQ,    r'!='),          # must precede NOT so '!=' wins over a lone '!'
     (TT.NOT,    r'[!^]'),
     (TT.STRING, r'"(?:[^"\\]|\\.)*"'),
     (TT.VAR,    r'\$\d+'),
@@ -423,6 +426,7 @@ def _collect_activities(
             if isinstance(c.value, StringLiteral):
                 attrs.append({
                     "name":  c.name,
+                    "op":    c.op,                   # "=" or "!="
                     "kind":  "literal",
                     "value": c.value.value,          # quotes already stripped
                 })
@@ -432,6 +436,7 @@ def _collect_activities(
                     raw += f"{c.value.op}{c.value.offset}"
                 attrs.append({
                     "name":  c.name,
+                    "op":    c.op,                   # "=" or "!="
                     "kind":  "variable",
                     "value": raw,
                 })
@@ -567,13 +572,19 @@ class Parser:
         return ActivityNode(label=label, constraints=tuple(constraints))
 
     # attr_list ::= attr (',' attr)*
+    # attr      ::= LABEL ('=' | '!=') attr_value
     def _attr_list(self) -> List[AttrConstraint]:
         attrs: List[AttrConstraint] = []
         while True:
             name = self._consume(TT.LABEL).value
-            self._consume(TT.EQ)
+            if self._at(TT.NEQ):
+                self._consume(TT.NEQ)
+                op = "!="
+            else:
+                self._consume(TT.EQ)
+                op = "="
             value = self._attr_value()
-            attrs.append(AttrConstraint(name=name, value=value))
+            attrs.append(AttrConstraint(name=name, value=value, op=op))
             if not self._at(TT.COMMA):
                 break
             self._consume(TT.COMMA)

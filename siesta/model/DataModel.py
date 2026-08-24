@@ -93,9 +93,17 @@ class EventConfig:
     def get_source_schema(self) -> StructType:
         """Return the Spark schema using source field names for parsing raw data."""
         fields = []
+        seen = set()
         for event_field, source_field in self.field_mappings.items():
             if source_field is not None:  # Skip computed fields
-                fields.append(StructField(str(source_field), StringType(), True))
+                if source_field not in seen:
+                    fields.append(StructField(str(source_field), StringType(), True))
+                    seen.add(source_field)
+        for attr in (self.attributes_mapping or []):
+            if attr == "*" or attr in seen:
+                continue
+            fields.append(StructField(str(attr), StringType(), True))
+            seen.add(attr)
         return StructType(fields)
     
     def __reduce__(self):

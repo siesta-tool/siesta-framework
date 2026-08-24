@@ -1,8 +1,26 @@
 """
 Process model discovery — no graphviz required.
 
-Model formats:  DFG -> XML (.xml),  BPMN (inductive) -> BPMN 2.0 (.bpmn)
-PNG:            matplotlib, layered L->R layout, orthogonal edge routing
+Scalability note: pm4py's own DFG discovery (pm4py.algo.discovery.dfg) requires a
+materialized pm4py EventLog, i.e. calling events_df.toPandas() on the FULL event log.
+That doesn't scale to the log sizes this framework targets. Instead, this module
+computes the Directly-Follows Graph with our own distributed Spark aggregation
+(_compute_dfg_dict — same Window+lead pattern as directly_follows.py, only ever
+collecting the small set of distinct activity pairs to the driver, never raw events)
+and feeds the resulting (small) dict to pm4py's Inductive Miner in its DFG-only input
+mode (variant=Variants.IMd). Verified against the installed pm4py version
+(algo/discovery/inductive/algorithm.py): when given a `DFG` instance, `apply()`
+internally routes to `IMD(...).apply(IMDataStructureDFG(InductiveDFG(dfg=obj)))`
+regardless of the requested variant, falling back to IMd with a warning if a
+log-based variant was requested — i.e. IMd is pm4py's supported, first-class path for
+discovering a sound, block-structured process tree from an aggregated DFG alone, with
+NO event log required. This is also materially better than pm4py's direct
+DFG->Petri-net converter (VERSION_TO_PETRI_NET_INVISIBLES_NO_DUPLICATES), which skips
+concurrency/choice-block detection entirely.
+
+Model formats:  DFG -> XML (.xml),  Petri net -> PNML (.pnml),  BPMN (inductive) -> BPMN 2.0 (.bpmn)
+PNG:            pm4py/graphviz if available, else matplotlib layered L->R layout with
+                orthogonal edge routing
 HTML:           pyvis (interactive physics simulation) if installed,
                 else static matplotlib SVG fallback
 """
@@ -14,21 +32,19 @@ from collections import defaultdict
 
 import networkx as nx
 import matplotlib.patches as mpatches
-import matplotlib.path as mpath
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.backends.backend_svg import FigureCanvasSVG
 from matplotlib.figure import Figure
 
 from pyspark.sql import DataFrame as SparkDataFrame
 from pyspark.sql import functions as F
-from pm4py.objects.log.util import dataframe_utils
-from pm4py.objects.conversion.log import converter as log_converter
+from pyspark.sql.window import Window
+
+from pm4py.objects.dfg.obj import DFG
 from pm4py.algo.discovery.inductive import algorithm as inductive_miner
-from pm4py.algo.discovery.dfg import algorithm as dfg_discovery
-from pm4py.statistics.start_activities.log import get as start_activities_module
-from pm4py.statistics.end_activities.log import get as end_activities_module
 from pm4py.objects.conversion.process_tree import converter as pt_converter
 from pm4py.objects.bpmn.exporter import exporter as bpmn_exporter
+from pm4py.objects.petri_net.exporter import exporter as pnml_exporter
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +53,9 @@ _TASK_W  = 1.8    # task rectangle full width
 _TASK_H  = 0.6    # task rectangle full height
 _EVENT_R = 0.28   # start/end event circle radius
 _GW_SIZE = 0.32   # gateway diamond half-diagonal
+_PLACE_R = 0.14   # petri net place circle radius
+_SILENT_W = 0.6   # petri net silent/tau transition bar width
+_SILENT_H = 0.18  # petri net silent/tau transition bar height
 _X_GAP   = 3.0    # horizontal distance between layers
 _Y_GAP   = 1.2    # vertical distance between nodes in the same layer
 
@@ -120,13 +139,17 @@ def _margin(kind: str, ux: float, uy: float) -> float:
         return _rect_margin(_TASK_W / 2, _TASK_H / 2, ux, uy)
     if kind in ('start', 'end'):
         return _EVENT_R
+    if kind == 'place':
+        return _PLACE_R
+    if kind == 'silent':
+        return _rect_margin(_SILENT_W / 2, _SILENT_H / 2, ux, uy)
     # gateway (xor / and / or)
     return _diamond_margin(_GW_SIZE, ux, uy)
 
 
 # ── Drawing primitives ────────────────────────────────────────────────────────
 
-def _draw_node(ax, x: float, y: float, kind: str, label: str):
+def _draw_node(ax, x: float, y: float, kind: str, label: str, marked: bool = False):
     if kind == 'task':
         ax.add_patch(mpatches.FancyBboxPatch(
             (x - _TASK_W / 2, y - _TASK_H / 2), _TASK_W, _TASK_H,
@@ -152,6 +175,17 @@ def _draw_node(ax, x: float, y: float, kind: str, label: str):
                                      fc='black', ec='none', zorder=4))
         ax.text(x, y - _EVENT_R - 0.14, 'end',
                 ha='center', va='top', fontsize=6.5, zorder=4)
+
+    elif kind == 'place':
+        ax.add_patch(mpatches.Circle((x, y), _PLACE_R,
+                                     fc='black' if marked else 'white',
+                                     ec='black', lw=1.5, zorder=3))
+
+    elif kind == 'silent':
+        ax.add_patch(mpatches.FancyBboxPatch(
+            (x - _SILENT_W / 2, y - _SILENT_H / 2), _SILENT_W, _SILENT_H,
+            boxstyle="square,pad=0", facecolor='black', edgecolor='black', zorder=3,
+        ))
 
     else:  # gateway
         symbol = {'xor': '×', 'and': '+', 'or': 'O'}.get(kind, '?')
@@ -255,7 +289,8 @@ def _build_figure(G: nx.DiGraph, pos: dict, node_info: dict, edge_labels: dict) 
 
     # Nodes on top
     for nid, (x, y) in pos.items():
-        _draw_node(ax, x, y, node_info[nid]['kind'], node_info[nid]['label'])
+        _draw_node(ax, x, y, node_info[nid]['kind'], node_info[nid]['label'],
+                   marked=node_info[nid].get('marked', False))
 
     return fig
 
@@ -265,6 +300,21 @@ def _build_figure(G: nx.DiGraph, pos: dict, node_info: dict, edge_labels: dict) 
 def _save_png(fig: Figure, path: str):
     FigureCanvasAgg(fig)
     fig.savefig(path, dpi=150, bbox_inches='tight')
+
+
+def _patch_gviz_durations(gviz, activity_durations: dict = None):
+    """Injects activity durations into a graphviz Digraph's DOT body before
+    rendering, by patching label="<act>" -> label="<act>\\n(<dur>)". Sorted
+    longest-first to prevent short names being matched inside longer ones."""
+    if not activity_durations or not hasattr(gviz, 'body'):
+        return
+    for act, dur in sorted(activity_durations.items(), key=lambda x: -len(x[0])):
+        dur_str = _format_duration(dur)
+        for i in range(len(gviz.body)):
+            gviz.body[i] = gviz.body[i].replace(
+                f'label="{act}"',
+                f'label="{act}\\n({dur_str})"',
+            )
 
 
 def _pm4py_png_dfg(dfg: dict, start_acts: dict, end_acts: dict, png_path: str,
@@ -296,20 +346,24 @@ def _pm4py_png_bpmn(bpmn_model, png_path: str, activity_durations: dict = None) 
     try:
         from pm4py.visualization.bpmn import visualizer as bpmn_visualizer
         gviz = bpmn_visualizer.apply(bpmn_model)
-        if activity_durations and hasattr(gviz, 'body'):
-            # Inject durations by patching the DOT body before rendering.
-            # Sort longest-first to prevent short names being matched inside longer ones.
-            for act, dur in sorted(activity_durations.items(), key=lambda x: -len(x[0])):
-                dur_str = _format_duration(dur)
-                for i in range(len(gviz.body)):
-                    gviz.body[i] = gviz.body[i].replace(
-                        f'label="{act}"',
-                        f'label="{act}\\n({dur_str})"',
-                    )
+        _patch_gviz_durations(gviz, activity_durations)
         bpmn_visualizer.save(gviz, png_path)
         return True
     except Exception as e:
         logger.debug("PM4Py BPMN visualizer unavailable (%s); falling back to matplotlib.", e)
+        return False
+
+
+def _pm4py_png_petri_net(net, im, fm, png_path: str, activity_durations: dict = None) -> bool:
+    """Try PM4Py's graphviz Petri net renderer. Returns True on success, False if graphviz absent."""
+    try:
+        from pm4py.visualization.petri_net import visualizer as pn_visualizer
+        gviz = pn_visualizer.apply(net, im, fm)
+        _patch_gviz_durations(gviz, activity_durations)
+        pn_visualizer.save(gviz, png_path)
+        return True
+    except Exception as e:
+        logger.debug("PM4Py Petri net visualizer unavailable (%s); falling back to matplotlib.", e)
         return False
 
 
@@ -360,12 +414,14 @@ def _save_html_pyvis(G: nx.DiGraph, node_info: dict, edge_labels: dict,
         }""")
 
         _SHAPE = {
-            'task':  ('box',     '#2E6DA4', '#1A4A75', 'white'),
-            'start': ('dot',     'white',   'black',   'black'),
-            'end':   ('dot',     'black',   'black',   'white'),
-            'xor':   ('diamond', 'white',   'black',   'black'),
-            'and':   ('diamond', 'white',   'black',   'black'),
-            'or':    ('diamond', 'white',   'black',   'black'),
+            'task':   ('box',     '#2E6DA4', '#1A4A75', 'white'),
+            'start':  ('dot',     'white',   'black',   'black'),
+            'end':    ('dot',     'black',   'black',   'white'),
+            'xor':    ('diamond', 'white',   'black',   'black'),
+            'and':    ('diamond', 'white',   'black',   'black'),
+            'or':     ('diamond', 'white',   'black',   'black'),
+            'place':  ('dot',     'white',   'black',   'black'),
+            'silent': ('box',     'black',   'black',   'white'),
         }
         _GW_SYMBOL = {'xor': '×', 'and': '+', 'or': 'O'}
 
@@ -373,6 +429,8 @@ def _save_html_pyvis(G: nx.DiGraph, node_info: dict, edge_labels: dict,
             kind  = info['kind']
             label = info['label'] or _GW_SYMBOL.get(kind, '')
             shape, bg, border, fc = _SHAPE.get(kind, ('box', '#aaa', '#666', 'black'))
+            if kind == 'place' and info.get('marked'):
+                bg = 'black'
             net.add_node(str(nid), label=label, shape=shape,
                          color={'background': bg, 'border': border},
                          font={'color': fc, 'size': 13},
@@ -399,9 +457,54 @@ def _save_html_pyvis(G: nx.DiGraph, node_info: dict, edge_labels: dict,
         return False
 
 
-
-
 # ── DFG ───────────────────────────────────────────────────────────────────────
+
+def _compute_dfg_dict(events_df: SparkDataFrame, end_time: str = None):
+    """Computes a pm4py-compatible DFG (dict[(source,target)] -> frequency) plus
+    start/end activity frequency dicts, using our own scalable Spark aggregation
+    instead of pm4py's log-based discovery. Only the small set of distinct
+    activity pairs / activities is ever collected to the driver.
+    """
+    w = Window.partitionBy("trace_id").orderBy("position")
+    pairs = (
+        events_df
+        .withColumn("target", F.lead("activity").over(w))
+        .filter(F.col("target").isNotNull())
+    )
+    freq_rows = (
+        pairs.groupBy("activity", "target")
+        .agg(F.count(F.lit(1)).alias("freq"))
+        .withColumnRenamed("activity", "source")
+        .collect()
+    )
+    dfg = {(r["source"], r["target"]): int(r["freq"]) for r in freq_rows}
+
+    w2 = Window.partitionBy("trace_id")
+    bounded = (
+        events_df
+        .withColumn("_minp", F.min("position").over(w2))
+        .withColumn("_maxp", F.max("position").over(w2))
+    )
+    start_rows = (
+        bounded.filter(F.col("position") == F.col("_minp"))
+        .groupBy("activity").agg(F.count(F.lit(1)).alias("freq")).collect()
+    )
+    end_rows = (
+        bounded.filter(F.col("position") == F.col("_maxp"))
+        .groupBy("activity").agg(F.count(F.lit(1)).alias("freq")).collect()
+    )
+    start_activities = {r["activity"]: int(r["freq"]) for r in start_rows}
+    end_activities = {r["activity"]: int(r["freq"]) for r in end_rows}
+
+    return dfg, start_activities, end_activities
+
+
+def _apply_noise_filter(dfg: dict, start_acts: dict, end_acts: dict, noise_threshold: float):
+    from pm4py.algo.filtering.dfg import dfg_filtering
+    return dfg_filtering.filter_dfg_on_paths_percentage(
+        dfg, start_acts, end_acts, 1.0 - noise_threshold
+    )
+
 
 def _export_dfg_xml(dfg: dict, start_activities: dict, end_activities: dict, path: str):
     activities = sorted({a for pair in dfg for a in pair})
@@ -461,17 +564,7 @@ def _build_dfg_graph(dfg: dict, start_activities: dict, end_activities: dict,
     return G, node_info, edge_labels
 
 
-def _discover_dfg(event_log, noise_threshold: float = 0.0, activity_durations: dict = None):
-    dfg = dfg_discovery.apply(event_log)
-    start_acts = start_activities_module.get_start_activities(event_log)
-    end_acts = end_activities_module.get_end_activities(event_log)
-
-    if noise_threshold > 0.0:
-        from pm4py.algo.filtering.dfg import dfg_filtering
-        dfg, start_acts, end_acts = dfg_filtering.filter_dfg_on_paths_percentage(
-            dfg, start_acts, end_acts, 1.0 - noise_threshold
-        )
-
+def _discover_dfg(dfg: dict, start_acts: dict, end_acts: dict, activity_durations: dict = None):
     model_path = _new_tempfile('.xml')
     png_path   = _new_tempfile('.png')
     html_path  = _new_tempfile('.html')
@@ -567,61 +660,152 @@ def _export_bpmn_model(bpmn_model, activity_durations: dict = None):
     return model_path, 'bpmn', png_path, html_path
 
 
+# ── Petri net ─────────────────────────────────────────────────────────────────
+
+def _build_petri_net_graph(net, im, fm, activity_durations: dict = None):
+    G = nx.DiGraph()
+    node_info: dict = {}
+
+    for p in net.places:
+        nid = id(p)
+        G.add_node(nid)
+        node_info[nid] = {'kind': 'place', 'label': '', 'marked': p in im}
+
+    for t in net.transitions:
+        nid = id(t)
+        if t.label is None:
+            node_info[nid] = {'kind': 'silent', 'label': ''}
+        else:
+            label = t.label
+            if activity_durations and label in activity_durations:
+                label = f"{label}\n({_format_duration(activity_durations[label])})"
+            node_info[nid] = {'kind': 'task', 'label': label}
+        G.add_node(nid)
+
+    for arc in net.arcs:
+        src_id = id(arc.source)
+        tgt_id = id(arc.target)
+        if src_id in node_info and tgt_id in node_info:
+            G.add_edge(src_id, tgt_id)
+
+    return G, node_info
+
+
+def _export_petri_net(net, im, fm, activity_durations: dict = None):
+    model_path = _new_tempfile('.pnml')
+    png_path   = _new_tempfile('.png')
+    html_path  = _new_tempfile('.html')
+
+    # NOTE: signature is (net, initial_marking, output_filename, final_marking=...).
+    # Passing final_marking positionally silently corrupts the export.
+    pnml_exporter.apply(net, im, model_path, final_marking=fm)
+
+    try:
+        G, node_info = _build_petri_net_graph(net, im, fm, activity_durations)
+        pos = _layered_layout(G)
+        mpl_fig = None
+
+        # PNG: PM4Py/graphviz -> matplotlib fallback
+        if not _pm4py_png_petri_net(net, im, fm, png_path, activity_durations):
+            mpl_fig = _build_figure(G, pos, node_info, {})
+            _save_png(mpl_fig, png_path)
+
+        # HTML: pyvis (interactive) -> matplotlib SVG fallback
+        if not _save_html_pyvis(G, node_info, {}, html_path, 'Petri Net Process Model'):
+            if mpl_fig is None:
+                mpl_fig = _build_figure(G, pos, node_info, {})
+            _save_html_static(mpl_fig, html_path, 'Petri Net Process Model')
+    except Exception:
+        logger.exception("Petri net visualization failed.")
+
+    return model_path, 'pnml', png_path, html_path
+
+
+# ── Inductive Miner (DFG-only mode) ────────────────────────────────────────────
+
+def _discover_process_tree(dfg: dict, start_acts: dict, end_acts: dict):
+    """Discovers a sound, block-structured ProcessTree purely from an aggregated
+    DFG - no event log required. See module docstring for the rationale.
+    """
+    dfg_obj = DFG(graph=dfg, start_activities=start_acts, end_activities=end_acts)
+    return inductive_miner.apply(dfg_obj, variant=inductive_miner.Variants.IMd)
+
+
+# ── Activity durations helper ──────────────────────────────────────────────────
+
+def compute_activity_durations_map(events_df: SparkDataFrame, end_time: str = None) -> dict | None:
+    """Per-activity average duration in seconds, as a plain dict (for annotating
+    process-model visualizations). Returns None if end_time is not provided.
+    """
+    if not end_time:
+        return None
+    try:
+        end_raw = F.col("attributes").getItem(end_time)
+        end_ts_expr = F.when(end_raw.isNull(), None).when(
+            end_raw.rlike('^[0-9]+$'), end_raw.cast('long')
+        ).otherwise(F.unix_timestamp(F.to_timestamp(end_raw)))
+        dur_pd = (
+            events_df
+            .withColumn("_end", end_ts_expr)
+            .withColumn("_dur", F.col("_end") - F.col("start_timestamp"))
+            .filter(F.col("_dur").isNotNull())
+            .groupBy("activity")
+            .agg(F.avg("_dur").alias("avg_duration"))
+            .toPandas()
+        )
+        return {
+            row["activity"]: float(row["avg_duration"])
+            for _, row in dur_pd.dropna(subset=["avg_duration"]).iterrows()
+        }
+    except Exception:
+        logger.exception("Failed to compute activity durations; continuing without.")
+        return None
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def discover_process_model(df: SparkDataFrame, algo: str = "inductive",
-                           noise_threshold: float = 0.0, filter_percentile: float = 0.0,
+def discover_process_model(events_df: SparkDataFrame, algo: str = "bpmn",
+                           end_time: str = None, noise_threshold: float = 0.0,
                            activity_durations: dict = None):
     """
-    Discovers a process model from an event log Spark DataFrame.
+    Discovers a process model from an indexed event log's Spark sequence table.
 
     Args:
-        df: Spark DataFrame — columns 'case:concept:name', 'concept:name', 'time:timestamp'
-            (legacy 'trace_id', 'event_type', 'timestamp' are renamed automatically).
+        events_df: Sequence table DataFrame (trace_id, activity, position,
+                   start_timestamp, attributes).
         algo: 'dfg' -> Directly-Follows Graph (exported as XML);
-              'inductive' -> BPMN via Inductive Miner (exported as BPMN 2.0 XML).
-        noise_threshold: 0.0–1.0, higher = simpler model.
-        filter_percentile: Pre-filter log variants by frequency percentile (0.0–1.0).
-        activity_durations: Optional {activity: avg_seconds} shown in visualisations.
+              'bpmn' -> BPMN via the DFG-based Inductive Miner (BPMN 2.0 XML);
+              'petri_net' -> Petri net via the same Inductive Miner (PNML).
+        end_time: Optional attributes-map key for event end timestamp, used only
+                  to compute per-activity average durations for visualisation
+                  annotations (does not affect the DFG itself).
+        noise_threshold: 0.0-1.0, higher = simpler model (prunes low-frequency
+                         DFG paths before discovery).
+        activity_durations: Optional pre-computed {activity: avg_seconds}; if not
+                            given and end_time is set, computed automatically.
 
     Returns:
         (model_path, fmt, png_path, html_path)
     """
-    if algo not in ('inductive', 'dfg'):
-        raise ValueError(f"algo must be 'inductive' or 'dfg', got '{algo}'")
+    if algo not in ('dfg', 'bpmn', 'petri_net'):
+        raise ValueError(f"algo must be 'dfg', 'bpmn' or 'petri_net', got '{algo}'")
 
-    for old, new in [('trace_id', 'case:concept:name'),
-                     ('event_type', 'concept:name'),
-                     ('timestamp', 'time:timestamp')]:
-        if old in df.columns:
-            df = df.withColumnRenamed(old, new)
+    if activity_durations is None:
+        activity_durations = compute_activity_durations_map(events_df, end_time)
 
-    if 'time:timestamp' in df.columns:
-        if dict(df.dtypes).get('time:timestamp', '') != 'timestamp':
-            df = df.withColumn('time:timestamp', F.to_timestamp(F.col('time:timestamp')))
+    dfg, start_acts, end_acts = _compute_dfg_dict(events_df, end_time)
 
-    df = df.orderBy(['case:concept:name', 'time:timestamp'])
-
-    pandas_df = df.toPandas()
-    pandas_df = dataframe_utils.convert_timestamp_columns_in_df(pandas_df)
-    event_log = log_converter.apply(pandas_df)
-
-    if filter_percentile > 0.0:
-        from pm4py.algo.filtering.log.variants import variants_filter
-        event_log = variants_filter.filter_log_variants_percentage(event_log, filter_percentile)
+    if noise_threshold > 0.0:
+        dfg, start_acts, end_acts = _apply_noise_filter(dfg, start_acts, end_acts, noise_threshold)
 
     if algo == 'dfg':
-        return _discover_dfg(event_log, noise_threshold, activity_durations)
+        return _discover_dfg(dfg, start_acts, end_acts, activity_durations)
 
-    # inductive -> BPMN
-    if noise_threshold > 0.0:
-        from pm4py.algo.discovery.inductive.variants.imf import IMFParameters
-        process_tree = inductive_miner.apply(
-            event_log, variant=inductive_miner.Variants.IMf,
-            parameters={IMFParameters.NOISE_THRESHOLD: noise_threshold},
-        )
-    else:
-        process_tree = inductive_miner.apply(event_log)
+    process_tree = _discover_process_tree(dfg, start_acts, end_acts)
 
-    bpmn_model = pt_converter.apply(process_tree, variant=pt_converter.Variants.TO_BPMN)
-    return _export_bpmn_model(bpmn_model, activity_durations)
+    if algo == 'bpmn':
+        bpmn_model = pt_converter.apply(process_tree, variant=pt_converter.Variants.TO_BPMN)
+        return _export_bpmn_model(bpmn_model, activity_durations)
+
+    net, im, fm = pt_converter.apply(process_tree, variant=pt_converter.Variants.TO_PETRI_NET)
+    return _export_petri_net(net, im, fm, activity_durations)

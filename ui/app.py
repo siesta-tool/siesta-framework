@@ -1,7 +1,11 @@
+import os
+
 import streamlit as st
 
-from common import health_check
-from modules import render_analyser, render_comparator, render_indexer, render_miner, render_query
+from common import fetch_namespace_catalog, health_check
+from modules import render_analyser, render_indexer, render_manager, render_miner, render_query
+
+DEFAULT_API_URL = os.environ.get("SIESTA_API_URL", "http://localhost:8000")
 
 MODULES = [
     {
@@ -14,7 +18,7 @@ MODULES = [
         "key": "Analyser",
         "title": "Analyser",
         "emoji": "🧠",
-        "description": "Run analysis methods on indexed logs and inspect results.",
+        "description": "Process model discovery, loop detection, bottleneck detection, temporal deviation analysis, and n-gram/rule-based trace comparison.",
     },
     {
         "key": "Miner",
@@ -23,16 +27,16 @@ MODULES = [
         "description": "Discover declarative constraints from indexed logs.",
     },
     {
-        "key": "Comparator",
-        "title": "Comparator",
-        "emoji": "⚖️",
-        "description": "Compare log fragments with n-grams, rare rules, or targeted rules.",
-    },
-    {
         "key": "Query",
         "title": "Query",
         "emoji": "🔍",
         "description": "Execute statistics, detection, or exploration queries.",
+    },
+    {
+        "key": "Log Manager",
+        "title": "Log Manager",
+        "emoji": "🗄️",
+        "description": "Browse storage namespaces and logs, inspect metadata, run ad-hoc SQL, and delete logs/namespaces.",
     },
 ]
 
@@ -98,10 +102,10 @@ def render_page(page_name: str, base_url: str) -> None:
         render_analyser(base_url)
     elif page_name == "Miner":
         render_miner(base_url)
-    elif page_name == "Comparator":
-        render_comparator(base_url)
     elif page_name == "Query":
         render_query(base_url)
+    elif page_name == "Log Manager":
+        render_manager(base_url)
     else:
         render_home(base_url)
 
@@ -123,9 +127,14 @@ def main() -> None:
 
     st.sidebar.markdown("---")
 
-    base_url = st.sidebar.text_input("Siesta API base URL", "http://localhost:8000")
+    base_url = st.sidebar.text_input("Siesta API base URL", DEFAULT_API_URL)
     if st.sidebar.button("Ping API health", key="sidebar_ping"):
         st.session_state.health_ping_result = health_check(base_url)
+
+    if "namespace_catalog" not in st.session_state:
+        st.session_state.namespace_catalog = fetch_namespace_catalog(base_url)
+    if st.sidebar.button("Refresh log list", key="refresh_namespace_catalog", help="Reload namespaces/logs shown in the dropdowns below."):
+        st.session_state.namespace_catalog = fetch_namespace_catalog(base_url)
 
     if st.session_state.get("health_ping_result") is not None:
         result = st.session_state.health_ping_result
@@ -137,7 +146,7 @@ def main() -> None:
     st.sidebar.markdown("---")
     st.sidebar.image("datalab-logo.png", width="content")
     st.sidebar.markdown(
-        "MIT License 2025 | [GitHub Repo](https://github.com/siesta-tool/siesta-framework)"
+        "MIT License 2026 | [GitHub Repo](https://github.com/siesta-tool/siesta-framework)"
     )
 
     render_page(st.session_state.current_page, base_url)

@@ -3,6 +3,7 @@ import pandas as pd
 from pyspark.sql import DataFrame, functions as F
 from siesta.model.StorageModel import ConstraintEntry, MetaData
 from siesta.core.storageFactory import get_storage_manager
+from siesta.modules.mine.pandas_udf_utils import sanitize_udf_output
 
 import logging
 logger = logging.getLogger(__name__)
@@ -52,7 +53,10 @@ def _mine_trace_unordered_pandas(pdf: pd.DataFrame) -> pd.DataFrame:
             if a_in != b_in:
                 rows.append(("exclusive_choice", a, trace_id, b, None))
     
-    return pd.DataFrame(rows, columns=["template", "source", "trace_id", "target", "occurrences"])
+    return sanitize_udf_output(
+        pd.DataFrame(rows, columns=["template", "source", "trace_id", "target", "occurrences"]),
+        ConstraintEntry.get_schema(),
+    )
 
 
 def discover_unordered(evolved_df: DataFrame, metadata: MetaData) -> DataFrame:
