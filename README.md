@@ -6,7 +6,8 @@ It can run as:
 - module-oriented CLI jobs (indexer, miner, executor).
 
 Core data assumptions:
-- `trace_id` is a string
+- `trace_id` is a string; it may be derived at indexing time from a combination of source
+  columns instead of a single one (see `field_mappings` in the indexer config)
 - `activity` is a string
 - `position` inside a trace is 0-indexed integer (derived from timestamp)
 

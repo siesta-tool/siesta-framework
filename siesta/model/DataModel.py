@@ -4,6 +4,9 @@ from pyspark.sql.types import StructType, StructField, StringType, IntegerType, 
 import logging
 logger = logging.getLogger(__name__)
 
+DEFAULT_COMPOSITE_SEPARATOR = "::"
+
+
 class EventConfig:
     """Configuration for mapping source data attributes to Event fields.
     
@@ -11,27 +14,32 @@ class EventConfig:
     or pass a custom config to parse functions.
     """
     
-    def __init__(self, 
-                 field_mappings: dict[str, Optional[str]],
+    def __init__(self,
+                 field_mappings: dict[str, Optional[str | list[str]]],
                  trace_level_fields: set[str],
                  timestamp_fields: set[str],
-                 attributes_mapping: Optional[list[str]] = None):
+                 attributes_mapping: Optional[list[str]] = None,
+                 composite_separator: str = DEFAULT_COMPOSITE_SEPARATOR):
         """
         Initialize EventConfig with field mappings.
-        
+
         Args:
             field_mappings: Dict mapping Event field names to source attribute keys.
-                          Use None as value for computed fields.
+                          A single key (str) maps the field to one source column; a list of
+                          keys maps it to the combination of those columns, joined with
+                          composite_separator. Use None as value for computed fields.
             trace_level_fields: Set of fields extracted from trace level
             timestamp_fields: Set of fields containing timestamps
-            attributes_mapping: List of source keys to include in attributes. 
+            attributes_mapping: List of source keys to include in attributes.
                               None/Empty means store nothing. ["*"] means store all unmapped.
+            composite_separator: String used to join the values of a multi-column mapping.
         """
         self.field_mappings = field_mappings
         self.trace_level_fields = trace_level_fields
         self.timestamp_fields = timestamp_fields
         self.attributes_mapping = attributes_mapping
-    
+        self.composite_separator = composite_separator
+
     @staticmethod
     def from_preprocess_config(config: dict, log_format: str = 'xes') -> 'EventConfig':
         """Create EventConfig from preprocess configuration.
@@ -67,24 +75,50 @@ class EventConfig:
             field_mappings=field_mappings,
             trace_level_fields=set(config.get('trace_level_fields', ['trace_id'])),
             timestamp_fields=set(config.get('timestamp_fields', ['start_timestamp'])),
-            attributes_mapping=attributes_mapping
+            attributes_mapping=attributes_mapping,
+            composite_separator=config.get('composite_separator', DEFAULT_COMPOSITE_SEPARATOR)
         )
-    
-    def get_event_fields(self) -> dict[str, Optional[str]]:
+
+    @staticmethod
+    def as_source_keys(mapping: Optional[str | list[str]]) -> list[str]:
+        """Normalise a single mapping value into an ordered list of source keys.
+
+        Accepts the single-column form (str), the composite form (list of str) and the
+        computed form (None / empty), so callers never branch on the union type.
+        """
+        if mapping is None:
+            return []
+        if isinstance(mapping, str):
+            return [mapping]
+        return [k for k in mapping if k]
+
+    def get_source_keys(self, field_name: str) -> list[str]:
+        """Ordered source keys backing an Event field ([] for computed fields)."""
+        return self.as_source_keys(self.field_mappings.get(field_name))
+
+    def all_source_keys(self) -> set[str]:
+        """Every source key referenced by any mapping, composite components included."""
+        return {k for v in self.field_mappings.values() for k in self.as_source_keys(v)}
+
+    def is_composite_field(self, field_name: str) -> bool:
+        """Check if a field is built from more than one source column."""
+        return len(self.get_source_keys(field_name)) > 1
+
+    def get_event_fields(self) -> dict[str, Optional[str | list[str]]]:
         """Get mappings for event-level fields only."""
         return {k: v for k, v in self.field_mappings.items() if k not in self.trace_level_fields}
-    
-    def get_trace_fields(self) -> dict[str, Optional[str]]:
+
+    def get_trace_fields(self) -> dict[str, Optional[str | list[str]]]:
         """Get mappings for trace-level fields only."""
         return {k: v for k, v in self.field_mappings.items() if k in self.trace_level_fields}
-    
+
     def is_timestamp_field(self, field_name: str) -> bool:
         """Check if a field should be parsed as timestamp."""
         return field_name in self.timestamp_fields
-    
+
     def is_computed_field(self, field_name: str) -> bool:
         """Check if a field is computed (not extracted from source)."""
-        return self.field_mappings.get(field_name) is None
+        return not self.get_source_keys(field_name)
 
     def get_event_schema(self) -> StructType:
         """Return the Spark schema for Event based on field mappings."""
@@ -95,10 +129,11 @@ class EventConfig:
         fields = []
         seen = set()
         for event_field, source_field in self.field_mappings.items():
-            if source_field is not None:  # Skip computed fields
-                if source_field not in seen:
-                    fields.append(StructField(str(source_field), StringType(), True))
-                    seen.add(source_field)
+            # Skips computed fields; a composite mapping contributes one field per component
+            for source_key in self.as_source_keys(source_field):
+                if source_key not in seen:
+                    fields.append(StructField(str(source_key), StringType(), True))
+                    seen.add(source_key)
         for attr in (self.attributes_mapping or []):
             if attr == "*" or attr in seen:
                 continue
@@ -107,8 +142,9 @@ class EventConfig:
         return StructType(fields)
     
     def __reduce__(self):
-        return (self.__class__, (self.field_mappings, self.trace_level_fields, 
-                             self.timestamp_fields, self.attributes_mapping))
+        return (self.__class__, (self.field_mappings, self.trace_level_fields,
+                             self.timestamp_fields, self.attributes_mapping,
+                             self.composite_separator))
 
 
 class Event:

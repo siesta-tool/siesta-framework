@@ -109,37 +109,59 @@ def send_event(producer: Producer, topic: str, event: Dict[str, Any], key: str =
         print(f"✗ Failed to send event: {e}", file=sys.stderr)
 
 
-def generate_sample_events(field_mappings: Dict[str, str], count: int = 10):
+def _as_source_keys(mapping: Optional[Any]) -> list:
+    """Normalise a field_mappings value (str, list of str, or None) into a list of keys.
+
+    Mirrors EventConfig.as_source_keys in siesta/model/DataModel.py - a field mapped to a
+    list of columns is a composite field whose value is the combination of those columns.
+    """
+    if not mapping:
+        return []
+    return list(mapping) if isinstance(mapping, list) else [mapping]
+
+
+def build_trace_id_key(event: Dict[str, Any], field_mappings: Dict[str, Any], separator: str = "::") -> Optional[str]:
+    """Build the Kafka message key from the (possibly composite) trace_id mapping."""
+    keys = _as_source_keys(field_mappings.get("trace_id", "caseID"))
+    values = [str(event[k]) for k in keys if k in event]
+    if not values:
+        return None
+    return values[0] if len(values) == 1 else separator.join(values)
+
+
+def generate_sample_events(field_mappings: Dict[str, Any], count: int = 10):
     """Generate sample log events for testing.
-    
+
     Events are generated based on the field mappings from config, with all values as strings.
-    
+    A trace_id mapped to a list of columns produces one JSON key per component.
+
     Args:
         field_mappings: Mapping from internal fields to JSON field names
         count: Number of events to generate
-        
+
     Yields:
         Event dictionaries
     """
     activities = ["A", "B", "C", "D"]
-    
+
     # Get field names from mappings; the keys below should match the DataModel.Event fields
-    trace_id_field = field_mappings.get("trace_id", "caseID")
+    trace_id_fields = _as_source_keys(field_mappings.get("trace_id", "caseID"))
     activity_field = field_mappings.get("activity", "activity")
     position_field = field_mappings.get("position", "position")
     timestamp_field = field_mappings.get("start_timestamp", "Timestamp")
-    
+
     for i in range(count):
         event = {}
-        if trace_id_field:
-            event[trace_id_field] = str(f"trace_{i % 3 + 1}")
+        for idx, trace_id_field in enumerate(trace_id_fields):
+            # Vary each component independently so a composite key visibly combines them
+            event[trace_id_field] = str(f"trace_{i % 3 + 1}") if idx == 0 else str(f"part{idx}_{i % 2}")
         if activity_field:
             event[activity_field] = str(activities[i % len(activities)])
         if position_field:
             event[position_field] = str((i % 4))  # Position in trace (0-based)
         if timestamp_field:
-            event[timestamp_field] = datetime.now().isoformat().split('.')[0] 
-        
+            event[timestamp_field] = datetime.now().isoformat().split('.')[0]
+
         yield event
 
 
@@ -172,11 +194,11 @@ def main():
     # Get connection parameters from config or args
     bootstrap_servers = args.bootstrap_servers or config.get('kafka_bootstrap_servers', '172.17.0.1:9092')
     topic = args.topic or config.get('kafka_topic', 'log_events')
-    trace_id_field = field_mappings.get('trace_id', 'trace_id')
-    
+    composite_separator = config.get('composite_separator', '::')
+
     print(f"Connecting to Kafka at {bootstrap_servers}...")
     producer = create_producer(bootstrap_servers)
-    
+
     try:
         if args.file:
             # Read events from file
@@ -185,7 +207,7 @@ def main():
                 for line_num, line in enumerate(f, 1):
                     try:
                         event = json.loads(line.strip())
-                        send_event(producer, topic, event, key=event.get(trace_id_field))
+                        send_event(producer, topic, event, key=build_trace_id_key(event, field_mappings, composite_separator))
                         time.sleep(args.delay)
                     except json.JSONDecodeError as e:
                         print(f"✗ Error parsing line {line_num}: {e}", file=sys.stderr)
@@ -193,7 +215,7 @@ def main():
             # Generate sample events
             print(f"Generating {args.count} sample events...")
             for event in generate_sample_events(field_mappings, args.count):
-                send_event(producer, topic, event, key=event.get(trace_id_field))
+                send_event(producer, topic, event, key=build_trace_id_key(event, field_mappings, composite_separator))
                 time.sleep(args.delay)
         
         print(f"\n✓ Successfully sent events to topic '{topic}'")

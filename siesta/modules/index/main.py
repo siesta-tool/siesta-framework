@@ -48,9 +48,14 @@ class IndexConfig(BaseModel):
             "position": "position",
             "start_timestamp": "Timestamp",
         },
-    }, description="Per-format mapping of Event fields to source column names")
+    }, description="Per-format mapping of Event fields to source column names. Each value is "
+                    "either a single source column name (str) or a list of column names, in "
+                    "which case they are joined with composite_separator into one value - "
+                    "useful when a field (most commonly trace_id) is identified by a "
+                    "combination of columns rather than a single one.")
     trace_level_fields: list[str] = Field(default_factory=lambda: ["trace_id"], description="Fields extracted at trace level")
     timestamp_fields: list[str] = Field(default_factory=lambda: ["start_timestamp"], description="Fields to parse as Unix epoch seconds")
+    composite_separator: str = Field("::", description="Separator used to join source column values when a field_mappings entry is a list of columns")
 
 
 DEFAULT_INDEX_CONFIG: Dict[str, Any] = IndexConfig().model_dump()
@@ -89,6 +94,10 @@ class Indexing(SiestaModule):
                     "summary": "Batch indexing",
                     "value": '{"log_name": "example_log", "storage_namespace": "siesta", "clear_existing": false, "field_mappings": {"csv": {"trace_id": "case:concept:name", "activity": "concept:name", "start_timestamp": "time:timestamp"}}}',
                 },
+                "composite_trace_id": {
+                    "summary": "Batch indexing with a composite trace_id",
+                    "value": '{"log_name": "example_log", "storage_namespace": "siesta", "clear_existing": false, "composite_separator": "::", "field_mappings": {"csv": {"trace_id": ["order_id", "region"], "activity": "activity", "start_timestamp": "timestamp"}}}',
+                },
                 "streaming": {
                     "summary": "Kafka streaming",
                     "value": '{"log_name": "example_log", "storage_namespace": "siesta", "enable_streaming": true, "kafka_topic": "example_log"}',
@@ -116,8 +125,13 @@ class Indexing(SiestaModule):
         - `kafka_topic` *(str, default: `"example_log"`)* - Kafka topic to consume in streaming mode.
         - `lookback` *(str, default: `"7d"`)* - lookback window for incremental indexing (e.g. `"7d"`, `"30d"`).
         - `field_mappings` *(object)* - per-format mapping of Event fields to source column names.
-          Formats: `xes`, `csv`, `json`. Use `"*"` in `attributes` list to capture all unmapped fields.
+          Formats: `xes`, `csv`, `json`. Each value is a source column name (str), or a list of
+          column names to combine into one value (e.g. `"trace_id": ["order_id", "region"]`) -
+          useful when a field, most commonly `trace_id`, is identified by a combination of
+          columns. Use `"*"` in `attributes` list to capture all unmapped fields.
         - `trace_level_fields` *(list, default: `["trace_id"]`)* - fields extracted at trace level.
+        - `composite_separator` *(str, default: `"::"`)* - separator used to join source column
+          values when a `field_mappings` entry is a list of columns.
         - `timestamp_fields` *(list, default: `["start_timestamp"]`)* - fields to parse as Unix epoch seconds.
         """
         logger.info(f"{self.name} is running via API request.")

@@ -13,6 +13,19 @@ def parse_attribute_list(raw: str) -> list[str] | None:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+def parse_field_value(raw: str) -> str | list[str] | None:
+    """Parse a field-mapping text input into a single column name or a list of column names.
+
+    A comma-separated value maps the field to the combination of those columns (joined with
+    the configured composite separator at indexing time), matching parse_attribute_list's
+    comma convention. Blank means unmapped/computed.
+    """
+    parts = [item.strip() for item in raw.split(",") if item.strip()]
+    if not parts:
+        return None
+    return parts[0] if len(parts) == 1 else parts
+
+
 def _display_response(response) -> None:
     if isinstance(response, dict) and response.get("error"):
         st.error(response["error"])
@@ -94,11 +107,21 @@ def render(base_url: str) -> None:
         with col2:
             trace_level_fields = st.text_input("Trace level fields", "trace_id")
             timestamp_fields = st.text_input("Timestamp fields", "start_timestamp")
+            composite_separator = st.text_input(
+                "Composite separator",
+                "::",
+                help="Used to join multiple columns when a field below is given as a "
+                     "comma-separated combination (e.g. a trace_id field).",
+            )
             with st.expander("Field mappings", expanded=False):
                 st.write("Configure the mapping fields for each supported log format.")
                 st.markdown("**XES mapping**")
                 xes_activity = st.text_input("XES activity field", default_field_mappings["xes"]["activity"])
-                xes_trace_id = st.text_input("XES trace_id field", default_field_mappings["xes"]["trace_id"])
+                xes_trace_id = st.text_input(
+                    "XES trace_id field",
+                    default_field_mappings["xes"]["trace_id"],
+                    help="Comma-separated to combine several columns into the trace id.",
+                )
                 xes_position = st.text_input(
                     "XES position field",
                     default_field_mappings["xes"]["position"] or "",
@@ -113,7 +136,11 @@ def render(base_url: str) -> None:
 
                 st.markdown("**CSV mapping**")
                 csv_activity = st.text_input("CSV activity field", default_field_mappings["csv"]["activity"])
-                csv_trace_id = st.text_input("CSV trace_id field", default_field_mappings["csv"]["trace_id"])
+                csv_trace_id = st.text_input(
+                    "CSV trace_id field",
+                    default_field_mappings["csv"]["trace_id"],
+                    help="Comma-separated to combine several columns into the trace id.",
+                )
                 csv_position = st.text_input(
                     "CSV position field",
                     default_field_mappings["csv"]["position"],
@@ -128,7 +155,11 @@ def render(base_url: str) -> None:
 
                 st.markdown("**JSON mapping**")
                 json_activity = st.text_input("JSON activity field", default_field_mappings["json"]["activity"])
-                json_trace_id = st.text_input("JSON trace_id field", default_field_mappings["json"]["trace_id"])
+                json_trace_id = st.text_input(
+                    "JSON trace_id field",
+                    default_field_mappings["json"]["trace_id"],
+                    help="Comma-separated to combine several columns into the trace id.",
+                )
                 json_position = st.text_input(
                     "JSON position field",
                     default_field_mappings["json"]["position"],
@@ -157,24 +188,24 @@ def render(base_url: str) -> None:
 
         field_mappings = {
             "xes": {
-                "activity": xes_activity,
-                "trace_id": xes_trace_id,
+                "activity": parse_field_value(xes_activity),
+                "trace_id": parse_field_value(xes_trace_id),
                 "position": xes_position or None,
-                "start_timestamp": xes_start_timestamp,
+                "start_timestamp": parse_field_value(xes_start_timestamp),
                 "attributes": parse_attribute_list(xes_attributes),
             },
             "csv": {
-                "activity": csv_activity,
-                "trace_id": csv_trace_id,
+                "activity": parse_field_value(csv_activity),
+                "trace_id": parse_field_value(csv_trace_id),
                 "position": csv_position or None,
-                "start_timestamp": csv_start_timestamp,
+                "start_timestamp": parse_field_value(csv_start_timestamp),
                 "attributes": parse_attribute_list(csv_attributes),
             },
             "json": {
-                "activity": json_activity,
-                "trace_id": json_trace_id,
+                "activity": parse_field_value(json_activity),
+                "trace_id": parse_field_value(json_trace_id),
                 "position": json_position or None,
-                "start_timestamp": json_start_timestamp,
+                "start_timestamp": parse_field_value(json_start_timestamp),
                 "attributes": parse_attribute_list(json_attributes),
             },
         }
@@ -188,6 +219,7 @@ def render(base_url: str) -> None:
             "field_mappings": field_mappings,
             "trace_level_fields": [item.strip() for item in trace_level_fields.split(",") if item.strip()],
             "timestamp_fields": [item.strip() for item in timestamp_fields.split(",") if item.strip()],
+            "composite_separator": composite_separator or "::",
             "output_path": f"output/{log_name}",
         }
         files = None

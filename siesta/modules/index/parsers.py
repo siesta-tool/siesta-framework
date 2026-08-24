@@ -186,18 +186,56 @@ def parse_xml(storage_path: str, spark: SparkSession, preprocess_config: dict) -
     local_path = _resolve_to_local_path(storage_path, spark)
 
     # --- Build field-to-XES-key lookups from EventConfig ---
-    trace_fields = eventConfig.get_trace_fields()   # e.g. {'trace_id': 'concept:name'}
+    trace_fields = eventConfig.get_trace_fields()   # e.g. {'trace_id': 'concept:name'} or {'trace_id': ['concept:name', 'org:resource']}
     event_fields = eventConfig.get_event_fields()    # e.g. {'activity': 'concept:name', 'start_timestamp': 'time:timestamp', 'position': None}
     timestamp_fields = eventConfig.timestamp_fields  # e.g. {'start_timestamp'}
+    schema_type_map = {f.name: f.dataType for f in Event.get_schema().fields}
 
-    # Invert: XES key -> (field_name, is_trace_level)
-    trace_key_map = {v: k for k, v in trace_fields.items() if v is not None}
-    event_key_map = {v: k for k, v in event_fields.items() if v is not None}
+    def _is_single_valued(field_name: str) -> bool:
+        # A timestamp or non-string target only ever takes its first source component -
+        # concatenating several XES attribute values makes no sense for those types.
+        if eventConfig.is_timestamp_field(field_name):
+            return True
+        return isinstance(schema_type_map.get(field_name), IntegerType)
+
+    # Ordered source keys per field (component index within a composite mapping)
+    trace_components = {f: keys for f, v in trace_fields.items() if (keys := EventConfig.as_source_keys(v))}
+    event_components = {f: keys for f, v in event_fields.items() if (keys := EventConfig.as_source_keys(v))}
+
+    # Invert: XES key -> [(field_name, component_index), ...]
+    trace_key_map: dict[str, list[tuple[str, int]]] = {}
+    for field_name, keys in trace_components.items():
+        for idx, k in enumerate(keys):
+            trace_key_map.setdefault(k, []).append((field_name, idx))
+
+    event_key_map: dict[str, list[tuple[str, int]]] = {}
+    for field_name, keys in event_components.items():
+        for idx, k in enumerate(keys):
+            event_key_map.setdefault(k, []).append((field_name, idx))
+
+    def _join_components(field_name: str, keys: list[str], parts: dict[int, Any]) -> Any:
+        """Resolve the raw component values for one field into its final value.
+
+        Missing components are skipped (not treated as a hard failure); a field with
+        no components present at all yields None, same as an unmapped XES key today.
+        """
+        if not parts:
+            return None
+        if _is_single_valued(field_name):
+            if len(keys) > 1 and len(parts) > 1:
+                logger.warning(
+                    f"Field '{field_name}' only supports a single source column in XES; "
+                    f"using '{keys[0]}', ignoring {keys[1:]}."
+                )
+            v = parts.get(0)
+            if v and field_name in timestamp_fields:
+                v = v[:19]  # trim to seconds ISO
+            return v
+        present_vals = [parts[i] for i in sorted(parts)]
+        return present_vals[0] if len(present_vals) == 1 else eventConfig.composite_separator.join(present_vals)
 
     # Mapped source keys to exclude from attributes
-    mapped_source_keys = frozenset(
-        v for v in eventConfig.field_mappings.values() if v is not None
-    )
+    mapped_source_keys = frozenset(eventConfig.all_source_keys())
     collect_attrs = bool(eventConfig.attributes_mapping)
     attrs_wildcard = collect_attrs and "*" in eventConfig.attributes_mapping
     attrs_keep_keys = (
@@ -241,7 +279,7 @@ def parse_xml(storage_path: str, spark: SparkSession, preprocess_config: dict) -
             continue
 
         if action == 'end' and elem.tag == 'event':
-            evt_vals: dict = {}
+            evt_partial: dict[str, dict[int, Any]] = {}
             attrs: dict = {}
 
             for child in elem:
@@ -250,16 +288,18 @@ def parse_xml(storage_path: str, spark: SparkSession, preprocess_config: dict) -
                     v = child.get('value')
 
                     if k in event_key_map:
-                        field_name = event_key_map[k]
-                        if field_name in timestamp_fields and v:
-                            evt_vals[field_name] = v[:19]  # trim to seconds ISO
-                        else:
-                            evt_vals[field_name] = v
+                        for field_name, idx in event_key_map[k]:
+                            evt_partial.setdefault(field_name, {})[idx] = v
                     elif collect_attrs:
                         if attrs_wildcard and k not in mapped_source_keys:
                             attrs[k] = str(v) if v is not None else None
                         elif k in attrs_keep_keys:
                             attrs[k] = str(v) if v is not None else None
+
+            evt_vals = {
+                field_name: _join_components(field_name, keys, evt_partial.get(field_name, {}))
+                for field_name, keys in event_components.items()
+            }
 
             activities.append(evt_vals.get('activity'))
             trace_ids.append(cur_trace_vals.get('trace_id'))
@@ -272,13 +312,22 @@ def parse_xml(storage_path: str, spark: SparkSession, preprocess_config: dict) -
         elif action == 'end' and elem.tag == 'trace':
             # Extract trace-level fields from trace's direct children
             if not cur_trace_vals:
+                trace_partial: dict[str, dict[int, Any]] = {}
+                found_keys = 0
                 for child in elem:
                     if child.tag in XES_ATTR_TAGS:
                         k = child.get('key')
                         if k in trace_key_map:
-                            cur_trace_vals[trace_key_map[k]] = child.get('value')
-                    if len(cur_trace_vals) == len(trace_key_map):
-                        break  # found all trace fields, stop scanning
+                            found_keys += 1
+                            for field_name, idx in trace_key_map[k]:
+                                trace_partial.setdefault(field_name, {})[idx] = child.get('value')
+                    if found_keys == len(trace_key_map):
+                        break  # found all distinct trace-level source keys, stop scanning
+
+                for field_name, keys in trace_components.items():
+                    value = _join_components(field_name, keys, trace_partial.get(field_name, {}))
+                    if value is not None:
+                        cur_trace_vals[field_name] = value
 
                 # Backfill trace-level values for all events in this trace
                 trace_id = cur_trace_vals.get('trace_id')
@@ -395,34 +444,68 @@ def parse_json(storage_path: str, spark: SparkSession, system_config: dict) -> D
     
     return _parse_rows(config, df)
 
+def _present_source_keys(config: EventConfig, field_name: str, df: DataFrame) -> list[str]:
+    """Source keys of a field that actually exist in the DataFrame, in declared order.
+
+    Missing components of a composite mapping are dropped with a warning rather than
+    failing the whole parse, mirroring how a missing single column is tolerated.
+    """
+    keys = config.get_source_keys(field_name)
+    available = [k for k in keys if k in df.columns]
+    missing = [k for k in keys if k not in df.columns]
+    if missing:
+        logger.warning(
+            f"Field '{field_name}': source column(s) {missing} not found in the log; "
+            f"{'using ' + str(available) if available else 'field will be left unmapped'}."
+        )
+    return available
+
+
+def _composite_column(config: EventConfig, keys: list[str]):
+    """Combine one or more source columns into a single string Column.
+
+    A single key is returned as-is; several keys are joined with the configured
+    composite separator so the resulting value stays one StringType column.
+    """
+    if not keys:
+        return None
+    if len(keys) == 1:
+        return F.col(keys[0])
+    return F.concat_ws(config.composite_separator, *[F.col(k).cast("string") for k in keys])
+
+
 def _parse_rows(config: EventConfig, df: DataFrame) -> DataFrame:
     """Parse raw DataFrame rows into Event schema using pure DataFrame operations.
     Avoids RDD operations entirely for optimal PySpark performance."""
-    fields = dict(config.get_event_fields().items() | config.get_trace_fields().items())
-    source_keys = {v for v in fields.values() if v is not None}
+    # Event/trace fields are disjoint by construction (partitioned by trace_level_fields),
+    # so a plain merge is equivalent to the previous set union but tolerates list values
+    # (composite mappings), which a set of (key, value) tuples cannot hash.
+    fields = {**config.get_event_fields(), **config.get_trace_fields()}
+    source_keys = config.all_source_keys()
 
-    # Get the source column name for trace_id to use in partitioning
-    trace_id_source = config.field_mappings.get('trace_id')
-    position_source = config.field_mappings.get('position')
+    # Resolve the trace_id column (possibly a combination of columns) for partitioning
+    trace_id_keys = _present_source_keys(config, 'trace_id', df)
+    trace_id_col = _composite_column(config, trace_id_keys)
+
+    # Ordering must use a single column - a concatenation orders lexicographically, which
+    # is meaningless for a timestamp or a position, so only the first component is used.
+    position_keys = _present_source_keys(config, 'position', df)
     timestamp_field = next(iter(config.timestamp_fields), None)
-    timestamp_source = config.field_mappings.get(timestamp_field) if timestamp_field else None
-
-    has_position_col = position_source is not None and position_source in df.columns
-    has_timestamp_col = timestamp_source is not None and timestamp_source in df.columns
+    timestamp_keys = _present_source_keys(config, timestamp_field, df) if timestamp_field else []
 
     # Preserve original row order as stable tiebreaker
     df = df.withColumn("_row_idx", monotonically_increasing_id())
 
-    if has_timestamp_col:
-        order_col = F.col(timestamp_source).cast("timestamp")
-    elif has_position_col:
-        order_col = F.col(position_source)
+    if timestamp_keys:
+        order_col = F.col(timestamp_keys[0]).cast("timestamp")
+    elif position_keys:
+        order_col = F.col(position_keys[0])
     else:
         order_col = F.col("_row_idx")
 
-    if trace_id_source and trace_id_source in df.columns:
+    if trace_id_col is not None:
         df = df.withColumn("position", row_number().over(
-            Window.partitionBy(trace_id_source).orderBy(order_col, F.col("_row_idx"))
+            Window.partitionBy(trace_id_col).orderBy(order_col, F.col("_row_idx"))
         ) - 1)
     else:
         df = df.withColumn("position", row_number().over(
@@ -436,19 +519,32 @@ def _parse_rows(config: EventConfig, df: DataFrame) -> DataFrame:
     result_df = df
 
     # Map source columns to Event field names with appropriate type casts
-    for field_name, source_key in fields.items():
-        if source_key and source_key in df.columns:
+    for field_name in fields:
+        keys = _present_source_keys(config, field_name, df)
+        if keys:
             target_type = schema_type_map.get(field_name)
             if config.is_timestamp_field(field_name):
                 # Parse timestamp string to Unix seconds (integer)
+                if len(keys) > 1:
+                    logger.warning(
+                        f"Field '{field_name}' is a timestamp; only its first source column "
+                        f"'{keys[0]}' is used (columns {keys[1:]} ignored)."
+                    )
                 result_df = result_df.withColumn(
                     field_name,
-                    F.unix_timestamp(F.col(source_key).cast("timestamp")).cast("int")
+                    F.unix_timestamp(F.col(keys[0]).cast("timestamp")).cast("int")
                 )
             elif target_type and isinstance(target_type, IntegerType):
-                result_df = result_df.withColumn(field_name, F.col(source_key).cast("int"))
+                if len(keys) > 1:
+                    logger.warning(
+                        f"Field '{field_name}' is numeric; only its first source column "
+                        f"'{keys[0]}' is used (columns {keys[1:]} ignored)."
+                    )
+                result_df = result_df.withColumn(field_name, F.col(keys[0]).cast("int"))
             else:
-                result_df = result_df.withColumn(field_name, F.col(source_key).cast("string"))
+                result_df = result_df.withColumn(
+                    field_name, _composite_column(config, keys).cast("string")
+                )
         elif config.is_computed_field(field_name):
             if field_name != 'position':  # position already assigned above
                 result_df = result_df.withColumn(field_name, F.lit(None))

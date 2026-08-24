@@ -29,5 +29,6 @@
     }
   },
   "trace_level_fields": ["trace_id"],
-  "timestamp_fields": ["start_timestamp"]
+  "timestamp_fields": ["start_timestamp"],
+  "composite_separator": "::"
 }
