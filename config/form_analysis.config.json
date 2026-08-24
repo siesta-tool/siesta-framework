@@ -1,0 +1,16 @@
+{
+  "method": "form_analysis",
+  "log_name": "form_log",
+  "input_path": "original.xlsx",
+  "header_row": 1,
+  "sheet_name": 0,
+  "date_grouping": "dow",
+  "numeric_bins": 5,
+  "retain_threshold": 0.05,
+  "drop_constant": true,
+  "drop_unique": true,
+  "return_csv": true,
+  "output_path": "output/form_log",
+  "mine": false,
+  "clear_existing": false
+}

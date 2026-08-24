@@ -21,6 +21,8 @@ from siesta.modules.analyse.attribute_deviations import (
 )
 from siesta.modules.analyse.form_analysis import DATE_GROUPINGS, run_form_analysis
 from siesta.modules.mine.ordered import discover_ordered
+from siesta.modules.index.main import Indexing
+from siesta.modules.mine.main import Mining
 
 
 class DirectlyFollowsConfig(BaseModel):
@@ -131,6 +133,8 @@ class FormAnalysisConfig(BaseModel):
     drop_unique: bool = Field(True, description="Drop string columns where every row holds a different value")
     return_csv: bool = Field(True, description="Return the CSV file; when false, return the preprocessing report and a preview")
     output_path: str = Field("output/form_log", description="Local path prefix for the output file")
+    mine: bool = Field(False, description="After preprocessing, index the resulting log and mine unordered relations from it")
+    clear_existing: bool = Field(False, description="mine=true only: drop and rebuild any existing indexed data for log_name before indexing")
 
 
 import logging
@@ -442,6 +446,12 @@ class Analysing(SiestaModule):
         - `drop_constant` *(bool, default: `true`)* - drop columns holding a single distinct value.
         - `drop_unique` *(bool, default: `true`)* - drop string columns where every row differs.
         - `return_csv` *(bool, default: `true`)* - when `false`, return the per-column report plus a 20-row preview.
+            Ignored when `mine` is `true` (the response is always JSON so the mined constraints can be included).
+        - `mine` *(bool, default: `false`)* - after preprocessing, index the resulting log under `log_name` and
+            mine unordered relations from it. The response then includes a `mined` list of the discovered
+            constraints alongside the usual form-analysis summary.
+        - `clear_existing` *(bool, default: `false`)* - `mine=true` only: drop and rebuild any existing indexed
+            data for `log_name` before indexing the freshly produced log.
         """
         logger.info(f"{self.name} running form_analysis via API.")
 
@@ -878,8 +888,12 @@ class Analysing(SiestaModule):
             f"written to {output_path}."
         )
 
+        mined = None
+        if self.analyser_config.get("mine", False):
+            mined = self._index_and_mine_form_log(output_path, caller=caller)
+
         if caller == "api":
-            if self.analyser_config.get("return_csv", True):
+            if self.analyser_config.get("return_csv", True) and mined is None:
                 return FileResponse(
                     output_path,
                     media_type="text/csv",
@@ -887,6 +901,43 @@ class Analysing(SiestaModule):
                 )
             with open(output_path, "r", newline="") as f:
                 preview = [row for _, row in zip(range(20), csv.DictReader(f))]
-            return {"code": 200, "log_name": self.analyser_config.get("log_name"), **summary, "preview": preview}
+            response = {"code": 200, "log_name": self.analyser_config.get("log_name"), **summary, "preview": preview}
+            if mined is not None:
+                response["mined"] = mined
+            return response
 
-        return output_path
+        return {"output_path": output_path, "mined": mined} if mined is not None else output_path
+
+    def _index_and_mine_form_log(self, trace_log_path: str, caller: str) -> list:
+        """Index the trace log produced by form_analysis, then mine unordered relations from it."""
+        log_name = self.analyser_config.get("log_name", "form_log")
+        storage_namespace = self.analyser_config.get(
+            "storage_namespace", get_config_value("storage_namespace_default", "siesta")
+        )
+
+        logger.info(f"form_analysis: mine=true, indexing '{log_name}' before mining.")
+        indexer = Indexing()
+        indexer.siesta_config = get_system_config()
+        indexer.storage = get_storage_manager()
+        indexer._load_index_config({
+            "log_name": log_name,
+            "log_path": trace_log_path,
+            "storage_namespace": storage_namespace,
+            "clear_existing": self.analyser_config.get("clear_existing", False),
+        })
+        indexer.storage.initialize_db(indexer.index_config)
+        indexer.begin_builders(caller=caller)
+
+        logger.info(f"form_analysis: indexing complete, mining unordered relations for '{log_name}'.")
+        miner = Mining()
+        miner.siesta_config = indexer.siesta_config
+        miner.storage = indexer.storage
+        miner._load_mining_config({
+            "log_name": log_name,
+            "storage_namespace": storage_namespace,
+            "categories": ["unordered"],
+        })
+        miner.mine(caller=caller)
+
+        with open(miner.mining_config["output_path"], "r", newline="") as f:
+            return list(csv.DictReader(f))
