@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Annotated, Any, Dict
 from fastapi import Body, Form, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, ConfigDict, Field
 from pyspark.sql import SparkSession, functions as F
 
@@ -20,6 +20,7 @@ from siesta.modules.analyse.attribute_deviations import (
     compute_attribute_deviations, render_html, ALL_STEPS,
 )
 from siesta.modules.analyse.form_analysis import DATE_GROUPINGS, run_form_analysis
+from siesta.modules.analyse.postprocess_csv import build_rules_html
 from siesta.modules.mine.ordered import discover_ordered
 from siesta.modules.index.main import Indexing
 from siesta.modules.mine.main import Mining
@@ -135,6 +136,8 @@ class FormAnalysisConfig(BaseModel):
     output_path: str = Field("output/form_log", description="Local path prefix for the output file")
     mine: bool = Field(False, description="After preprocessing, index the resulting log and mine unordered relations from it")
     clear_existing: bool = Field(False, description="mine=true only: drop and rebuild any existing indexed data for log_name before indexing")
+    mined_format: str = Field("json", description="mine=true only: format of the mined constraints - 'json', 'csv' (the rules file as-is), or 'html' (interactive report)")
+    include_trace_lists: bool = Field(True, description="mine=true only: include the supporting trace_ids alongside each mined constraint")
 
 
 import logging
@@ -413,10 +416,10 @@ class Analysing(SiestaModule):
                 },
             },
         )],
-        form_file: UploadFile,
+        form_file: UploadFile | None = None,
     ) -> Any:
         """ Extracting pairwise rules from form data inputs.
-        
+
         Columns are reduced first: constant and all-distinct columns are dropped,
         date columns are bucketed according to `date_grouping`, numeric columns are
         cut into `numeric_bins` equal-width buckets, and columns with more than
@@ -428,10 +431,15 @@ class Analysing(SiestaModule):
 
         Returns the resulting CSV (`trace_id,position,activity,timestamp`) as a download, or
         the per-column report when `return_csv` is `false`.
-        
+
+        When `form_file` is omitted, no preprocessing happens - instead `log_name` must
+        already be indexed (e.g. from a prior call to this endpoint with a file). The
+        existing log is mined directly and the mined constraints are returned per
+        `mined_format`, exactly as if `mine=true` had produced them.
 
         **Form fields:**
-        - `form_file` *(file)* - the `.xlsx` file to preprocess. **Required.**
+        - `form_file` *(file, optional)* - the `.xlsx` file to preprocess. When omitted,
+            `log_name` must refer to an already-indexed log; mining runs against it directly.
         - `analyser_config` *(JSON string)* - configuration; fields below.
 
         **Config fields (`analyser_config`):**
@@ -447,11 +455,19 @@ class Analysing(SiestaModule):
         - `drop_unique` *(bool, default: `true`)* - drop string columns where every row differs.
         - `return_csv` *(bool, default: `true`)* - when `false`, return the per-column report plus a 20-row preview.
             Ignored when `mine` is `true` (the response is always JSON so the mined constraints can be included).
-        - `mine` *(bool, default: `false`)* - after preprocessing, index the resulting log under `log_name` and
-            mine unordered relations from it. The response then includes a `mined` list of the discovered
-            constraints alongside the usual form-analysis summary.
+        - `mine` *(bool, default: `false`)* - `form_file` given only: after preprocessing, index the
+            resulting log under `log_name` and mine unordered relations from it. The mined constraints
+            are then returned per `mined_format`, instead of the usual form-analysis CSV/report. Ignored
+            (mining always runs) when `form_file` is omitted.
         - `clear_existing` *(bool, default: `false`)* - `mine=true` only: drop and rebuild any existing indexed
             data for `log_name` before indexing the freshly produced log.
+        - `mined_format` *(str, default: `"json"`)* - `mine=true`, or no `form_file`, only: `"json"` returns
+            the form-analysis summary with a `mined` list of the discovered constraints (just the `mined`
+            list when no `form_file` was given); `"csv"` returns the rules CSV file as-is; `"html"` returns
+            a self-contained interactive rules viewer built from those same rows.
+        - `include_trace_lists` *(bool, default: `true`)* - `mine=true`, or no `form_file`, only: include the
+            supporting `trace_ids` for each mined constraint. In `"html"`, trace ids are hidden behind a
+            per-row expander rather than shown inline, since a constraint can be backed by many traces.
         """
         logger.info(f"{self.name} running form_analysis via API.")
 
@@ -461,12 +477,12 @@ class Analysing(SiestaModule):
             logger.exception(f"Error loading analyser config: {e}")
             return {"code": 400, "message": f"Invalid config: {e}"}
 
-        if not form_file.filename:
-            logger.error("Form analysis: uploaded file has no filename. Aborting.")
-            return {"code": 400, "message": "Uploaded file has no filename. Aborting."}
+        has_file = form_file is not None and bool(form_file.filename)
 
         try:
-            return self._run_form_analysis(caller="api", source=form_file.file)
+            if has_file:
+                return self._run_form_analysis(caller="api", source=form_file.file)
+            return self._run_form_analysis_existing(caller="api")
         except Exception as e:
             logger.exception(f"Error running form_analysis: {e}")
             return {"code": 400, "message": f"Form analysis failed: {e}"}
@@ -888,12 +904,17 @@ class Analysing(SiestaModule):
             f"written to {output_path}."
         )
 
-        mined = None
+        mined_path, mined_header, mined_rows = None, None, None
         if self.analyser_config.get("mine", False):
-            mined = self._index_and_mine_form_log(output_path, caller=caller)
+            mined_path, mined_header, mined_rows = self._index_and_mine_form_log(output_path, caller=caller)
+
+        if mined_path is not None:
+            rendered = self._render_mined(mined_path, mined_header, mined_rows, caller=caller)
+            if rendered is not None:
+                return rendered
 
         if caller == "api":
-            if self.analyser_config.get("return_csv", True) and mined is None:
+            if self.analyser_config.get("return_csv", True) and mined_path is None:
                 return FileResponse(
                     output_path,
                     media_type="text/csv",
@@ -902,42 +923,124 @@ class Analysing(SiestaModule):
             with open(output_path, "r", newline="") as f:
                 preview = [row for _, row in zip(range(20), csv.DictReader(f))]
             response = {"code": 200, "log_name": self.analyser_config.get("log_name"), **summary, "preview": preview}
-            if mined is not None:
-                response["mined"] = mined
+            if mined_path is not None:
+                response["mined"] = [dict(zip(mined_header, row)) for row in mined_rows]
             return response
 
-        return {"output_path": output_path, "mined": mined} if mined is not None else output_path
+        if mined_path is not None:
+            return {"output_path": output_path, "mined": [dict(zip(mined_header, row)) for row in mined_rows]}
+        return output_path
 
-    def _index_and_mine_form_log(self, trace_log_path: str, caller: str) -> list:
-        """Index the trace log produced by form_analysis, then mine unordered relations from it."""
+    def _run_form_analysis_existing(self, caller: str) -> Any:
+        """Mine an already-indexed log directly, skipping preprocessing.
+
+        Used when the API is called without `form_file`: rather than erroring, we check
+        the log is indexed (raising if it isn't - there's nothing to mine yet), mine it,
+        and hand the rules straight to postprocess_csv for the html/csv report, exactly
+        like the `mine=true` path does after preprocessing a freshly uploaded file.
+        """
+        logger.info(f"Running form_analysis initiated by {caller} without a file; mining the existing indexed log.")
+
+        mined_path, mined_header, mined_rows = self._index_and_mine_form_log(None, caller=caller)
+
+        rendered = self._render_mined(mined_path, mined_header, mined_rows, caller=caller)
+        if rendered is not None:
+            return rendered
+
+        if caller == "api":
+            return {
+                "code": 200,
+                "log_name": self.analyser_config.get("log_name"),
+                "mined": [dict(zip(mined_header, row)) for row in mined_rows],
+            }
+
+        return {"mined": [dict(zip(mined_header, row)) for row in mined_rows]}
+
+    def _render_mined(
+        self, mined_path: str, mined_header: list[str], mined_rows: list[list[str]], caller: str
+    ) -> Any:
+        """Render mined rules per `mined_format`, honoring `caller` for how the result is delivered.
+
+        Returns None for `mined_format == "json"` so the caller falls through to its own
+        JSON response; for "csv"/"html" the API gets a FileResponse/HTMLResponse while the
+        CLI gets the path of the file already written to disk (mirroring the CSV, which
+        is already on disk at `mined_path`; the HTML is written here since mining doesn't
+        produce it).
+        """
+        mined_format = self.analyser_config.get("mined_format", "json")
+
+        if mined_format == "csv":
+            if caller == "api":
+                return FileResponse(mined_path, media_type="text/csv", filename=Path(mined_path).name)
+            return mined_path
+
+        if mined_format == "html":
+            html, _stats = build_rules_html(mined_header, mined_rows, src_name=Path(mined_path).name)
+            if caller == "api":
+                return HTMLResponse(html)
+            html_path = str(Path(mined_path).with_suffix(".html"))
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write(html)
+            logger.info(f"form_analysis: mined rules HTML written to {html_path}.")
+            return html_path
+
+        return None
+
+    def _index_and_mine_form_log(
+        self, trace_log_path: str | None, caller: str
+    ) -> tuple[str, list[str], list[list[str]]]:
+        """Index the trace log produced by form_analysis, then mine unordered relations from it.
+
+        When `trace_log_path` is None, indexing is skipped and mining runs directly against
+        whatever is already indexed under `log_name` (raising if nothing is indexed yet) -
+        this is the no-file API path where the caller wants mining output for a log that was
+        already turned into traces by an earlier form_analysis call.
+
+        Returns (rules_csv_path, header, rows) with rows as raw csv.reader rows, read once,
+        so the caller can serve the CSV as-is, build an HTML report from those same in-memory
+        rows, or convert them to JSON, without re-reading the file more than once.
+        """
         log_name = self.analyser_config.get("log_name", "form_log")
         storage_namespace = self.analyser_config.get(
             "storage_namespace", get_config_value("storage_namespace_default", "siesta")
         )
 
-        logger.info(f"form_analysis: mine=true, indexing '{log_name}' before mining.")
-        indexer = Indexing()
-        indexer.siesta_config = get_system_config()
-        indexer.storage = get_storage_manager()
-        indexer._load_index_config({
-            "log_name": log_name,
-            "log_path": trace_log_path,
-            "storage_namespace": storage_namespace,
-            "clear_existing": self.analyser_config.get("clear_existing", False),
-        })
-        indexer.storage.initialize_db(indexer.index_config)
-        indexer.begin_builders(caller=caller)
+        storage = get_storage_manager()
 
-        logger.info(f"form_analysis: indexing complete, mining unordered relations for '{log_name}'.")
+        if trace_log_path is not None:
+            logger.info(f"form_analysis: mine=true, indexing '{log_name}' before mining.")
+            indexer = Indexing()
+            indexer.siesta_config = get_system_config()
+            indexer.storage = storage
+            indexer._load_index_config({
+                "log_name": log_name,
+                "log_path": trace_log_path,
+                "storage_namespace": storage_namespace,
+                "clear_existing": self.analyser_config.get("clear_existing", False),
+            })
+            indexer.storage.initialize_db(indexer.index_config)
+            indexer.begin_builders(caller=caller)
+        elif not storage.log_exists({"log_name": log_name, "storage_namespace": storage_namespace}):
+            raise ValueError(
+                f"No file provided and log '{log_name}' was not found in storage namespace "
+                f"'{storage_namespace}'. Upload a file, or point log_name at an already-indexed log."
+            )
+
+        logger.info(f"form_analysis: mining unordered relations for '{log_name}'.")
         miner = Mining()
-        miner.siesta_config = indexer.siesta_config
-        miner.storage = indexer.storage
+        miner.siesta_config = get_system_config()
+        miner.storage = storage
         miner._load_mining_config({
             "log_name": log_name,
             "storage_namespace": storage_namespace,
             "categories": ["unordered"],
+            "include_trace_lists": self.analyser_config.get("include_trace_lists", True),
         })
         miner.mine(caller=caller)
 
-        with open(miner.mining_config["output_path"], "r", newline="") as f:
-            return list(csv.DictReader(f))
+        rules_csv_path = miner.mining_config["output_path"]
+        with open(rules_csv_path, "r", newline="") as f:
+            reader = csv.reader(f)
+            header = next(reader)
+            rows = list(reader)
+        return rules_csv_path, header, rows

@@ -8,7 +8,7 @@ Usage:
 Arguments:
     csv_file     Path to the rules CSV. Expected columns (by header name):
                  template, source, target, support  (required)
-                 trace_ids                           (optional -> adds "# Traces" column)
+                 trace_ids                           (optional -> adds a "Traces" column)
     template...  Optional list of templates to INCLUDE (e.g. choice coexistence).
                  If omitted, all templates found in the file are included.
 
@@ -35,10 +35,15 @@ The generated HTML embeds all data (labels dictionary-encoded for size) and offe
   - Support lower/upper bound
   - Free-text search over source/target
   - Click-to-sort on every column, pagination, reset.
-Trace-ID lists are summarised as a count (embedding the raw lists would make the
-file as large as the source CSV and unopenable in a browser).
+Trace-ID lists are NOT embedded - on a real export they are most of the CSV. The
+report instead records, per row, the byte span its ids occupy in the CSV, and
+each row shows only a trace count. Expanding a row reads just that row's few
+hundred bytes out of the CSV, which the viewer asks for once per session (a
+browser cannot open a path on its own, so the file is picked, not configured);
+the file's size is checked against the report so stale offsets cannot be read.
 """
 import csv
+import io
 import json
 import os
 import re
@@ -56,12 +61,14 @@ def die(msg):
 
 def load_countries(path):
     if not os.path.isfile(path):
-        die("country list not found: %s\n"
-            "       pass --countries PATH, or --no-country-filter to skip filtering" % path)
+        raise ValueError(
+            "country list not found: %s "
+            "(pass --countries PATH, or --no-country-filter to skip filtering)" % path
+        )
     with open(path, encoding="utf-8") as f:
         names = set(line.strip() for line in f if line.strip())
     if not names:
-        die("country list is empty: " + path)
+        raise ValueError("country list is empty: " + path)
     return names
 
 
@@ -126,36 +133,45 @@ def parse_args(args):
     return countries_path, country_filter, negation_filter, positional
 
 
-def main(argv):
-    args = argv[1:]
-    if not args or args[0] in ("-h", "--help"):
-        sys.stderr.write(__doc__)
-        sys.exit(0 if args else 1)
+def build_rules_html(header, rows, *, src_name="rules.csv", wanted=None,
+                      country_filter=True, countries_path=DEFAULT_COUNTRIES,
+                      traces=None):
+    """Build the self-contained rules HTML viewer from an already-parsed rules table.
 
-    countries_path, country_filter, negation_filter, positional = parse_args(args)
-    if not positional:
-        die("no csv file given")
+    header/rows mirror csv.reader() output (rows are lists of raw field strings),
+    so a caller that already holds the rules table in memory (e.g. an API handler
+    piping mining output straight through) can build the report without writing
+    it to a file and reading it back.
 
-    src = positional[0]
-    wanted = [t.strip() for t in positional[1:] if t.strip()]
+    traces, when given, turns on the on-demand Traces column: {"file": csv
+    basename, "size": its size in bytes, "spans": the flat offset/length/count
+    triples read_rules_csv returns}. The ids themselves stay in the CSV - the
+    viewer asks for the file and reads the few hundred bytes each row needs. rows
+    must then be a sized sequence, since the spans are matched to it positionally.
+
+    Returns (html, stats) where stats reports what was kept/dropped.
+    Raises ValueError on bad input (missing columns, no matching rows, ...).
+    """
+    wanted = [t.strip() for t in wanted if t.strip()] if wanted else []
     wanted_set = set(wanted) if wanted else None
-
-    if not os.path.isfile(src):
-        die("file not found: " + src)
 
     countries = load_countries(countries_path) if country_filter else None
     country_rx = country_matcher(countries) if countries else None
 
     # --- locate columns by header name ---
-    with open(src, newline="") as f:
-        header = next(csv.reader(f))
     col = {name: i for i, name in enumerate(header)}
     for required in ("template", "source", "target", "support"):
         if required not in col:
-            die("missing required column '%s' (have: %s)" % (required, ", ".join(header)))
+            raise ValueError("missing required column '%s' (have: %s)" % (required, ", ".join(header)))
     ti, si, gi, pi = col["template"], col["source"], col["target"], col["support"]
-    has_traces = "trace_ids" in col
-    ri = col.get("trace_ids")
+    # trace ids are never embedded - on a real export they dwarf everything else
+    # in the payload. When the caller hands over byte spans (read_rules_csv builds
+    # them), the viewer reads each row's ids straight out of the CSV on demand.
+    span_arr = traces["spans"] if traces else None
+    has_traces = span_arr is not None
+    if has_traces and len(span_arr) != 3 * len(rows):
+        raise ValueError("trace spans (%d) do not match the row count (%d)"
+                         % (len(span_arr) // 3, len(rows)))
     has_conf = "confidence" in col
     ci = col.get("confidence", -1)
     has_int = "interest" in col
@@ -184,76 +200,198 @@ def main(argv):
             tmpl_names.append(name)
         return i
 
-    rows = []
+    out_rows = []
+    tr_off, tr_len, tr_n = [], [], []   # kept rows' trace spans, parallel to out_rows
     seen_templates = set()
     cross_country = 0
     same_rule = 0
-    with open(src, newline="") as f:
-        r = csv.reader(f)
-        next(r)
-        for row in r:
-            tmpl = row[ti].strip()
-            seen_templates.add(tmpl)
-            if wanted_set is not None and tmpl not in wanted_set:
+    for ri, row in enumerate(rows):
+        tmpl = row[ti].strip()
+        seen_templates.add(tmpl)
+        if wanted_set is not None and tmpl not in wanted_set:
+            continue
+        source, target = row[si].strip(), row[gi].strip()
+        if rule_of(source) == rule_of(target):
+            same_rule += 1
+            continue
+        if country_rx is not None:
+            cs, ct = country_of(source, country_rx), country_of(target, country_rx)
+            if cs is not None and ct is not None and cs != ct:
+                cross_country += 1
                 continue
-            source, target = row[si].strip(), row[gi].strip()
-            if rule_of(source) == rule_of(target):
-                same_rule += 1
-                continue
-            if country_rx is not None:
-                cs, ct = country_of(source, country_rx), country_of(target, country_rx)
-                if cs is not None and ct is not None and cs != ct:
-                    cross_country += 1
-                    continue
-            ntr = 0
-            if has_traces:
-                tv = row[ri]
-                ntr = 0 if tv == "" else tv.count("|") + 1
-            conf = float(row[ci]) if has_conf and row[ci] != "" else 0.0
-            interest = float(row[ii]) if has_int and row[ii] != "" else 0.0
-            # labels keep the raw "rule§value" form; the viewer splits on '§'
-            # for the rule/value filters and displays the marker as " = "
-            rows.append([T(tmpl), L(source), L(target), float(row[pi]), conf, interest, ntr])
+        conf = float(row[ci]) if has_conf and row[ci] != "" else 0.0
+        interest = float(row[ii]) if has_int and row[ii] != "" else 0.0
+        if has_traces:
+            b = 3 * ri
+            tr_off.append(span_arr[b]); tr_len.append(span_arr[b + 1]); tr_n.append(span_arr[b + 2])
+        # labels keep the raw "rule§value" form; the viewer splits on '§'
+        # for the rule/value filters and displays the marker as " = "
+        out_rows.append([T(tmpl), L(source), L(target), float(row[pi]), conf, interest])
 
-    if not rows:
+    if not out_rows:
         if cross_country:
-            die("every matching row related two different countries (%d dropped). "
-                "Re-run with --no-country-filter to keep them." % cross_country)
+            raise ValueError(
+                "every matching row related two different countries (%d dropped). "
+                "Re-run with country_filter disabled to keep them." % cross_country
+            )
         if wanted_set is not None:
-            die("no rows matched template filter %s. Templates present: %s"
-                % (sorted(wanted_set), sorted(seen_templates)))
-        die("no data rows found in " + src)
+            raise ValueError(
+                "no rows matched template filter %s. Templates present: %s"
+                % (sorted(wanted_set), sorted(seen_templates))
+            )
+        raise ValueError("no data rows found in " + src_name)
 
-    if wanted_set is not None:
-        unknown = wanted_set - seen_templates
-        if unknown:
-            sys.stderr.write("warning: requested template(s) not found in file: %s\n"
-                             % sorted(unknown))
+    unknown_templates = sorted(wanted_set - seen_templates) if wanted_set is not None else []
 
-    data_json = json.dumps({"labels": labels, "rows": rows, "tmpl": tmpl_names},
-                           separators=(",", ":"))
+    payload = {"labels": labels, "rows": out_rows, "tmpl": tmpl_names}
+    if has_traces:
+        # offsets are delta-encoded (kept rows stay in file order, so the gaps are
+        # small numbers); the viewer prefix-sums them once on load. Rows and these
+        # arrays are built together, so position i in one is position i in the other.
+        prev = 0
+        for k in range(len(tr_off)):
+            tr_off[k], prev = tr_off[k] - prev, tr_off[k]
+        payload["traces"] = {"file": traces.get("file", ""), "size": traces.get("size", 0),
+                             "off": tr_off, "len": tr_len, "n": tr_n}
+    data_json = json.dumps(payload, separators=(",", ":"))
+
+    html = (HTML_TEMPLATE
+            .replace("__SRC__", src_name)
+            .replace("__HASTR__", "true" if has_traces else "false")
+            .replace("__HASCONF__", "true" if has_conf else "false")
+            .replace("__HASINT__", "true" if has_int else "false")
+            .replace("__DATA__", data_json))
+
+    stats = {
+        "rows": len(out_rows),
+        "templates": tmpl_names,
+        "labels": len(labels),
+        "dropped_same_rule": same_rule,
+        "dropped_cross_country": cross_country if country_rx is not None else None,
+        "unknown_templates": unknown_templates,
+    }
+    return html, stats
+
+
+def _cut_traces(f, off, spans):
+    """Yield each line with its trace field removed, recording where that field sat.
+
+    Feeds csv.reader line by line so the trace ids are never parsed, appending
+    (byte offset, byte length, id count) to `spans` for each line as it goes.
+    """
+    for raw in f:
+        head, sep, tail = raw.rpartition(b",")
+        beg = off
+        off += len(raw)
+        if not sep:            # blank line: nothing to cut, nothing to index
+            continue
+        tail = tail.rstrip(b"\r\n")
+        # point the span at the ids themselves, not at a writer's quotes around
+        # them (a quoted field holding a comma trips the width check instead)
+        lead = 1 if len(tail) > 1 and tail[:1] == b'"' == tail[-1:] else 0
+        if lead:
+            tail = tail[1:-1]
+        spans.append(beg + len(head) + 1 + lead)
+        spans.append(len(tail))
+        spans.append(tail.count(b"|") + 1 if tail else 0)
+        yield head.decode("utf-8")
+
+
+def read_rules_csv(f):
+    """Parse a rules CSV opened in binary into (header, rows, spans).
+
+    Trace-id lists are most of the bytes in a mining export and are never
+    embedded in the report, so when that column sits last the field is cut off
+    each raw line and the csv parser never builds the string. On a 196 MB export
+    this reads in 1.1s / 102 MB peak, against 4.7s / 298 MB parsing the column and
+    5.2s / 112 MB deleting it from each row afterwards.
+
+    spans is a flat list of (offset, length, id count) per row - where that row's
+    ids live in this exact file - for build_rules_html to hand to the viewer, or
+    None when there is no trace column (or the cut had to be abandoned).
+
+    The cut assumes the trace field holds no comma of its own. Rather than trust
+    that, the result is checked for rows that came out the wrong width, and a
+    file that fails the check is re-read with a plain parse.
+    """
+    header_line = f.readline()
+    header = next(csv.reader([header_line.decode("utf-8")]))
+
+    def plain():
+        # a full csv parse, which unlike the cut copes with quoted commas and
+        # newlines anywhere in the row
+        f.seek(0)
+        text = io.TextIOWrapper(f, encoding="utf-8", newline="")
+        r = csv.reader(text)
+        next(r)
+        return header, list(r), None
+
+    if not header or header[-1] != "trace_ids" or not f.seekable():
+        return plain()
+
+    stripped = header[:-1]
+    width = len(stripped)
+    spans = []
+    rows = list(csv.reader(_cut_traces(f, len(header_line), spans)))
+    if len(spans) == 3 * len(rows) and all(len(row) == width for row in rows):
+        return stripped, rows, spans
+    return plain()
+
+
+def main(argv):
+    args = argv[1:]
+    if not args or args[0] in ("-h", "--help"):
+        sys.stderr.write(__doc__)
+        sys.exit(0 if args else 1)
+
+    countries_path, country_filter, negation_filter, positional = parse_args(args)
+    if not positional:
+        die("no csv file given")
+
+    src = positional[0]
+    wanted = [t.strip() for t in positional[1:] if t.strip()]
+
+    if not os.path.isfile(src):
+        die("file not found: " + src)
+
+    with open(src, "rb") as f:
+        header, rows, spans = read_rules_csv(f)
+
+    # the ids stay where they are; the viewer is told which file to ask for and
+    # how big it should be, so a regenerated CSV can't be read with stale offsets
+    traces = None
+    if spans is not None:
+        traces = {"file": os.path.basename(src), "size": os.path.getsize(src), "spans": spans}
+
+    try:
+        html, stats = build_rules_html(
+            header, rows,
+            src_name=os.path.basename(src),
+            wanted=wanted,
+            traces=traces,
+            country_filter=country_filter,
+            countries_path=countries_path,
+        )
+    except ValueError as e:
+        die(str(e))
 
     # --- output filename ---
     stem = os.path.splitext(os.path.basename(src))[0]
     suffix = ("_" + "_".join(wanted)) if wanted else ""
     out = os.path.join(os.path.dirname(os.path.abspath(src)), stem + "_rules" + suffix + ".html")
-
-    html = (HTML_TEMPLATE
-            .replace("__SRC__", os.path.basename(src))
-            .replace("__HASTR__", "true" if has_traces else "false")
-            .replace("__HASCONF__", "true" if has_conf else "false")
-            .replace("__HASINT__", "true" if has_int else "false")
-            .replace("__DATA__", data_json))
     with open(out, "w") as f:
         f.write(html)
 
-    print("rows: %d  templates: %s  labels: %d" % (len(rows), tmpl_names, len(labels)))
-    if same_rule:
-        print("dropped %d same-rule rows (source/target share the rule before '§')" % same_rule)
-    if country_rx is not None:
+    print("rows: %d  templates: %s  labels: %d" % (stats["rows"], stats["templates"], stats["labels"]))
+    if stats["dropped_same_rule"]:
+        print("dropped %d same-rule rows (source/target share the rule before '§')" % stats["dropped_same_rule"])
+    if stats["dropped_cross_country"]:
+        cc = stats["dropped_cross_country"]
         print("dropped %d cross-country rows (%.1f%% of %d matching)"
-              % (cross_country, 100.0 * cross_country / (len(rows) + cross_country),
-                 len(rows) + cross_country))
+              % (cc, 100.0 * cc / (stats["rows"] + cc), stats["rows"] + cc))
+    if stats["unknown_templates"]:
+        sys.stderr.write("warning: requested template(s) not found in file: %s\n"
+                         % stats["unknown_templates"])
     print("wrote %s (%d bytes)" % (out, os.path.getsize(out)))
 
 
@@ -311,6 +449,13 @@ button:hover{opacity:.9}
 button.sec{background:var(--surface);border:1px solid var(--bd-em);color:var(--text-sub);transition:border-color .15s,color .15s}
 button.sec:hover{border-color:var(--accent);color:var(--accent);opacity:1}
 
+input[type=file]{padding:5px 8px;font-size:12px;max-width:260px;cursor:pointer}
+input[type=file]::file-selector-button{background:var(--surface2);color:var(--text-sub);border:1px solid var(--bd-em);border-radius:6px;padding:3px 9px;margin-right:8px;font-family:var(--font);font-size:12px;cursor:pointer}
+input[type=file]::file-selector-button:hover{border-color:var(--accent);color:var(--accent)}
+.hint{font-size:11px;color:var(--text-muted);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hint.bad{color:#c0392b}
+.hint.ok{color:var(--accent)}
+
 .count{padding:12px 24px;color:var(--text-muted);font-size:13px}
 
 /* ── table ──────────────────────────────────────────────────────── */
@@ -333,6 +478,18 @@ td.sup,td.num{font-family:var(--mono);font-variant-numeric:tabular-nums;white-sp
 .tg5{background:rgba(41,128,185,.16);color:#2980b9}
 .tg6{background:rgba(211,84,0,.15);color:#d35400}
 .tg7{background:rgba(22,160,133,.15);color:#16a085}
+
+/* ── trace expander ─────────────────────────────────────────────── */
+.trace-toggle{background:var(--surface2);border:1px solid var(--bd-em);border-radius:20px;padding:2px 10px;font-family:var(--mono);font-size:12px;color:var(--text-sub);cursor:pointer;transition:border-color .15s,color .15s}
+.trace-toggle:hover{border-color:var(--accent);color:var(--accent)}
+.trace-toggle .chev{display:inline-block;font-size:9px;transition:transform .15s}
+.trace-toggle.open .chev{transform:rotate(90deg)}
+tr.trace-detail td{background:var(--surface2);padding:10px 14px 14px}
+.tracebox-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+.tracebox-head span{font-size:11px;font-weight:500;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em}
+.copybtn{background:var(--surface);border:1px solid var(--bd-em);border-radius:6px;padding:3px 10px;font-size:12px;font-family:var(--font);color:var(--text-sub);cursor:pointer;transition:border-color .15s,color .15s}
+.copybtn:hover{border-color:var(--accent);color:var(--accent)}
+.tracelist{max-height:160px;overflow-y:auto;font-family:var(--mono);font-size:12px;line-height:1.6;color:var(--text-sub);white-space:pre-wrap;word-break:break-all;background:var(--surface);border:1px solid var(--bd);border-radius:6px;padding:8px 10px}
 
 /* ── pager ──────────────────────────────────────────────────────── */
 .pager{display:flex;gap:10px;align-items:center;padding:12px 24px;flex-wrap:wrap}
@@ -405,6 +562,11 @@ td.sup,td.num{font-family:var(--mono);font-variant-numeric:tabular-nums;white-sp
     <label>Rows per page</label>
     <select id="pp"><option>100</option><option>250</option><option>500</option><option>1000</option></select>
   </div>
+  <div class="ctrl trctrl">
+    <label>Trace ids</label>
+    <input type="file" id="csvfile" accept=".csv,text/csv">
+    <span class="hint" id="csvstat"></span>
+  </div>
   <div class="ctrl">
     <label>&nbsp;</label>
     <button class="sec" id="reset">Reset</button>
@@ -431,6 +593,19 @@ const LAB=D.labels, ROWS=D.rows, TNAME=D.tmpl;
 const HAS_TRACES=__HASTR__;
 const HAS_CONF=__HASCONF__;
 const HAS_INT=__HASINT__;
+// trace ids stay in the CSV rather than being embedded here - on a real export
+// they are most of the file. TR holds, per row, where that row's ids sit in that
+// exact CSV and how many there are, so expanding a row reads only its own few
+// hundred bytes. Offsets arrive delta-encoded; prefix-sum them once, here.
+const TR=D.traces||null;
+const TR_OFF=TR?TR.off:null, TR_LEN=TR?TR.len:null, TR_N=TR?TR.n:null;
+let csvFile=null;
+if(TR){
+  for(let i=1;i<TR_OFF.length;i++) TR_OFF[i]+=TR_OFF[i-1];
+  // rows and the TR arrays are written in the same order, so a row's position
+  // in ROWS is its key into them; stash it rather than paying for it in JSON
+  for(let i=0;i<ROWS.length;i++) ROWS[i][6]=i;
+}
 // labels are stored "rule§value"; the value is the attribute value after the
 // first § marker. Split once per label so the filter loop and renderer never
 // re-parse. Display shows the marker as " = ".
@@ -450,6 +625,7 @@ if(!HAS_INT) document.querySelectorAll('.intctrl').forEach(e=>e.style.display='n
 let sortCol=3, sortDir=-1;
 let view=[];
 let perPage=100, curPage=1;
+let colCount=4;
 const $=id=>document.getElementById(id);
 function esc(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
 function escAttr(s){return s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
@@ -459,37 +635,168 @@ function escAttr(s){return s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'
   let cols=[['Template',0],['Source',1],['Target',2],['Support',3]];
   if(HAS_CONF) cols.push(['Confidence',4]);
   if(HAS_INT) cols.push(['Interest',5]);
-  if(HAS_TRACES) cols.push(['# Traces',6]);
+  if(HAS_TRACES) cols.push(['Traces',6]);
+  colCount=cols.length;
   $('head').innerHTML=cols.map(c=>'<th data-c="'+c[1]+'">'+c[0]+' <span class="arrow" data-a="'+c[1]+'"></span></th>').join('');
 })();
 
+// copy text to the clipboard, falling back to a hidden textarea when the
+// Clipboard API is unavailable (e.g. a file:// viewer without a secure context)
+function copyText(text,btn){
+  const done=()=>{const orig=btn.textContent;btn.textContent='Copied';setTimeout(()=>{btn.textContent=orig;},1200);};
+  const fallback=()=>{
+    const ta=document.createElement('textarea');
+    ta.value=text;ta.style.position='fixed';ta.style.opacity='0';
+    document.body.appendChild(ta);ta.focus();ta.select();
+    try{document.execCommand('copy');done();}catch(e){}
+    document.body.removeChild(ta);
+  };
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(text).then(done).catch(fallback);
+  } else fallback();
+}
+
+// read one row's ids straight out of the linked CSV - a single slice of that
+// row's own bytes, no scan. A slice that comes back holding a comma or a newline
+// is not a trace field, which means the file is not the one this report indexed.
+function readIds(k){
+  const len=TR_LEN[k];
+  if(!len) return Promise.resolve([]);
+  const blob=csvFile.slice(TR_OFF[k],TR_OFF[k]+len);
+  const parse=t=>{
+    if(/[\r\n,]/.test(t)) throw new Error('span does not hold a trace field');
+    return t?t.split('|'):[];
+  };
+  if(blob.text) return blob.text().then(parse);
+  return new Promise((res,rej)=>{           // pre-2019 browsers
+    const fr=new FileReader();
+    fr.onload=()=>{try{res(parse(fr.result));}catch(err){rej(err);}};
+    fr.onerror=()=>rej(fr.error);
+    fr.readAsText(blob);
+  });
+}
+
+// expand/collapse a row's full trace-id list on demand, so a constraint backed
+// by thousands of traces never has to be rendered into the table itself
+function bindTraceToggle(){
+  $('tbody').addEventListener('click',e=>{
+    const btn=e.target.closest('.trace-toggle');
+    if(!btn) return;
+    const tr=btn.closest('tr');
+    const next=tr.nextElementSibling;
+    if(next && next.classList.contains('trace-detail')){
+      next.remove(); btn.classList.remove('open'); return;
+    }
+    document.querySelectorAll('tr.trace-detail').forEach(d=>d.remove());
+    document.querySelectorAll('.trace-toggle.open').forEach(b=>b.classList.remove('open'));
+    const k=parseInt(btn.dataset.tk);
+    const det=document.createElement('tr');
+    det.className='trace-detail';
+    const td=document.createElement('td');
+    td.colSpan=colCount;
+    td.innerHTML='<div class="tracebox-head"><span>'+TR_N[k].toLocaleString()+' trace id(s)</span>'+
+      '<button type="button" class="copybtn" disabled>Copy</button></div><div class="tracelist"></div>';
+    const list=td.querySelector('.tracelist'), copy=td.querySelector('.copybtn');
+    det.appendChild(td);
+    tr.after(det);
+    btn.classList.add('open');
+    if(!csvFile){ list.textContent='Link '+(TR.file||'the CSV')+' above to load the ids.'; return; }
+    list.textContent='Reading…';
+    readIds(k).then(ids=>{
+      const text=ids.join(', ');
+      list.textContent=text;
+      copy.disabled=false;
+      copy.addEventListener('click',ev=>copyText(text,ev.currentTarget));
+    }).catch(()=>{
+      list.textContent='Could not read the ids: '+(TR.file||'the CSV')+' is not the file this report was built from.';
+    });
+  });
+}
+bindTraceToggle();
+
+// the page cannot open a path by itself - a browser only reads a file the user
+// hands it - so the CSV is linked once per session and held for the slices. The
+// size check keeps a regenerated CSV from being read with stale offsets.
+function setCsvStat(msg,cls){
+  const el=$('csvstat'); el.textContent=msg; el.className='hint'+(cls?' '+cls:'');
+}
+if(HAS_TRACES){
+  const idle=()=>setCsvStat('link '+TR.file+' to read ids');
+  idle();
+  $('csvfile').addEventListener('change',e=>{
+    const f=e.target.files&&e.target.files[0];
+    csvFile=null;
+    document.querySelectorAll('tr.trace-detail').forEach(d=>d.remove());
+    document.querySelectorAll('.trace-toggle.open').forEach(b=>b.classList.remove('open'));
+    if(!f){ idle(); return; }
+    if(TR.size && f.size!==TR.size){
+      setCsvStat('not this file: expected '+TR.size.toLocaleString()+' bytes, got '+f.size.toLocaleString(),'bad');
+      return;
+    }
+    csvFile=f;
+    setCsvStat('linked '+f.name,'ok');
+  });
+} else {
+  document.querySelectorAll('.trctrl').forEach(e=>e.style.display='none');
+}
+
 // lowercased option sets per field, used to tell an exact pick from free text
 const srcRuleSet=new Set(), srcValSet=new Set(), tgtRuleSet=new Set(), tgtValSet=new Set();
+// distinct label indices seen on each side, kept so the value lists can be
+// rebuilt whenever that side's rule filter changes
+const SRC_IDX=[], TGT_IDX=[];
+// distinct non-empty strings across a side's label indices, via a lookup array;
+// when `rf` is given, only labels whose rule passes it contribute
+function strs(idxSet,arr,rf){
+  const s=new Set();
+  for(const i of idxSet){
+    if(rf && !match(rf,LAB_RULE_LC[i])) continue;
+    const v=arr[i];if(v!=='')s.add(v);
+  }
+  return [...s].sort((a,b)=>a<b?-1:(a>b?1:0));
+}
+// searchable <input> backed by <datalist>; record lowercased options for exact match
+function fillList(listEl,inputEl,arr,knownLC,noun){
+  listEl.innerHTML=arr.map(n=>'<option value="'+escAttr(n)+'"></option>').join('');
+  knownLC.clear();
+  for(const n of arr) knownLC.add(n.toLowerCase());
+  inputEl.placeholder=noun?(arr.length+' '+noun+' — type to search')
+                          :('All '+arr.length+' — type to search');
+}
 // populate Template <select> and the rule/value search lists from values present
 (function fillDropdowns(){
   const tSet=new Set(), srcI=new Set(), tgtI=new Set();
   for(const r of ROWS){tSet.add(r[0]);srcI.add(r[1]);tgtI.add(r[2]);}
+  SRC_IDX.push(...srcI); TGT_IDX.push(...tgtI);
   // templates: plain <select>
   const tArr=[...tSet].map(i=>[TNAME[i],i]).sort((a,b)=>a[0]<b[0]?-1:(a[0]>b[0]?1:0));
   $('tmpl').innerHTML='<option value="-1">All ('+tArr.length+')</option>'+
     tArr.map(([n,i])=>'<option value="'+i+'">'+esc(n)+'</option>').join('');
-  // distinct non-empty strings across a side's label indices, via a lookup array
-  function strs(idxSet,arr){
-    const s=new Set();
-    for(const i of idxSet){const v=arr[i];if(v!=='')s.add(v);}
-    return [...s].sort((a,b)=>a<b?-1:(a>b?1:0));
-  }
-  // searchable <input> backed by <datalist>; record lowercased options for exact match
-  function fillList(listEl,inputEl,arr,knownLC){
-    listEl.innerHTML=arr.map(n=>'<option value="'+escAttr(n)+'"></option>').join('');
-    for(const n of arr) knownLC.add(n.toLowerCase());
-    inputEl.placeholder='All '+arr.length+' — type to search';
-  }
-  fillList($('srcRuleList'),$('srcRule'),strs(srcI,LAB_RULE),srcRuleSet);
-  fillList($('srcValList'),$('srcVal'),strs(srcI,LAB_VAL),srcValSet);
-  fillList($('tgtRuleList'),$('tgtRule'),strs(tgtI,LAB_RULE),tgtRuleSet);
-  fillList($('tgtValList'),$('tgtVal'),strs(tgtI,LAB_VAL),tgtValSet);
+  fillList($('srcRuleList'),$('srcRule'),strs(SRC_IDX,LAB_RULE),srcRuleSet);
+  fillList($('tgtRuleList'),$('tgtRule'),strs(TGT_IDX,LAB_RULE),tgtRuleSet);
 })();
+
+// hold each side's value list to the values that actually occur with the rule
+// filtered on that side, so picking an activity narrows its value dropdown
+// instead of offering every value in the log. Rebuilt only when the rule text
+// changes; a value pick the new rule never takes is dropped rather than left
+// behind filtering the table down to nothing.
+const lastRule={src:null,tgt:null};
+function syncValueLists(){
+  for(const side of ['src','tgt']){
+    const ruleEl=$(side+'Rule'), key=ruleEl.value.trim().toLowerCase();
+    if(lastRule[side]===key) continue;
+    lastRule[side]=key;
+    const valEl=$(side+'Val');
+    const valSet=side==='src'?srcValSet:tgtValSet;
+    const rf=fieldFilter(ruleEl,side==='src'?srcRuleSet:tgtRuleSet);
+    const cur=valEl.value.trim().toLowerCase();
+    const wasPick=valSet.has(cur);
+    fillList($(side+'ValList'),valEl,
+             strs(side==='src'?SRC_IDX:TGT_IDX,LAB_VAL,rf),valSet,'values');
+    if(cur && wasPick && !valSet.has(cur)) valEl.value='';
+  }
+}
 
 // resolve a search input to a filter: null=all, {exact:text} pick, {sub:text} substring
 function fieldFilter(inputEl,knownLC){
@@ -504,6 +811,7 @@ function match(f,lc){
 }
 
 function applyFilters(){
+  syncValueLists();
   const t=parseInt($('tmpl').value);
   const srf=fieldFilter($('srcRule'),srcRuleSet);
   const svf=fieldFilter($('srcVal'),srcValSet);
@@ -542,6 +850,7 @@ function sortView(){
   view.sort((a,b)=>{
     let av,bv;
     if(c===0){av=TNAME[a[0]];bv=TNAME[b[0]];}
+    else if(c===6){av=TR_N[a[6]];bv=TR_N[b[6]];}
     else if(c>=3){av=a[c];bv=b[c];}
     else {av=LAB_DISP[a[c]];bv=LAB_DISP[b[c]];}
     if(av<bv)return -1*d; if(av>bv)return 1*d; return 0;
@@ -554,9 +863,14 @@ function render(){
   const start=(curPage-1)*perPage;
   const slice=view.slice(start,start+perPage);
   let h='';
-  for(const r of slice){
-    h+='<tr><td><span class="tag tg'+(r[0]%8)+'">'+esc(TNAME[r[0]])+'</span></td><td>'+esc(LAB_DISP[r[1]])+'</td><td>'+esc(LAB_DISP[r[2]])+'</td><td class="sup">'+fmt(r[3])+'</td>'+(HAS_CONF?'<td class="sup">'+fmt(r[4])+'</td>':'')+(HAS_INT?'<td class="sup">'+fmt(r[5])+'</td>':'')+(HAS_TRACES?'<td class="num">'+r[6].toLocaleString()+'</td>':'')+'</tr>';
-  }
+  slice.forEach(r=>{
+    let traceCell='';
+    if(HAS_TRACES){
+      const n=TR_N[r[6]];
+      traceCell='<td class="num">'+(n?('<button type="button" class="trace-toggle" data-tk="'+r[6]+'">'+n.toLocaleString()+' <span class="chev">&#9656;</span></button>'):'0')+'</td>';
+    }
+    h+='<tr><td><span class="tag tg'+(r[0]%8)+'">'+esc(TNAME[r[0]])+'</span></td><td>'+esc(LAB_DISP[r[1]])+'</td><td>'+esc(LAB_DISP[r[2]])+'</td><td class="sup">'+fmt(r[3])+'</td>'+(HAS_CONF?'<td class="sup">'+fmt(r[4])+'</td>':'')+(HAS_INT?'<td class="sup">'+fmt(r[5])+'</td>':'')+traceCell+'</tr>';
+  });
   $('tbody').innerHTML=h;
   $('count').textContent=view.length.toLocaleString()+' rules match'+(view.length?'  (showing '+(start+1)+'–'+(start+slice.length)+')':'');
   document.querySelectorAll('.arrow').forEach(a=>{
