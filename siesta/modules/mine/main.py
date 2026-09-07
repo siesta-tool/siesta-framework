@@ -1,9 +1,13 @@
 import argparse
 import datetime
+import re
+import tempfile
 import time
 from pathlib import Path
 from typing import Annotated, Any, Dict
 from fastapi import Body
+from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 from pydantic import BaseModel, ConfigDict, Field
 from siesta.model.StorageModel import MetaData
 from siesta.core.interfaces import SiestaModule, StorageManager
@@ -36,10 +40,51 @@ class MiningConfig(BaseModel):
     interest_threshold: float = Field(0.0, description="Minimum interest fraction [0,1] to retain constraints")
     include_trace_lists: bool = Field(False, description="Append a pipe-delimited trace_ids column per constraint")
     force_recompute: bool = Field(False, description="Remine all traces ignoring previous mining state")
-    output_path: str = Field("output/example_log", description="Local path prefix for the output CSV")
+    output_path: str = Field("output/example_log", description="Local path prefix for the output CSV. CLI runs keep the file; API runs discard it once the results are in the response")
 
 
 DEFAULT_MINING_CONFIG: Dict[str, Any] = MiningConfig().model_dump()
+
+
+# Declare templates produced by each miner, keyed by the category under which they are
+# stored. The miners are the source of truth: the ordered miner also emits the two
+# not_* ordered templates, so those live in the 'ordered' category rather than 'negation'.
+# Existence and absence are derived from the stored 'exactly' rows, exactly as
+# discover_existential does, so they are queryable even though only 'exactly' is persisted.
+CATEGORY_TEMPLATES: Dict[str, tuple[str, ...]] = {
+    "positional": ("init", "end"),
+    "existential": ("exactly", "existence", "absence"),
+    "ordered": (
+        "response", "precedence", "succession",
+        "alternate_response", "alternate_precedence",
+        "chain_response", "chain_precedence", "chain_succession",
+        "not_succession", "not_chain_succession",
+    ),
+    "unordered": ("coexistence", "choice", "exclusive_choice"),
+    "negation": ("not_coexistence",),
+}
+
+# Canonical mining order: the negation miner consumes the coexistence constraints the
+# unordered miner writes, so the categories must always be mined in this sequence.
+CONSTRAINT_CATEGORIES: tuple[str, ...] = ("positional", "existential", "ordered", "unordered", "negation")
+
+TEMPLATE_CATEGORY: Dict[str, str] = {
+    template: category
+    for category, templates in CATEGORY_TEMPLATES.items()
+    for template in templates
+}
+
+CONSTRAINT_COLUMNS: list[str] = ["category", "template", "source", "target", "occurrences", "trace_id"]
+
+
+class ConstraintQueryConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    log_name: str = Field("example_log", description="Name of the indexed log")
+    storage_namespace: str = Field(default_factory=lambda: get_config_value("storage_namespace_default", "siesta"), description="Storage namespace")
+    trace_id: str = Field(..., description="Trace whose mined constraints are returned")
+    category: str | None = Field(None, description=f"Restrict to one constraint category: {list(CATEGORY_TEMPLATES)}. null or '*' = all categories")
+    template: str | None = Field(None, description=f"Restrict to one declare template, e.g. 'response'. null = every template of the selected category. Options: {sorted(TEMPLATE_CATEGORY)}")
+    output_format: str = Field("json", description="'json' (default) returns the constraints inline; 'csv' returns a CSV file download")
 
 
 class Mining(SiestaModule):
@@ -60,7 +105,10 @@ class Mining(SiestaModule):
         self.metadata = None
 
     def register_routes(self) -> SiestaModule.ApiRoutes|None:
-        return {"run": ('POST', self.api_run)}
+        return {
+            "run": ('POST', self.api_run),
+            "constraints": ('POST', self.api_constraints),
+        }
 
     def startup(self):
         logger.info("Startup complete.")
@@ -83,8 +131,9 @@ class Mining(SiestaModule):
 
         Performs incremental constraint discovery across the selected categories. Only
         traces that evolved since the last mining run are processed unless
-        `force_recompute` is set. Results are written to a CSV file and returned as a
-        list of rows.
+        `force_recompute` is set. Results are returned as a list of rows; the CSV file the
+        miner writes on the driver is removed once it has been read into the response, since
+        the response already carries it. CLI runs keep their file at `output_path`.
 
         **Config fields:**
         - `log_name` *(str, default: `"example_log"`)* - name of the indexed log. **Required.**
@@ -117,13 +166,140 @@ class Mining(SiestaModule):
         end_time = time.time()
 
         logger.info(f"Completed in {end_time - start_time} seconds. Results available at {self.mining_config['output_path']}.")
-        
-        with open(self.mining_config["output_path"], 'r', newline="") as f:
-            try:
-                return {"code": 200, "mined": list(csv.DictReader(f)), "time": end_time - start_time}
-            except Exception:
-                logger.error(f"Failed to parse mining results from {self.mining_config['output_path']}. Check if the file is a valid CSV and inspect logs for details.")
-                return {"code": 500, "message": f"Cannot parse mining results. Check logs and {self.mining_config['output_path']} for details."}
+
+        try:
+            with open(self.mining_config["output_path"], 'r', newline="") as f:
+                mined = list(csv.DictReader(f))
+        except Exception:
+            logger.error(f"Failed to parse mining results from {self.mining_config['output_path']}. Check if the file is a valid CSV and inspect logs for details.")
+            return {"code": 500, "message": f"Cannot parse mining results. Check logs and {self.mining_config['output_path']} for details."}
+
+        # The rows are in the response now, so the file on the driver has no reader left.
+        self._discard_output_file(self.mining_config["output_path"])
+
+        return {"code": 200, "mined": mined, "time": end_time - start_time}
+
+
+    def api_constraints(self, query_config: Annotated[ConstraintQueryConfig, Body(openapi_examples={
+        "all": {
+            "summary": "All stored constraints of a trace",
+            "value": {
+                "log_name": "example_log",
+                "trace_id": "1",
+                "output_format": "json",
+            },
+        },
+        "category": {
+            "summary": "Only the ordered constraints of a trace",
+            "value": {
+                "log_name": "example_log",
+                "trace_id": "1",
+                "category": "ordered",
+                "output_format": "json",
+            },
+        },
+        "template": {
+            "summary": "Only one declare template, as a CSV download",
+            "value": {
+                "log_name": "example_log",
+                "trace_id": "1",
+                "template": "response",
+                "output_format": "csv",
+            },
+        },
+    })]) -> Any:
+        """Return the mined declarative constraints stored for a single trace.
+
+        Reads the constraint tables persisted by the miner and returns the rows belonging to
+        `trace_id`, optionally narrowed to one category and/or one declare template. When a
+        requested category has never been mined for this log, mining is run for the missing
+        categories first (with `force_recompute`, so the freshly created table covers every
+        trace and not only the ones that evolved since the last mining run), and the
+        constraints are then read back.
+
+        Note that already-stored constraints are returned as-is: mining is only triggered when
+        a category is missing altogether, so call `/mining/run` to refresh constraints for a log
+        that has been re-indexed since it was last mined. A query covering `negation` can still
+        trigger mining after a `/mining/run`, since not-coexistence is only persisted per trace
+        when that run had `include_trace_lists` set.
+
+        The `existence` and `absence` templates are derived here from the stored `exactly` rows,
+        the same way the existential miner derives them.
+
+        **Config fields:**
+        - `log_name` *(str, default: `"example_log"`)* - name of the indexed log. **Required.**
+        - `storage_namespace` *(str, default: system config `storage_namespace_default`)* - storage namespace.
+        - `trace_id` *(str)* - trace whose constraints are returned. **Required.**
+        - `category` *(str, optional)* - one of `"positional"`, `"existential"`, `"ordered"`,
+            `"unordered"`, `"negation"`. `null` or `"*"` returns every category.
+        - `template` *(str, optional)* - a single declare template, e.g. `"response"`. Must belong
+            to `category` when both are given. `null` returns every template of the selected category.
+        - `output_format` *(str, default: `"json"`)* - `"json"` returns the constraints inline,
+            `"csv"` returns them as a CSV file download. The CSV is built in a temporary file
+            that is deleted once the response has been sent.
+        """
+        logger.info(f"{self.name} is fetching constraints via API request: {query_config}")
+
+        self.siesta_config = get_system_config()
+        self.storage = get_storage_manager()
+
+        try:
+            categories, template = self._resolve_constraint_scope(query_config.category, query_config.template)
+        except ValueError as e:
+            logger.error(f"Invalid constraint query: {e}")
+            return {"code": 400, "message": str(e)}
+
+        output_format = (query_config.output_format or "json").lower()
+        if output_format not in ("json", "csv"):
+            return {"code": 400, "message": f"Invalid output_format '{query_config.output_format}'. Valid options are: ['json', 'csv']."}
+
+        if not self.storage.log_exists({"log_name": query_config.log_name, "storage_namespace": query_config.storage_namespace}):
+            message = f"Log '{query_config.log_name}' does not exist in namespace '{query_config.storage_namespace}'. Run preprocessing first."
+            logger.error(message)
+            return {"code": 404, "message": message}
+
+        metadata = MetaData(
+            storage_namespace=query_config.storage_namespace,
+            log_name=query_config.log_name,
+            storage_type=getattr(query_config, "storage_type", "s3"),
+        )
+        metadata = self.storage.read_metadata_table(metadata)
+
+        # Mine on demand whatever the query needs but storage does not hold yet.
+        mined_now = self._mine_missing_categories(query_config, metadata, categories)
+        if mined_now:
+            metadata = self.metadata
+
+        constraints = self._collect_trace_constraints(metadata, categories, template, query_config.trace_id)
+        logger.info(f"Found {len(constraints)} constraint(s) for trace '{query_config.trace_id}' of log '{query_config.log_name}'.")
+
+        if output_format == "csv":
+            download_name = re.sub(r"[^A-Za-z0-9._-]", "_", f"{query_config.log_name}_{query_config.trace_id}_constraints")
+            with tempfile.NamedTemporaryFile("w", newline="", suffix=".csv", prefix=download_name + "_", delete=False) as f:
+                writer = csv.DictWriter(f, fieldnames=CONSTRAINT_COLUMNS)
+                writer.writeheader()
+                writer.writerows(constraints)
+                output_path = f.name
+            logger.info(f"Constraints written to {output_path}.")
+            # The file only exists to be streamed back, so drop it once the response is out.
+            return FileResponse(
+                output_path,
+                media_type="text/csv",
+                filename=download_name + ".csv",
+                background=BackgroundTask(self._discard_output_file, output_path),
+            )
+
+        return {
+            "code": 200,
+            "log_name": query_config.log_name,
+            "storage_namespace": query_config.storage_namespace,
+            "trace_id": query_config.trace_id,
+            "categories": categories,
+            "template": template,
+            "mined_now": mined_now,
+            "constraint_count": len(constraints),
+            "constraints": constraints,
+        }
 
 
     def cli_run(self, args: Any, **kwargs: Any) -> Any:
@@ -193,6 +369,176 @@ class Mining(SiestaModule):
         given_output_path = config.get("output_path")
         Path(given_output_path).parent.mkdir(parents=True, exist_ok=True)
         self.mining_config["output_path"] = given_output_path + "_" + str(datetime.datetime.now().timestamp()) + ".csv"
+
+
+    @staticmethod
+    def _resolve_constraint_scope(category: str | None, template: str | None) -> tuple[list[str], str | None]:
+        """
+        Validate a category/template pair and resolve which stored categories have to be read.
+
+        :param category: requested category, "*" or None for all of them.
+        :param template: requested declare template, or None for all templates of the category.
+        :return: the categories to read and the template to filter on (None for all).
+        :raises ValueError: if either value is unknown, or if the template is not part of the category.
+        """
+        if category == "*":
+            category = None
+
+        if category is not None and category not in CATEGORY_TEMPLATES:
+            raise ValueError(f"Invalid category '{category}'. Valid options are: {sorted(CATEGORY_TEMPLATES)}.")
+
+        if template is not None and template not in TEMPLATE_CATEGORY:
+            raise ValueError(f"Invalid template '{template}'. Valid options are: {sorted(TEMPLATE_CATEGORY)}.")
+
+        if category is not None and template is not None and TEMPLATE_CATEGORY[template] != category:
+            raise ValueError(
+                f"Template '{template}' belongs to category '{TEMPLATE_CATEGORY[template]}', not '{category}'."
+            )
+
+        # A template already pins down its category, so only that one table needs reading.
+        if template is not None:
+            return [TEMPLATE_CATEGORY[template]], template
+        if category is not None:
+            return [category], None
+        return list(CONSTRAINT_CATEGORIES), None
+
+
+    def _mine_missing_categories(self, query_config: ConstraintQueryConfig, metadata: MetaData, categories: list[str]) -> list[str]:
+        """
+        Mine the requested categories that hold no constraints in storage yet.
+
+        :param query_config: the constraint query being served.
+        :param metadata: metadata of the queried log.
+        :param categories: the categories the query needs.
+        :return: the categories that were missing and have now been mined (empty if nothing was mined).
+        """
+        missing = [category for category in categories if not self.storage.constraints_exist(metadata, category)]
+        if not missing:
+            return []
+
+        # Negation is the complement of the coexistence constraints the unordered miner writes,
+        # so it can only be mined once those are in storage.
+        to_mine = set(missing)
+        if "negation" in to_mine and not self.storage.constraints_exist(metadata, "unordered"):
+            to_mine.add("unordered")
+        mining_categories = [category for category in CONSTRAINT_CATEGORIES if category in to_mine]
+
+        logger.info(
+            f"No stored constraints for {missing} in log '{query_config.log_name}'. "
+            f"Mining {mining_categories} before answering the query."
+        )
+        previous_mined_timestamp = metadata.last_mined_timestamp
+        self._load_mining_config({
+            "log_name": query_config.log_name,
+            "storage_namespace": query_config.storage_namespace,
+            "categories": mining_categories,
+            # Negation constraints are only persisted per trace in trace-list mode, which is
+            # what a per-trace lookup needs; the other miners always write per-trace rows.
+            "include_trace_lists": "negation" in mining_categories,
+            # These categories have never been mined, so the incremental path would only cover
+            # traces that evolved since the last mining run of the other categories.
+            "force_recompute": True,
+        })
+        self.mine(caller="api")
+
+        # This query answers from storage, so nothing ever reads the CSV that mining wrote.
+        self._discard_output_file(self.mining_config["output_path"])
+
+        # Mining moves last_mined_timestamp forward, which would make a later incremental run
+        # skip traces for the categories left untouched here. The categories mined above were
+        # recomputed over every trace, so rewinding the timestamp costs them nothing and keeps
+        # the log's mining state exactly as this query found it.
+        if self.metadata is not None and self.metadata.last_mined_timestamp != previous_mined_timestamp:
+            self.metadata.last_mined_timestamp = previous_mined_timestamp
+            self.storage.write_metadata_table(self.metadata)
+
+        return missing
+
+
+    def _collect_trace_constraints(self, metadata: MetaData, categories: list[str], template: str | None, trace_id: str) -> list[Dict[str, Any]]:
+        """
+        Read the stored constraints of a single trace across the given categories.
+
+        :param metadata: metadata of the queried log.
+        :param categories: categories to read, in canonical order.
+        :param template: declare template to keep, or None to keep all of them.
+        :param trace_id: the trace whose constraints are collected.
+        :return: constraint rows as dicts keyed by CONSTRAINT_COLUMNS.
+        """
+        readers = {
+            "positional": self.storage.read_positional_constraints,
+            "existential": self.storage.read_existential_constraints,
+            "ordered": self.storage.read_ordered_constraints,
+            "unordered": self.storage.read_unordered_constraints,
+            "negation": self.storage.read_negation_constraints,
+        }
+
+        constraints: list[Dict[str, Any]] = []
+        for category in categories:
+            constraints_df = readers[category](metadata).where(F.col("trace_id") == F.lit(trace_id))
+
+            if category == "existential":
+                constraints_df = self._derive_existential_templates(constraints_df)
+
+            if template is not None:
+                constraints_df = constraints_df.where(F.col("template") == F.lit(template))
+
+            # Each reader projects only the columns its category carries; pad the rest.
+            for col_name in ["target", "occurrences"]:
+                if col_name not in constraints_df.columns:
+                    constraints_df = constraints_df.withColumn(col_name, F.lit(None).cast("string"))
+
+            constraints_df = constraints_df.select(
+                F.lit(category).alias("category"),
+                F.col("template"),
+                F.col("source"),
+                F.col("target"),
+                F.col("occurrences"),
+                F.col("trace_id"),
+            ).orderBy("template", "source", "target")
+
+            constraints.extend(
+                {col_name: row[col_name] for col_name in CONSTRAINT_COLUMNS}
+                for row in constraints_df.toLocalIterator(prefetchPartitions=True)
+            )
+
+        return constraints
+
+
+    @staticmethod
+    def _derive_existential_templates(constraints_df: DataFrame) -> DataFrame:
+        """
+        Add the Existence and Absence rows that the miner derives from the stored Exactly rows.
+
+        Only Exactly constraints are persisted, since Existence(a,n) holds for the mined n and
+        Absence(a,n) holds for n+1 - the same derivation discover_existential applies.
+
+        :param constraints_df: stored existential constraints of a trace.
+        :return: the input rows plus their derived Existence and Absence counterparts.
+        """
+        exactly_df = constraints_df.where(F.col("template") == F.lit("exactly"))
+        existence_df = exactly_df.withColumn("template", F.lit("existence"))
+        absence_df = exactly_df.withColumn("template", F.lit("absence")) \
+            .withColumn("occurrences", F.col("occurrences") + 1)
+        return constraints_df.unionByName(existence_df).unionByName(absence_df)
+
+
+    @staticmethod
+    def _discard_output_file(output_path: str) -> None:
+        """
+        Delete a result file that only existed to build an API response.
+
+        API callers receive the results in the response itself, so keeping the file would
+        just pile up unread CSVs on the driver. CLI runs never call this: they are handed
+        the path of their file and keep it.
+
+        :param output_path: path of the file to remove.
+        """
+        try:
+            Path(output_path).unlink(missing_ok=True)
+            logger.info(f"Discarded API output file {output_path}.")
+        except OSError as e:
+            logger.warning(f"Could not remove output file {output_path}: {e}")
 
 
     def mine(self, caller: str):

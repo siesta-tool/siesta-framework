@@ -749,6 +749,52 @@ class S3Manager(StorageManager):
     ###########################################
     ##### Declarative Mining Constraints ######
     ###########################################
+    def _prefix_exists(self, s3a_path: str) -> bool:
+        """
+        Check whether any object is stored under an 's3a://bucket/key' path.
+
+        Args:
+            s3a_path: Full s3a URI of a table (a Parquet/Delta directory).
+
+        Returns:
+            True if at least one object is found under the path, False otherwise.
+        """
+        bucket, _, key = s3a_path.split("://", 1)[-1].partition("/")
+        try:
+            response = self.s3_client.list_objects_v2(
+                Bucket=bucket,
+                Prefix=key.rstrip("/") + "/",
+                MaxKeys=1
+            )
+            return response.get("KeyCount", 0) > 0
+        except ClientError as e:
+            logger.warning(f"Could not verify existence of '{s3a_path}': {e}")
+            return False
+
+    def constraints_exist(self, metadata: MetaData, category: str) -> bool:
+        """
+        Check whether mined constraints of a given category are already stored in S3.
+
+        Args:
+            metadata: MetaData object containing the metadata of the log dataset
+            category: One of 'positional', 'existential', 'ordered', 'unordered', 'negation'
+
+        Returns:
+            True if the category's constraint table exists in S3, False otherwise.
+        """
+        constraint_paths = {
+            "positional": metadata.positional_constraints_path,
+            "existential": metadata.existential_constraints_path,
+            "ordered": metadata.ordered_constraints_path,
+            "unordered": metadata.unordered_constraints_path,
+            "negation": metadata.negation_constraints_path,
+        }
+        if category not in constraint_paths:
+            raise ValueError(
+                f"Unknown constraint category '{category}'. Valid options are: {sorted(constraint_paths)}."
+            )
+        return self._prefix_exists(constraint_paths[category])
+
     def read_positional_constraints(self, metadata: MetaData, filter_out_df: DataFrame | None = None) -> DataFrame:
         try:
             c = self.spark.read.parquet(metadata.positional_constraints_path)

@@ -344,6 +344,19 @@ class StorageManager(ABC):
         return df.select([field.name for field in target_schema.fields])
 
     @abstractmethod
+    def constraints_exist(self, metadata: MetaData, category: str) -> bool:
+        """
+        Check whether mined constraints of a given category are already persisted.
+
+        Args:
+            metadata: MetaData object containing the metadata of the log dataset
+            category: One of 'positional', 'existential', 'ordered', 'unordered', 'negation'
+        Returns:
+            True if a constraint table for that category exists in storage, False otherwise.
+        """
+        pass
+
+    @abstractmethod
     def read_positional_constraints(self, metadata: MetaData, filter_out_df: DataFrame | None = None) -> DataFrame:
         """
         Read existing positional constraints from storage as flat ConstraintEntry rows.
