@@ -87,6 +87,17 @@ class ConstraintQueryConfig(BaseModel):
     output_format: str = Field("json", description="'json' (default) returns the constraints inline; 'csv' returns a CSV file download")
 
 
+class RuleTraceQueryConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    log_name: str = Field("example_log", description="Name of the indexed log")
+    storage_namespace: str = Field(default_factory=lambda: get_config_value("storage_namespace_default", "siesta"), description="Storage namespace")
+    source: str = Field(..., description="Source activity of the rule whose backing traces are returned")
+    target: str | None = Field(None, description="Target activity of the rule. null matches rules with no target (e.g. positional / existential)")
+    category: str | None = Field(None, description=f"Restrict to one constraint category: {list(CATEGORY_TEMPLATES)}. null or '*' = all categories")
+    template: str | None = Field(None, description=f"Restrict to one declare template, e.g. 'coexistence'. null = every template of the selected category. Options: {sorted(TEMPLATE_CATEGORY)}")
+    output_format: str = Field("json", description="'json' (default) returns the matched rules and their traces inline; 'csv' returns a CSV file download")
+
+
 class Mining(SiestaModule):
         
     name = "miner"
@@ -108,6 +119,7 @@ class Mining(SiestaModule):
         return {
             "run": ('POST', self.api_run),
             "constraints": ('POST', self.api_constraints),
+            "traces": ('POST', self.api_traces),
         }
 
     def startup(self):
@@ -299,6 +311,129 @@ class Mining(SiestaModule):
             "mined_now": mined_now,
             "constraint_count": len(constraints),
             "constraints": constraints,
+        }
+
+
+    def api_traces(self, query_config: Annotated[RuleTraceQueryConfig, Body(openapi_examples={
+        "unordered": {
+            "summary": "Traces backing a coexistence rule between two activities",
+            "value": {
+                "log_name": "example_log",
+                "source": "A",
+                "target": "B",
+                "template": "coexistence",
+                "output_format": "json",
+            },
+        },
+        "any": {
+            "summary": "Every rule between two activities, across categories",
+            "value": {
+                "log_name": "example_log",
+                "source": "A",
+                "target": "B",
+                "output_format": "json",
+            },
+        },
+    })]) -> Any:
+        """Return the traces backing the mined rule(s) with a given source and target.
+
+        The inverse of `/mining/constraints`: instead of "which constraints does this
+        trace satisfy", this answers "which traces satisfy this rule". A rule is keyed by
+        its `source` and `target` activity strings (not a hashed id), so it resolves
+        regardless of how the caller obtained the rule. The lookup can be narrowed to one
+        category and/or one declare template; without them every stored rule matching the
+        source/target pair is returned, one entry per (category, template, source, target).
+
+        Missing categories are mined on demand, exactly as `/mining/constraints` does, so a
+        query for a category never mined yet triggers a `force_recompute` run of it first.
+        Already-stored constraints are returned as-is; call `/mining/run` to refresh a log
+        re-indexed since it was last mined.
+
+        **Config fields:**
+        - `log_name` *(str, default: `"example_log"`)* - name of the indexed log. **Required.**
+        - `storage_namespace` *(str, default: system config `storage_namespace_default`)* - storage namespace.
+        - `source` *(str)* - source activity of the rule. **Required.**
+        - `target` *(str, optional)* - target activity. `null` matches rules with no target
+            (positional / existential). For unordered rules both are always present.
+        - `category` *(str, optional)* - one of `"positional"`, `"existential"`, `"ordered"`,
+            `"unordered"`, `"negation"`. `null` or `"*"` searches every category.
+        - `template` *(str, optional)* - a single declare template, e.g. `"coexistence"`. Must
+            belong to `category` when both are given. `null` searches every template of the category.
+        - `output_format` *(str, default: `"json"`)* - `"json"` returns the matched rules and
+            their traces inline, `"csv"` returns them as a CSV file download (one row per rule,
+            trace ids pipe-delimited). The CSV is a temporary file removed once the response is sent.
+        """
+        logger.info(f"{self.name} is fetching rule traces via API request: {query_config}")
+
+        self.siesta_config = get_system_config()
+        self.storage = get_storage_manager()
+
+        try:
+            categories, template = self._resolve_constraint_scope(query_config.category, query_config.template)
+        except ValueError as e:
+            logger.error(f"Invalid rule-trace query: {e}")
+            return {"code": 400, "message": str(e)}
+
+        output_format = (query_config.output_format or "json").lower()
+        if output_format not in ("json", "csv"):
+            return {"code": 400, "message": f"Invalid output_format '{query_config.output_format}'. Valid options are: ['json', 'csv']."}
+
+        if not self.storage.log_exists({"log_name": query_config.log_name, "storage_namespace": query_config.storage_namespace}):
+            message = f"Log '{query_config.log_name}' does not exist in namespace '{query_config.storage_namespace}'. Run preprocessing first."
+            logger.error(message)
+            return {"code": 404, "message": message}
+
+        metadata = MetaData(
+            storage_namespace=query_config.storage_namespace,
+            log_name=query_config.log_name,
+            storage_type=getattr(query_config, "storage_type", "s3"),
+        )
+        metadata = self.storage.read_metadata_table(metadata)
+
+        # Mine on demand whatever the query needs but storage does not hold yet.
+        mined_now = self._mine_missing_categories(query_config, metadata, categories)
+        if mined_now:
+            metadata = self.metadata
+
+        rules = self._collect_rule_traces(metadata, categories, template, query_config.source, query_config.target)
+        trace_ids = sorted({trace_id for rule in rules for trace_id in rule["trace_ids"]})
+        logger.info(
+            f"Found {len(rules)} rule(s) and {len(trace_ids)} distinct trace(s) for "
+            f"source '{query_config.source}' target '{query_config.target}' of log '{query_config.log_name}'."
+        )
+
+        if output_format == "csv":
+            columns = ["category", "template", "source", "target", "occurrences", "trace_count", "trace_ids"]
+            download_name = re.sub(r"[^A-Za-z0-9._-]", "_", f"{query_config.log_name}_{query_config.source}_{query_config.target}_traces")
+            with tempfile.NamedTemporaryFile("w", newline="", suffix=".csv", prefix=download_name + "_", delete=False) as f:
+                writer = csv.DictWriter(f, fieldnames=columns)
+                writer.writeheader()
+                for rule in rules:
+                    row = {col: rule.get(col) for col in columns}
+                    row["trace_ids"] = "|".join(rule["trace_ids"])
+                    writer.writerow(row)
+                output_path = f.name
+            logger.info(f"Rule traces written to {output_path}.")
+            return FileResponse(
+                output_path,
+                media_type="text/csv",
+                filename=download_name + ".csv",
+                background=BackgroundTask(self._discard_output_file, output_path),
+            )
+
+        return {
+            "code": 200,
+            "log_name": query_config.log_name,
+            "storage_namespace": query_config.storage_namespace,
+            "source": query_config.source,
+            "target": query_config.target,
+            "categories": categories,
+            "template": template,
+            "mined_now": mined_now,
+            "rule_count": len(rules),
+            "trace_count": len(trace_ids),
+            "trace_ids": trace_ids,
+            "rules": rules,
         }
 
 
@@ -503,6 +638,87 @@ class Mining(SiestaModule):
             )
 
         return constraints
+
+
+    def _collect_rule_traces(self, metadata: MetaData, categories: list[str], template: str | None, source: str, target: str | None) -> list[Dict[str, Any]]:
+        """
+        Read the stored traces that back a rule, across the given categories.
+
+        The mirror of _collect_trace_constraints: rows are filtered by the rule's source
+        and target rather than by a trace, and grouped back into one entry per distinct
+        (category, template, source, target, occurrences) rule, each carrying its traces.
+
+        :param metadata: metadata of the queried log.
+        :param categories: categories to read, in canonical order.
+        :param template: declare template to keep, or None to keep all of them.
+        :param source: source activity the rule must carry.
+        :param target: target activity the rule must carry, or None to match rules with no target.
+        :return: one dict per matched rule, keyed by CONSTRAINT_COLUMNS minus trace_id, plus
+                 sorted 'trace_ids' and their 'trace_count'.
+        """
+        readers = {
+            "positional": self.storage.read_positional_constraints,
+            "existential": self.storage.read_existential_constraints,
+            "ordered": self.storage.read_ordered_constraints,
+            "unordered": self.storage.read_unordered_constraints,
+            "negation": self.storage.read_negation_constraints,
+        }
+
+        rules: Dict[tuple, Dict[str, Any]] = {}
+        for category in categories:
+            constraints_df = readers[category](metadata)
+
+            if category == "existential":
+                constraints_df = self._derive_existential_templates(constraints_df)
+
+            if template is not None:
+                constraints_df = constraints_df.where(F.col("template") == F.lit(template))
+
+            # Each reader projects only the columns its category carries; pad the rest so
+            # the source/target filter and the projection below are uniform.
+            for col_name in ["target", "occurrences"]:
+                if col_name not in constraints_df.columns:
+                    constraints_df = constraints_df.withColumn(col_name, F.lit(None).cast("string"))
+
+            constraints_df = constraints_df.where(F.col("source") == F.lit(source))
+            if target is None:
+                constraints_df = constraints_df.where(F.col("target").isNull() | (F.col("target") == F.lit("")))
+            else:
+                constraints_df = constraints_df.where(F.col("target") == F.lit(target))
+
+            constraints_df = constraints_df.select(
+                F.lit(category).alias("category"),
+                F.col("template"),
+                F.col("source"),
+                F.col("target"),
+                F.col("occurrences"),
+                F.col("trace_id"),
+            )
+
+            for row in constraints_df.toLocalIterator(prefetchPartitions=True):
+                key = (row["category"], row["template"], row["source"], row["target"], row["occurrences"])
+                rule = rules.get(key)
+                if rule is None:
+                    rule = {
+                        "category": row["category"],
+                        "template": row["template"],
+                        "source": row["source"],
+                        "target": row["target"],
+                        "occurrences": row["occurrences"],
+                        "trace_ids": set(),
+                    }
+                    rules[key] = rule
+                if row["trace_id"] is not None:
+                    rule["trace_ids"].add(row["trace_id"])
+
+        result = []
+        for rule in rules.values():
+            trace_ids = sorted(rule["trace_ids"])
+            rule["trace_ids"] = trace_ids
+            rule["trace_count"] = len(trace_ids)
+            result.append(rule)
+        result.sort(key=lambda r: (r["category"], r["template"] or "", r["source"] or "", r["target"] or ""))
+        return result
 
 
     @staticmethod

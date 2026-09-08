@@ -48,10 +48,17 @@ import json
 import os
 import re
 import sys
+from typing import Any
 
 csv.field_size_limit(sys.maxsize)
 
 DEFAULT_COUNTRIES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "countries.txt")
+
+# Templates dropped from the report unconditionally. The unordered miner emits
+# coexistence, choice and exclusive_choice; only coexistence carries a directional
+# reading worth reporting, so the two choice templates are cut, leaving coexistence
+# and the negation (not_coexistence) rules.
+DROP_TEMPLATES = frozenset({"choice", "exclusive_choice"})
 
 
 def die(msg):
@@ -135,7 +142,8 @@ def parse_args(args):
 
 def build_rules_html(header, rows, *, src_name="rules.csv", wanted=None,
                       country_filter=True, countries_path=DEFAULT_COUNTRIES,
-                      traces=None):
+                      traces=None, log_name=None, storage_namespace=None,
+                      trace_api=None):
     """Build the self-contained rules HTML viewer from an already-parsed rules table.
 
     header/rows mirror csv.reader() output (rows are lists of raw field strings),
@@ -148,6 +156,14 @@ def build_rules_html(header, rows, *, src_name="rules.csv", wanted=None,
     triples read_rules_csv returns}. The ids themselves stay in the CSV - the
     viewer asks for the file and reads the few hundred bytes each row needs. rows
     must then be a sized sequence, since the spans are matched to it positionally.
+
+    trace_api + log_name + storage_namespace, when all given, turn on the
+    server-backed Traces column instead: the page holds the log name and
+    namespace as constants and, on click, POSTs {log_name, storage_namespace,
+    source, target, template} to trace_api and lists the trace ids it returns.
+    The rule is keyed by its raw source/target/template strings, already present
+    per row, so nothing extra is embedded. This is independent of `traces` (which
+    reads ids out of a local CSV); pass one or the other.
 
     Returns (html, stats) where stats reports what was kept/dropped.
     Raises ValueError on bad input (missing columns, no matching rows, ...).
@@ -176,6 +192,10 @@ def build_rules_html(header, rows, *, src_name="rules.csv", wanted=None,
     ci = col.get("confidence", -1)
     has_int = "interest" in col
     ii = col.get("interest", -1)
+    # server-backed Traces column: the page keeps the log name / namespace and asks
+    # the API for a rule's traces on click. Needs all three, and is separate from
+    # the CSV-slice `traces` mechanism above.
+    has_trace_api = bool(trace_api and log_name and storage_namespace)
 
     # --- stream rows, dictionary-encode labels, discover templates ---
     labels = []
@@ -205,9 +225,13 @@ def build_rules_html(header, rows, *, src_name="rules.csv", wanted=None,
     seen_templates = set()
     cross_country = 0
     same_rule = 0
+    dropped_template = 0
     for ri, row in enumerate(rows):
         tmpl = row[ti].strip()
         seen_templates.add(tmpl)
+        if tmpl in DROP_TEMPLATES:
+            dropped_template += 1
+            continue
         if wanted_set is not None and tmpl not in wanted_set:
             continue
         source, target = row[si].strip(), row[gi].strip()
@@ -239,11 +263,16 @@ def build_rules_html(header, rows, *, src_name="rules.csv", wanted=None,
                 "no rows matched template filter %s. Templates present: %s"
                 % (sorted(wanted_set), sorted(seen_templates))
             )
+        if dropped_template:
+            raise ValueError(
+                "every row used a dropped template %s; nothing left to show."
+                % sorted(DROP_TEMPLATES)
+            )
         raise ValueError("no data rows found in " + src_name)
 
     unknown_templates = sorted(wanted_set - seen_templates) if wanted_set is not None else []
 
-    payload = {"labels": labels, "rows": out_rows, "tmpl": tmpl_names}
+    payload: dict[str, Any] = {"labels": labels, "rows": out_rows, "tmpl": tmpl_names}
     if has_traces:
         # offsets are delta-encoded (kept rows stay in file order, so the gaps are
         # small numbers); the viewer prefix-sums them once on load. Rows and these
@@ -253,11 +282,15 @@ def build_rules_html(header, rows, *, src_name="rules.csv", wanted=None,
             tr_off[k], prev = tr_off[k] - prev, tr_off[k]
         payload["traces"] = {"file": traces.get("file", ""), "size": traces.get("size", 0),
                              "off": tr_off, "len": tr_len, "n": tr_n}
+    if has_trace_api:
+        payload["api"] = {"url": trace_api, "log_name": log_name,
+                          "storage_namespace": storage_namespace}
     data_json = json.dumps(payload, separators=(",", ":"))
 
     html = (HTML_TEMPLATE
             .replace("__SRC__", src_name)
             .replace("__HASTR__", "true" if has_traces else "false")
+            .replace("__HASTRACEAPI__", "true" if has_trace_api else "false")
             .replace("__HASCONF__", "true" if has_conf else "false")
             .replace("__HASINT__", "true" if has_int else "false")
             .replace("__DATA__", data_json))
@@ -268,6 +301,7 @@ def build_rules_html(header, rows, *, src_name="rules.csv", wanted=None,
         "labels": len(labels),
         "dropped_same_rule": same_rule,
         "dropped_cross_country": cross_country if country_rx is not None else None,
+        "dropped_template": dropped_template,
         "unknown_templates": unknown_templates,
     }
     return html, stats
@@ -385,6 +419,8 @@ def main(argv):
     print("rows: %d  templates: %s  labels: %d" % (stats["rows"], stats["templates"], stats["labels"]))
     if stats["dropped_same_rule"]:
         print("dropped %d same-rule rows (source/target share the rule before '§')" % stats["dropped_same_rule"])
+    if stats["dropped_template"]:
+        print("dropped %d rows of templates %s" % (stats["dropped_template"], sorted(DROP_TEMPLATES)))
     if stats["dropped_cross_country"]:
         cc = stats["dropped_cross_country"]
         print("dropped %d cross-country rows (%.1f%% of %d matching)"
@@ -468,6 +504,12 @@ tbody tr{transition:background .1s}
 tbody tr:hover{background:var(--surface2)}
 td.sup,td.num{font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap;color:var(--text-sub)}
 
+/* ── copy-on-click cells ────────────────────────────────────────── */
+td.copyable{cursor:pointer;position:relative}
+td.copyable:hover{color:var(--accent)}
+td.copyable.copied{color:var(--accent)}
+td.copyable.copied::after{content:'Copied';position:absolute;top:4px;right:8px;font-size:10px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--accent)}
+
 /* ── template tags ──────────────────────────────────────────────── */
 .tag{display:inline-block;padding:2px 9px;border-radius:20px;font-size:12px;font-family:var(--mono);background:var(--pill-bg);color:var(--pill-txt)}
 .tg0{background:rgba(29,158,117,.15);color:#1d9e75}
@@ -484,6 +526,10 @@ td.sup,td.num{font-family:var(--mono);font-variant-numeric:tabular-nums;white-sp
 .trace-toggle:hover{border-color:var(--accent);color:var(--accent)}
 .trace-toggle .chev{display:inline-block;font-size:9px;transition:transform .15s}
 .trace-toggle.open .chev{transform:rotate(90deg)}
+.rule-toggle{background:var(--surface2);border:1px solid var(--bd-em);border-radius:20px;padding:2px 10px;font-family:var(--mono);font-size:12px;color:var(--text-sub);cursor:pointer;transition:border-color .15s,color .15s}
+.rule-toggle:hover{border-color:var(--accent);color:var(--accent)}
+.rule-toggle .chev{display:inline-block;font-size:9px;transition:transform .15s}
+.rule-toggle.open .chev{transform:rotate(90deg)}
 tr.trace-detail td{background:var(--surface2);padding:10px 14px 14px}
 .tracebox-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
 .tracebox-head span{font-size:11px;font-weight:500;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em}
@@ -503,7 +549,7 @@ tr.trace-detail td{background:var(--surface2);padding:10px 14px 14px}
 <body>
 <header>
 <h1>Declarative Rules</h1>
-<div class="sub">Source: __SRC__ &middot; <span id="total"></span> rules</div>
+<div class="sub">Source: __SRC__ &middot; <span id="total"></span> rules<span id="ctx"></span></div>
 </header>
 <div class="controls">
   <div class="ctrl">
@@ -606,6 +652,13 @@ if(TR){
   // in ROWS is its key into them; stash it rather than paying for it in JSON
   for(let i=0;i<ROWS.length;i++) ROWS[i][6]=i;
 }
+// server-backed Traces column (independent of TR): the page holds the log name
+// and namespace as constants and asks the API for a rule's traces on click,
+// keyed by the row's own source / target / template strings.
+const API=D.api||null;
+const HAS_TRACE_API=__HASTRACEAPI__;
+// stash each row's own index so a filtered/sorted view row can address its rule
+if(HAS_TRACE_API) for(let i=0;i<ROWS.length;i++) ROWS[i][7]=i;
 // labels are stored "rule§value"; the value is the attribute value after the
 // first § marker. Split once per label so the filter loop and renderer never
 // re-parse. Display shows the marker as " = ".
@@ -622,6 +675,10 @@ for(const s of LAB){
 document.getElementById('total').textContent=ROWS.length.toLocaleString();
 if(!HAS_CONF) document.querySelectorAll('.confctrl').forEach(e=>e.style.display='none');
 if(!HAS_INT) document.querySelectorAll('.intctrl').forEach(e=>e.style.display='none');
+if(HAS_TRACE_API){
+  const c=document.getElementById('ctx');
+  if(c) c.textContent=' · log '+API.log_name+' · namespace '+API.storage_namespace;
+}
 let sortCol=3, sortDir=-1;
 let view=[];
 let perPage=100, curPage=1;
@@ -636,25 +693,43 @@ function escAttr(s){return s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'
   if(HAS_CONF) cols.push(['Confidence',4]);
   if(HAS_INT) cols.push(['Interest',5]);
   if(HAS_TRACES) cols.push(['Traces',6]);
+  if(HAS_TRACE_API) cols.push(['Traces',7]);
   colCount=cols.length;
   $('head').innerHTML=cols.map(c=>'<th data-c="'+c[1]+'">'+c[0]+' <span class="arrow" data-a="'+c[1]+'"></span></th>').join('');
 })();
 
-// copy text to the clipboard, falling back to a hidden textarea when the
+// write text to the clipboard, falling back to a hidden textarea when the
 // Clipboard API is unavailable (e.g. a file:// viewer without a secure context)
-function copyText(text,btn){
-  const done=()=>{const orig=btn.textContent;btn.textContent='Copied';setTimeout(()=>{btn.textContent=orig;},1200);};
+function writeClipboard(text,done){
   const fallback=()=>{
     const ta=document.createElement('textarea');
     ta.value=text;ta.style.position='fixed';ta.style.opacity='0';
     document.body.appendChild(ta);ta.focus();ta.select();
-    try{document.execCommand('copy');done();}catch(e){}
+    try{document.execCommand('copy');if(done)done();}catch(e){}
     document.body.removeChild(ta);
   };
   if(navigator.clipboard && navigator.clipboard.writeText){
-    navigator.clipboard.writeText(text).then(done).catch(fallback);
+    navigator.clipboard.writeText(text).then(()=>{if(done)done();}).catch(fallback);
   } else fallback();
 }
+// copy text and briefly show "Copied" on the given button
+function copyText(text,btn){
+  writeClipboard(text,()=>{const orig=btn.textContent;btn.textContent='Copied';setTimeout(()=>{btn.textContent=orig;},1200);});
+}
+
+// clicking a Source or Target cell copies the rule's displayed text ("X = Y"),
+// never the raw "X§Y" stored form - the cell already holds the display form
+function bindCellCopy(){
+  $('tbody').addEventListener('click',e=>{
+    const td=e.target.closest('td.copyable');
+    if(!td) return;
+    writeClipboard(td.textContent,()=>{
+      td.classList.add('copied');
+      setTimeout(()=>td.classList.remove('copied'),900);
+    });
+  });
+}
+bindCellCopy();
 
 // read one row's ids straight out of the linked CSV - a single slice of that
 // row's own bytes, no scan. A slice that comes back holding a comma or a newline
@@ -713,6 +788,59 @@ function bindTraceToggle(){
   });
 }
 bindTraceToggle();
+
+// server-backed sibling of bindTraceToggle: on click, POST the row's rule
+// (its raw source / target / template) to the API and list the trace ids it
+// returns in the same expander. The strings come straight off the row, so they
+// match the source/target the API sees in storage without any encoding.
+function bindRuleApiToggle(){
+  $('tbody').addEventListener('click',e=>{
+    const btn=e.target.closest('.rule-toggle');
+    if(!btn) return;
+    const tr=btn.closest('tr');
+    const next=tr.nextElementSibling;
+    if(next && next.classList.contains('trace-detail')){
+      next.remove(); btn.classList.remove('open'); return;
+    }
+    document.querySelectorAll('tr.trace-detail').forEach(d=>d.remove());
+    document.querySelectorAll('.rule-toggle.open').forEach(b=>b.classList.remove('open'));
+    const r=ROWS[parseInt(btn.dataset.rk)];
+    const body={log_name:API.log_name,storage_namespace:API.storage_namespace,
+                source:LAB[r[1]],target:LAB[r[2]],template:TNAME[r[0]]};
+    const det=document.createElement('tr');
+    det.className='trace-detail';
+    const td=document.createElement('td');
+    td.colSpan=colCount;
+    td.innerHTML='<div class="tracebox-head"><span>trace id(s)</span>'+
+      '<button type="button" class="copybtn" disabled>Copy</button></div><div class="tracelist">Loading…</div>';
+    const list=td.querySelector('.tracelist'), copy=td.querySelector('.copybtn'),
+          head=td.querySelector('.tracebox-head span');
+    det.appendChild(td);
+    tr.after(det);
+    btn.classList.add('open');
+    fetch(API.url,{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(body)})
+      .then(r=>r.json().then(j=>({ok:r.ok,j:j})))
+      .then(res=>{
+        const j=res.j||{};
+        if(!res.ok || (j.code && j.code>=400)){
+          list.textContent=j.message||j.detail||'Request failed.';
+          return;
+        }
+        const ids=j.trace_ids||[];
+        const n=(j.trace_count!=null?j.trace_count:ids.length);
+        head.textContent=n.toLocaleString()+' trace id(s)';
+        const text=ids.join(', ');
+        list.textContent=text||'(no traces)';
+        if(text){
+          copy.disabled=false;
+          copy.addEventListener('click',ev=>copyText(text,ev.currentTarget));
+        }
+      })
+      .catch(()=>{ list.textContent='Could not reach the API.'; });
+  });
+}
+if(HAS_TRACE_API) bindRuleApiToggle();
 
 // the page cannot open a path by itself - a browser only reads a file the user
 // hands it - so the CSV is linked once per session and held for the slices. The
@@ -851,6 +979,7 @@ function sortView(){
     let av,bv;
     if(c===0){av=TNAME[a[0]];bv=TNAME[b[0]];}
     else if(c===6){av=TR_N[a[6]];bv=TR_N[b[6]];}
+    else if(c===7){av=0;bv=0;}   // server-backed traces: count unknown until fetched
     else if(c>=3){av=a[c];bv=b[c];}
     else {av=LAB_DISP[a[c]];bv=LAB_DISP[b[c]];}
     if(av<bv)return -1*d; if(av>bv)return 1*d; return 0;
@@ -868,8 +997,10 @@ function render(){
     if(HAS_TRACES){
       const n=TR_N[r[6]];
       traceCell='<td class="num">'+(n?('<button type="button" class="trace-toggle" data-tk="'+r[6]+'">'+n.toLocaleString()+' <span class="chev">&#9656;</span></button>'):'0')+'</td>';
+    } else if(HAS_TRACE_API){
+      traceCell='<td class="num"><button type="button" class="rule-toggle" data-rk="'+r[7]+'">traces <span class="chev">&#9656;</span></button></td>';
     }
-    h+='<tr><td><span class="tag tg'+(r[0]%8)+'">'+esc(TNAME[r[0]])+'</span></td><td>'+esc(LAB_DISP[r[1]])+'</td><td>'+esc(LAB_DISP[r[2]])+'</td><td class="sup">'+fmt(r[3])+'</td>'+(HAS_CONF?'<td class="sup">'+fmt(r[4])+'</td>':'')+(HAS_INT?'<td class="sup">'+fmt(r[5])+'</td>':'')+traceCell+'</tr>';
+    h+='<tr><td><span class="tag tg'+(r[0]%8)+'">'+esc(TNAME[r[0]])+'</span></td><td class="copyable" title="Click to copy">'+esc(LAB_DISP[r[1]])+'</td><td class="copyable" title="Click to copy">'+esc(LAB_DISP[r[2]])+'</td><td class="sup">'+fmt(r[3])+'</td>'+(HAS_CONF?'<td class="sup">'+fmt(r[4])+'</td>':'')+(HAS_INT?'<td class="sup">'+fmt(r[5])+'</td>':'')+traceCell+'</tr>';
   });
   $('tbody').innerHTML=h;
   $('count').textContent=view.length.toLocaleString()+' rules match'+(view.length?'  (showing '+(start+1)+'–'+(start+slice.length)+')':'');

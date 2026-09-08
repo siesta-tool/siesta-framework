@@ -576,6 +576,30 @@ class Analysing(SiestaModule):
             given_output + "_" + str(datetime.datetime.now().timestamp()) + ".csv"
         )
 
+    def _require_form_analysis_completed(self, config: Dict[str, Any]) -> Dict[str, Any] | None:
+        """Ensure `form_analysis` has fully run (indexed) for `config["log_name"]`.
+
+        Returns a ready-to-send error dict when the log is missing, or `None` when
+        the previous form-analysis run has completed and the caller may proceed.
+        """
+        self.siesta_config = get_system_config()
+        self.storage = get_storage_manager()
+
+        log_name = config.get("log_name")
+        if not log_name:
+            return {"code": 400, "message": "Log name not specified in config."}
+
+        if not self.storage.log_exists(config):
+            logger.error(f"Form analysis has not completed for log '{log_name}'.")
+            return {
+                "code": 409,
+                "message": (
+                    f"Form analysis has not completed for log '{log_name}'. "
+                    "Run the form_analysis endpoint with mine=true first."
+                ),
+            }
+        return None
+
     def _load_metadata(self):
         self.metadata = MetaData(
             storage_namespace=self.analyser_config.get("storage_namespace", get_config_value("storage_namespace_default", "siesta")),
@@ -975,7 +999,18 @@ class Analysing(SiestaModule):
             return mined_path
 
         if mined_format == "html":
-            html, _stats = build_rules_html(mined_header, mined_rows, src_name=Path(mined_path).name)
+            # the report keeps log_name / storage_namespace as constants and, on a rule
+            # click, calls the miner's /mining/traces with that row's source/target for
+            # the backing traces. "/mining/traces" is router.py's "/{module}/{endpoint}"
+            # scheme, module = the Mining class name lowercased.
+            html, _stats = build_rules_html(
+                mined_header, mined_rows, src_name=Path(mined_path).name,
+                log_name=self.analyser_config.get("log_name"),
+                storage_namespace=self.analyser_config.get(
+                    "storage_namespace", get_config_value("storage_namespace_default", "siesta")
+                ),
+                trace_api=f"/{Mining.__name__.lower()}/traces",
+            )
             if caller == "api":
                 return HTMLResponse(html)
             html_path = str(Path(mined_path).with_suffix(".html"))
