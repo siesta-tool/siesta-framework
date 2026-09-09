@@ -1,6 +1,8 @@
 from siesta.core.app import Siesta
 from fastapi import FastAPI, APIRouter
 import uvicorn
+from fastapi.middleware.cors import CORSMiddleware
+
 
 """
 API Router for Siesta Framework.
@@ -11,6 +13,13 @@ def startup(siestaInstance: Siesta) -> None:
     """Startup hook to register routes from discovered modules."""
     config = siestaInstance.config
     app = FastAPI(title=config.get("app_name", "Siesta Framework API"))
+    app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    )
     routes = siestaInstance.get_registered_routes()
 
     for module, registered_routes in routes.items():
