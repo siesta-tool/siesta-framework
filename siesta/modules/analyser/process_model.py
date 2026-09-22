@@ -62,15 +62,10 @@ _Y_GAP   = 1.2    # vertical distance between nodes in the same layer
 
 # ── Generic utilities ─────────────────────────────────────────────────────────
 
-def _format_duration(seconds: float) -> str:
-    if seconds < 60:
-        return f"{seconds:.1f}s"
-    elif seconds < 3600:
-        return f"{seconds/60:.1f}m"
-    elif seconds < 86400:
-        return f"{seconds/3600:.1f}h"
-    else:
-        return f"{seconds/86400:.1f}d"
+# Promoted to duration_format.format_duration (shared with bottlenecks/loop
+# reporting, extended past days to weeks); kept as a local alias so every call
+# site in this file stays unchanged.
+from siesta.modules.analyser.duration_format import format_duration as _format_duration
 
 
 def _new_tempfile(suffix: str) -> str:

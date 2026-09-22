@@ -235,3 +235,6 @@ demo-eval/*csv
 demo-eval/*jsonl
 
 bpic*
+config/los_aug_workflow.json
+
+analysis/*

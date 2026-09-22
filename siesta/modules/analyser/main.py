@@ -55,6 +55,10 @@ class LoopDetectionConfig(BaseModel):
     filter_out: bool = Field(False, description="When true, keeps rare loops (support ≤ threshold)")
     top_k: int | None = Field(None, description="Keep only the k most-supported loops; null = all")
     trace_based: bool = Field(False, description="Add trace_ids list to each loop entry (only when grouping by trace_id)")
+    max_pattern_length: int | str = Field(8, description="Longest repeated-pattern block to search for: an int length, or \"auto\" to derive clamp(round(avg_group_length / 2), 2, 8) from the data")
+    include_repeats: bool = Field(True, description="When false, skip the repeated-pattern search (self-loops and non-self-loops are always detected)")
+    with_time_stats: bool = Field(True, description="Include per-pattern occurrence/cost statistics (avg/median events, time, and their share of the group's length/span)")
+    with_distribution: bool = Field(False, description="Additionally emit the spread of per-trace time consumed by each pattern (min/p10/p25/p50/p75/p90/max/stddev), in absolute seconds and as a share of the trace; requires with_time_stats")
     output_path: str = Field("output/example_log", description="Local path prefix for the output file")
 
 
@@ -156,9 +160,12 @@ class BottlenecksConfig(BaseModel):
     end_time: str | None = Field(None, description="Attribute key for event end timestamp. null = transition time (next_start - start)")
     grouping_key: str | list[str] | None = Field(None, description="Attribute key(s) defining what counts as 'adjacent' events; null = trace_id")
     grouping_value: str | list[str] | None = Field(None, description="Restrict to groups with matching key value(s)")
-    zscore_threshold: float = Field(3.5, description="Robust (MAD-based) z-score threshold above which a pair's average duration is flagged as anomalous relative to the rest of the process")
-    top_k: int | None = Field(None, description="Keep only the k highest-impact pairs; null = all")
+    zscore_threshold: float = Field(3.5, description="Robust (MAD-based) z-score threshold above which a pair's average duration is flagged as anomalous relative to the rest of the process (independent of support_threshold/sigma_multiplier/is_bottleneck; kept for backward compatibility)")
+    top_k: int | None = Field(None, description="Keep only the k pairs ranked first by order_by; null = all")
     return_csv: bool = Field(False, description="Return a CSV file download instead of a JSON list")
+    support_threshold: float = Field(0.0, description="Minimum fraction of groups a pair must occur in to count as 'common'; pairs below this are dropped entirely. Default 0.0 keeps every pair")
+    sigma_multiplier: float = Field(3.0, description="How many standard deviations above the mean avg_duration_sec (over the support_threshold-filtered population) a pair must exceed to be flagged is_bottleneck")
+    order_by: str = Field("impact_score", description="Column to rank/truncate by: 'impact_score' (default), 'avg_duration_sec', or 'median_duration_sec'")
     output_path: str = Field("output/example_log", description="Local path prefix for the output file")
 
 
@@ -349,16 +356,27 @@ class Analyser(SiestaModule):
                 "filter_out": False,
                 "top_k": None,
                 "trace_based": False,
+                "max_pattern_length": 8,
+                "include_repeats": True,
+                "with_time_stats": True,
+                "with_distribution": False,
             },
         },
     })]) -> Any:
-        """Detect self-loops and non-self-loops in an indexed event log.
+        """Detect self-loops, non-self-loops and repeated patterns in an indexed event log.
 
         A **self-loop** is an activity immediately followed by itself.
         A **non-self-loop** is a minimal cycle A -> … -> A where A does not appear in the body.
+        A **repeated pattern** is any contiguous block of 2..max_pattern_length activities
+        (e.g. A -> B -> C) that recurs verbatim, non-overlapping, at least twice in a trace;
+        only maximal patterns are reported (a shorter pattern fully explained by a longer,
+        equally-recurring one is omitted).
 
-        Returns JSON with `self_loops` and `non_self_loops` arrays. Each entry contains the
-        activity pattern and its support fraction across groups.
+        Returns JSON with `self_loops`, `non_self_loops` and `repeated_patterns` arrays. Each
+        entry contains the activity pattern, its support fraction across groups, and - when
+        `with_time_stats` is true - how much of the trace it typically consumes: average/median
+        occurrence count, events consumed (absolute and as a share of the trace length), and
+        time consumed (absolute seconds and as a share of the trace's span).
 
         **Config fields:**
         - `log_name` *(str)* - name of the indexed log. **Required.**
@@ -368,8 +386,16 @@ class Analyser(SiestaModule):
         - `min_timestamp` *(str | null, default: `null`)* - lower bound on `start_timestamp`.
         - `support_threshold` *(float [0,1] | null, default: `null`)* - keep loops with support ≥ threshold. `null` = no filtering.
         - `filter_out` *(bool, default: `false`)* - when `true`, keeps loops with support ≤ threshold (rare loops).
-        - `top_k` *(int | null, default: `null`)* - keep only the k most-supported loops. `null` = all.
+        - `top_k` *(int | null, default: `null`)* - keep only the k most-supported loops across all three types. `null` = all.
         - `trace_based` *(bool, default: `false`)* - add a `trace_ids` list to each loop entry (only when grouping by `trace_id`).
+        - `max_pattern_length` *(int | "auto", default: `8`)* - longest repeated-pattern block to search for.
+            `"auto"` derives `clamp(round(avg_group_length / 2), 2, 8)` from the data.
+        - `include_repeats` *(bool, default: `true`)* - when `false`, skip the repeated-pattern search.
+        - `with_time_stats` *(bool, default: `true`)* - include the occurrence/cost statistics above.
+        - `with_distribution` *(bool, default: `false`)* - additionally emit `time_distribution_sec` and
+            `pct_trace_time_distribution` per entry: the min/p10/p25/p50/p75/p90/max/stddev spread of the
+            per-trace time each pattern consumes, in absolute seconds and as a share of the trace. Requires
+            `with_time_stats`.
         """
         logger.info(f"{self.name} running loop_detection via API.")
         self.siesta_config = get_system_config()
@@ -701,11 +727,20 @@ class Analyser(SiestaModule):
                 "grouping_value": None,
                 "zscore_threshold": 3.5,
                 "top_k": None,
+                "support_threshold": 0.0,
+                "sigma_multiplier": 3.0,
+                "order_by": "impact_score",
             },
         },
     })]) -> Any:
-        """Surface activity pairs with anomalously high inter-event durations relative
-        to the rest of the process, ranked by their contribution to overall cycle time.
+        """Surface activity-pair "regions" that are both common among traces and take
+        unusually long relative to other common regions.
+
+        A pair passes two clauses to be flagged `is_bottleneck`: (1) `support` (fraction of
+        groups containing the pair) at or above `support_threshold`, i.e. "common"; and
+        (2) `avg_duration_sec` above `mean + sigma_multiplier * stddev`, computed over the
+        pairs that passed clause 1 - i.e. "unusually long relative to other common regions".
+        The response's `bottleneck_cutoff_sec` records that computed threshold.
 
         **Config fields:**
         - `log_name` *(str)* - name of the indexed log. **Required.**
@@ -715,9 +750,13 @@ class Analyser(SiestaModule):
         - `grouping_key` *(str | list | null, default: `null`)* - attribute key(s) defining what counts as
             "adjacent" events; `null` = `trace_id`.
         - `grouping_value` *(str | list | null, default: `null`)* - restrict to groups with matching key value(s).
-        - `zscore_threshold` *(float, default: `3.5`)* - robust (MAD-based) z-score threshold for flagging.
-        - `top_k` *(int | null, default: `null`)* - keep only the k highest-impact pairs.
+        - `zscore_threshold` *(float, default: `3.5`)* - robust (MAD-based) z-score threshold for the separate
+            `flagged`/`zscore` columns (kept for backward compatibility; independent of `is_bottleneck`).
+        - `top_k` *(int | null, default: `null`)* - keep only the k pairs ranked first by `order_by`.
         - `return_csv` *(bool, default: `false`)* - return a CSV file download instead of a JSON list.
+        - `support_threshold` *(float [0,1], default: `0.0`)* - minimum support for a pair to count as "common".
+        - `sigma_multiplier` *(float, default: `3.0`)* - standard deviations above the mean required for `is_bottleneck`.
+        - `order_by` *(str, default: `"impact_score"`)* - `"impact_score"`, `"avg_duration_sec"`, or `"median_duration_sec"`.
         """
         logger.info(f"{self.name} running bottlenecks via API.")
         self.siesta_config = get_system_config()
@@ -946,12 +985,17 @@ class Analyser(SiestaModule):
             filter_out=self.analyser_config.get("filter_out", False),
             top_k=self.analyser_config.get("top_k"),
             trace_based=self.analyser_config.get("trace_based", False),
+            max_pattern_length=self.analyser_config.get("max_pattern_length", 8),
+            include_repeats=self.analyser_config.get("include_repeats", True),
+            with_time_stats=self.analyser_config.get("with_time_stats", True),
+            with_distribution=self.analyser_config.get("with_distribution", False),
         )
 
         events_df.unpersist()
         logger.info(
-            f"Completed. Found {len(result['self_loops'])} self-loop type(s) and "
-            f"{len(result['non_self_loops'])} non-self-loop type(s)."
+            f"Completed. Found {len(result['self_loops'])} self-loop type(s), "
+            f"{len(result['non_self_loops'])} non-self-loop type(s), and "
+            f"{len(result['repeated_patterns'])} repeated-pattern type(s)."
         )
 
         if caller == "cli":
@@ -1355,6 +1399,9 @@ class Analyser(SiestaModule):
             grouping_value=self.analyser_config.get("grouping_value"),
             zscore_threshold=self.analyser_config.get("zscore_threshold", 3.5),
             top_k=self.analyser_config.get("top_k"),
+            support_threshold=self.analyser_config.get("support_threshold", 0.0),
+            sigma_multiplier=self.analyser_config.get("sigma_multiplier", 3.0),
+            order_by=self.analyser_config.get("order_by", "impact_score"),
         )
 
         output_path = self.analyser_config["output_path"] + ".csv"
