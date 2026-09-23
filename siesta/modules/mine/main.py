@@ -98,6 +98,21 @@ class RuleTraceQueryConfig(BaseModel):
     output_format: str = Field("json", description="'json' (default) returns the matched rules and their traces inline; 'csv' returns a CSV file download")
 
 
+UNORDERED_TEMPLATES: tuple[str, ...] = ("coexistence", "choice", "exclusive_choice")
+VIOLATION_MODES: tuple[str, ...] = ("XOR", "NAND", "NOR")
+
+
+class ViolationQueryConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    log_name: str = Field("example_log", description="Name of the indexed log")
+    storage_namespace: str = Field(default_factory=lambda: get_config_value("storage_namespace_default", "siesta"), description="Storage namespace")
+    source: str = Field(..., description="Source activity of the rule")
+    target: str = Field(..., description="Target activity of the rule")
+    template: str | None = Field(None, description=f"Restrict to one unordered template: {list(UNORDERED_TEMPLATES)}. null = all applicable")
+    mode: str = Field("XOR", description="Violation mode: 'XOR' (activated but not fulfilled), 'NAND' (not fulfilled), 'NOR' (not activated)")
+    output_format: str = Field("json", description="'json' (default) returns the violations inline; 'csv' returns a CSV file download")
+
+
 class Mining(SiestaModule):
         
     name = "miner"
@@ -120,6 +135,7 @@ class Mining(SiestaModule):
             "run": ('POST', self.api_run),
             "constraints": ('POST', self.api_constraints),
             "traces": ('POST', self.api_traces),
+            "violations": ('POST', self.api_violations),
         }
 
     def startup(self):
@@ -437,6 +453,131 @@ class Mining(SiestaModule):
         }
 
 
+    def api_violations(self, query_config: Annotated[ViolationQueryConfig, Body(openapi_examples={
+        "coexistence_xor": {
+            "summary": "Traces that activate coexistence(A,B) but do not fulfill it",
+            "value": {
+                "log_name": "example_log",
+                "source": "A",
+                "target": "B",
+                "template": "coexistence",
+                "mode": "XOR",
+                "output_format": "json",
+            },
+        },
+        "nand": {
+            "summary": "All traces not fulfilling any unordered rule between A and B",
+            "value": {
+                "log_name": "example_log",
+                "source": "A",
+                "target": "B",
+                "mode": "NAND",
+                "output_format": "json",
+            },
+        },
+    })]) -> Any:
+        """Return traces that violate mined unordered rule(s) for a given activity pair.
+
+        - **XOR** — activated but not fulfilled: the trace contains one of the two
+          activities but not the other.
+        - **NAND** — not fulfilled: every trace that does not satisfy the constraint.
+        - **NOR** — not activated: the trace contains neither activity.
+
+        Currently limited to unordered constraints (coexistence, choice, exclusive_choice).
+
+        **Config fields:**
+        - `log_name` *(str, default: `"example_log"`)* — name of the indexed log. **Required.**
+        - `storage_namespace` *(str, default: system config `storage_namespace_default`)* — storage namespace.
+        - `source` *(str)* — source activity of the rule. **Required.**
+        - `target` *(str)* — target activity of the rule. **Required.**
+        - `template` *(str, optional)* — one of `"coexistence"`, `"choice"`, `"exclusive_choice"`.
+            `null` checks every unordered template.
+        - `mode` *(str, default: `"XOR"`)* — violation mode: `"XOR"`, `"NAND"`, or `"NOR"`.
+        - `output_format` *(str, default: `"json"`)* — `"json"` or `"csv"`.
+        """
+        logger.info(f"{self.name} is fetching violations via API request: {query_config}")
+
+        self.siesta_config = get_system_config()
+        self.storage = get_storage_manager()
+
+        # Debugging
+        if query_config.template is not None and query_config.template not in UNORDERED_TEMPLATES:
+            return {"code": 400, "message": f"Invalid template '{query_config.template}'. Violations are only supported for unordered templates: {list(UNORDERED_TEMPLATES)}."}
+
+        mode = (query_config.mode or "XOR").upper()
+        if mode not in VIOLATION_MODES:
+            return {"code": 400, "message": f"Invalid mode '{query_config.mode}'. Valid options are: {list(VIOLATION_MODES)}."}
+
+        output_format = (query_config.output_format or "json").lower()
+        if output_format not in ("json", "csv"):
+            return {"code": 400, "message": f"Invalid output_format '{query_config.output_format}'. Valid options are: ['json', 'csv']."}
+
+        if not self.storage.log_exists({"log_name": query_config.log_name, "storage_namespace": query_config.storage_namespace}):
+            message = f"Log '{query_config.log_name}' does not exist in namespace '{query_config.storage_namespace}'. Run preprocessing first."
+            logger.error(message)
+            return {"code": 404, "message": message}
+
+        metadata = MetaData(
+            storage_namespace=query_config.storage_namespace,
+            log_name=query_config.log_name,
+            storage_type=getattr(query_config, "storage_type", "s3"),
+        )
+        metadata = self.storage.read_metadata_table(metadata)
+
+
+        # Update mined if it doesn't exist
+        mined_now = self._mine_missing_categories(query_config, metadata, ["unordered"])
+        if mined_now:
+            metadata = self.metadata
+
+        # Apothikevontai alphabetically
+        source, target = sorted([query_config.source, query_config.target])
+
+        requested_templates = [query_config.template] if query_config.template else list(UNORDERED_TEMPLATES)
+        violations = self._collect_violations(metadata, source, target, requested_templates, mode)
+        all_trace_ids = sorted({tid for v in violations for tid in v["violating_trace_ids"]})
+
+        logger.info(
+            f"Found {len(all_trace_ids)} distinct violating trace(s) across {len(violations)} template(s) for "
+            f"source '{source}' target '{target}' mode '{mode}' of log '{query_config.log_name}'."
+        )
+
+
+        # Make output
+        if output_format == "csv":
+            columns = ["template", "source", "target", "mode", "violation_count", "violating_trace_ids"]
+            download_name = re.sub(r"[^A-Za-z0-9._-]", "_", f"{query_config.log_name}_{source}_{target}_violations")
+            with tempfile.NamedTemporaryFile("w", newline="", suffix=".csv", prefix=download_name + "_", delete=False) as f:
+                writer = csv.DictWriter(f, fieldnames=columns)
+                writer.writeheader()
+                for v in violations:
+                    row = {col: v.get(col) for col in columns}
+                    row["mode"] = mode
+                    row["violating_trace_ids"] = "|".join(v["violating_trace_ids"])
+                    writer.writerow(row)
+                output_path = f.name
+            logger.info(f"Violations written to {output_path}.")
+            return FileResponse(
+                output_path,
+                media_type="text/csv",
+                filename=download_name + ".csv",
+                background=BackgroundTask(self._discard_output_file, output_path),
+            )
+
+        return {
+            "code": 200,
+            "log_name": query_config.log_name,
+            "storage_namespace": query_config.storage_namespace,
+            "source": source,
+            "target": target,
+            "mode": mode,
+            "mined_now": mined_now,
+            "violation_count": len(all_trace_ids),
+            "trace_ids": all_trace_ids,
+            "violations": violations,
+        }
+
+
     def cli_run(self, args: Any, **kwargs: Any) -> Any:
         """
         Entry point for Mining via the command line.
@@ -538,7 +679,7 @@ class Mining(SiestaModule):
         return list(CONSTRAINT_CATEGORIES), None
 
 
-    def _mine_missing_categories(self, query_config: ConstraintQueryConfig, metadata: MetaData, categories: list[str]) -> list[str]:
+    def _mine_missing_categories(self, query_config: ConstraintQueryConfig | RuleTraceQueryConfig | ViolationQueryConfig, metadata: MetaData, categories: list[str]) -> list[str]:
         """
         Mine the requested categories that hold no constraints in storage yet.
 
@@ -719,6 +860,71 @@ class Mining(SiestaModule):
             result.append(rule)
         result.sort(key=lambda r: (r["category"], r["template"] or "", r["source"] or "", r["target"] or ""))
         return result
+
+
+    def _collect_violations(self, metadata: MetaData, source: str, target: str, templates: list[str], mode: str) -> list[Dict[str, Any]]:
+        """
+        Find traces that violate unordered rules for a given activity pair.
+
+        :param metadata: metadata of the queried log.
+        :param source: source activity (alphabetically first).
+        :param target: target activity (alphabetically second).
+        :param templates: unordered templates whose violations to compute.
+        :param mode: one of 'XOR', 'NAND', 'NOR'.
+        :return: one dict per template with violation_count and sorted violating_trace_ids.
+        """
+        activity_index = self.storage.read_activity_index(metadata=metadata)
+        all_traces = activity_index.select("trace_id").distinct()
+        traces_with_source = activity_index.where(F.col("activity") == F.lit(source)).select("trace_id").distinct()
+        traces_with_target = activity_index.where(F.col("activity") == F.lit(target)).select("trace_id").distinct()
+        traces_with_both = traces_with_source.intersect(traces_with_target)
+        traces_with_either = traces_with_source.union(traces_with_target).distinct()
+        traces_with_neither = all_traces.subtract(traces_with_either)
+        traces_with_xor = traces_with_either.subtract(traces_with_both)
+
+        violation_map = {
+            "coexistence": {
+                "XOR": traces_with_xor,
+                "NAND": all_traces.subtract(traces_with_both),
+                "NOR": traces_with_neither,
+            },
+            "exclusive_choice": {
+                "XOR": traces_with_both,
+                "NAND": traces_with_both.union(traces_with_neither),
+                "NOR": traces_with_neither,
+            },
+            "choice": {
+                "XOR": None,
+                "NAND": traces_with_neither,
+                "NOR": traces_with_neither,
+            },
+        }
+
+        results = []
+        for tpl in templates:
+            violations_df = violation_map.get(tpl, {}).get(mode)
+            if violations_df is None:
+                results.append({
+                    "template": tpl,
+                    "source": source,
+                    "target": target,
+                    "violation_count": 0,
+                    "violating_trace_ids": [],
+                })
+                continue
+
+            trace_ids = sorted(
+                row["trace_id"] for row in violations_df.toLocalIterator(prefetchPartitions=True)
+            )
+            results.append({
+                "template": tpl,
+                "source": source,
+                "target": target,
+                "violation_count": len(trace_ids),
+                "violating_trace_ids": trace_ids,
+            })
+
+        return results
 
 
     @staticmethod

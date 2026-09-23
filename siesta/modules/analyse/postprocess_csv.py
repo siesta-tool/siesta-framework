@@ -143,7 +143,7 @@ def parse_args(args):
 def build_rules_html(header, rows, *, src_name="rules.csv", wanted=None,
                       country_filter=True, countries_path=DEFAULT_COUNTRIES,
                       traces=None, log_name=None, storage_namespace=None,
-                      trace_api=None):
+                      trace_api=None, violation_api=None):
     """Build the self-contained rules HTML viewer from an already-parsed rules table.
 
     header/rows mirror csv.reader() output (rows are lists of raw field strings),
@@ -282,15 +282,19 @@ def build_rules_html(header, rows, *, src_name="rules.csv", wanted=None,
             tr_off[k], prev = tr_off[k] - prev, tr_off[k]
         payload["traces"] = {"file": traces.get("file", ""), "size": traces.get("size", 0),
                              "off": tr_off, "len": tr_len, "n": tr_n}
+    has_viol_api = bool(has_trace_api and violation_api)
     if has_trace_api:
         payload["api"] = {"url": trace_api, "log_name": log_name,
                           "storage_namespace": storage_namespace}
+        if has_viol_api:
+            payload["api"]["violation_url"] = violation_api
     data_json = json.dumps(payload, separators=(",", ":"))
 
     html = (HTML_TEMPLATE
             .replace("__SRC__", src_name)
             .replace("__HASTR__", "true" if has_traces else "false")
             .replace("__HASTRACEAPI__", "true" if has_trace_api else "false")
+            .replace("__HASVIOLAPI__", "true" if has_viol_api else "false")
             .replace("__HASCONF__", "true" if has_conf else "false")
             .replace("__HASINT__", "true" if has_int else "false")
             .replace("__DATA__", data_json))
@@ -526,10 +530,11 @@ td.copyable.copied::after{content:'Copied';position:absolute;top:4px;right:8px;f
 .trace-toggle:hover{border-color:var(--accent);color:var(--accent)}
 .trace-toggle .chev{display:inline-block;font-size:9px;transition:transform .15s}
 .trace-toggle.open .chev{transform:rotate(90deg)}
-.rule-toggle{background:var(--surface2);border:1px solid var(--bd-em);border-radius:20px;padding:2px 10px;font-family:var(--mono);font-size:12px;color:var(--text-sub);cursor:pointer;transition:border-color .15s,color .15s}
-.rule-toggle:hover{border-color:var(--accent);color:var(--accent)}
-.rule-toggle .chev{display:inline-block;font-size:9px;transition:transform .15s}
-.rule-toggle.open .chev{transform:rotate(90deg)}
+.rule-toggle,.viol-toggle{background:var(--surface2);border:1px solid var(--bd-em);border-radius:20px;padding:2px 10px;font-family:var(--mono);font-size:12px;color:var(--text-sub);cursor:pointer;transition:border-color .15s,color .15s}
+.rule-toggle:hover,.viol-toggle:hover{border-color:var(--accent);color:var(--accent)}
+.rule-toggle .chev,.viol-toggle .chev{display:inline-block;font-size:9px;transition:transform .15s}
+.rule-toggle.open .chev,.viol-toggle.open .chev{transform:rotate(90deg)}
+.viol-mode{font-family:var(--mono);font-size:11px;padding:1px 4px;border:1px solid var(--bd-em);border-radius:4px;background:var(--surface2);color:var(--text-sub);vertical-align:middle}
 tr.trace-detail td{background:var(--surface2);padding:10px 14px 14px}
 .tracebox-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
 .tracebox-head span{font-size:11px;font-weight:500;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em}
@@ -657,8 +662,11 @@ if(TR){
 // keyed by the row's own source / target / template strings.
 const API=D.api||null;
 const HAS_TRACE_API=__HASTRACEAPI__;
+const VIOL_URL=API&&API.violation_url?API.violation_url:null;
+const HAS_VIOL_API=__HASVIOLAPI__;
 // stash each row's own index so a filtered/sorted view row can address its rule
 if(HAS_TRACE_API) for(let i=0;i<ROWS.length;i++) ROWS[i][7]=i;
+if(HAS_VIOL_API) for(let i=0;i<ROWS.length;i++) ROWS[i][8]=i;
 // labels are stored "rule§value"; the value is the attribute value after the
 // first § marker. Split once per label so the filter loop and renderer never
 // re-parse. Display shows the marker as " = ".
@@ -694,6 +702,7 @@ function escAttr(s){return s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'
   if(HAS_INT) cols.push(['Interest',5]);
   if(HAS_TRACES) cols.push(['Traces',6]);
   if(HAS_TRACE_API) cols.push(['Traces',7]);
+  if(HAS_VIOL_API) cols.push(['Violations',8]);
   colCount=cols.length;
   $('head').innerHTML=cols.map(c=>'<th data-c="'+c[1]+'">'+c[0]+' <span class="arrow" data-a="'+c[1]+'"></span></th>').join('');
 })();
@@ -841,6 +850,59 @@ function bindRuleApiToggle(){
   });
 }
 if(HAS_TRACE_API) bindRuleApiToggle();
+
+function bindViolApiToggle(){
+  $('tbody').addEventListener('click',e=>{
+    const btn=e.target.closest('.viol-toggle');
+    if(!btn) return;
+    const tr=btn.closest('tr');
+    const next=tr.nextElementSibling;
+    if(next && next.classList.contains('trace-detail')){
+      next.remove(); btn.classList.remove('open'); return;
+    }
+    document.querySelectorAll('tr.trace-detail').forEach(d=>d.remove());
+    document.querySelectorAll('.viol-toggle.open').forEach(b=>b.classList.remove('open'));
+    document.querySelectorAll('.rule-toggle.open').forEach(b=>b.classList.remove('open'));
+    const r=ROWS[parseInt(btn.dataset.vk)];
+    const td_parent=btn.closest('td');
+    const sel=td_parent.querySelector('.viol-mode');
+    const mode=sel?sel.value:'XOR';
+    const body={log_name:API.log_name,storage_namespace:API.storage_namespace,
+                source:LAB[r[1]],target:LAB[r[2]],template:TNAME[r[0]],mode:mode};
+    const det=document.createElement('tr');
+    det.className='trace-detail';
+    const td=document.createElement('td');
+    td.colSpan=colCount;
+    td.innerHTML='<div class="tracebox-head"><span>violating trace id(s) ['+esc(mode)+']</span>'+
+      '<button type="button" class="copybtn" disabled>Copy</button></div><div class="tracelist">Loading…</div>';
+    const list=td.querySelector('.tracelist'), copy=td.querySelector('.copybtn'),
+          head=td.querySelector('.tracebox-head span');
+    det.appendChild(td);
+    tr.after(det);
+    btn.classList.add('open');
+    fetch(VIOL_URL,{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(body)})
+      .then(r=>r.json().then(j=>({ok:r.ok,j:j})))
+      .then(res=>{
+        const j=res.j||{};
+        if(!res.ok || (j.code && j.code>=400)){
+          list.textContent=j.message||j.detail||'Request failed.';
+          return;
+        }
+        const ids=j.trace_ids||[];
+        const n=(j.violation_count!=null?j.violation_count:ids.length);
+        head.textContent=n.toLocaleString()+' violating trace id(s) ['+mode+']';
+        const text=ids.join(', ');
+        list.textContent=text||'(no violations)';
+        if(text){
+          copy.disabled=false;
+          copy.addEventListener('click',ev=>copyText(text,ev.currentTarget));
+        }
+      })
+      .catch(()=>{ list.textContent='Could not reach the API.'; });
+  });
+}
+if(HAS_VIOL_API) bindViolApiToggle();
 
 // the page cannot open a path by itself - a browser only reads a file the user
 // hands it - so the CSV is linked once per session and held for the slices. The
@@ -1000,7 +1062,11 @@ function render(){
     } else if(HAS_TRACE_API){
       traceCell='<td class="num"><button type="button" class="rule-toggle" data-rk="'+r[7]+'">traces <span class="chev">&#9656;</span></button></td>';
     }
-    h+='<tr><td><span class="tag tg'+(r[0]%8)+'">'+esc(TNAME[r[0]])+'</span></td><td class="copyable" title="Click to copy">'+esc(LAB_DISP[r[1]])+'</td><td class="copyable" title="Click to copy">'+esc(LAB_DISP[r[2]])+'</td><td class="sup">'+fmt(r[3])+'</td>'+(HAS_CONF?'<td class="sup">'+fmt(r[4])+'</td>':'')+(HAS_INT?'<td class="sup">'+fmt(r[5])+'</td>':'')+traceCell+'</tr>';
+    let violCell='';
+    if(HAS_VIOL_API){
+      violCell='<td class="num"><select class="viol-mode" data-vk="'+r[8]+'"><option value="XOR">XOR</option><option value="NAND">NAND</option><option value="NOR">NOR</option></select> <button type="button" class="viol-toggle" data-vk="'+r[8]+'">violations <span class="chev">&#9656;</span></button></td>';
+    }
+    h+='<tr><td><span class="tag tg'+(r[0]%8)+'">'+esc(TNAME[r[0]])+'</span></td><td class="copyable" title="Click to copy">'+esc(LAB_DISP[r[1]])+'</td><td class="copyable" title="Click to copy">'+esc(LAB_DISP[r[2]])+'</td><td class="sup">'+fmt(r[3])+'</td>'+(HAS_CONF?'<td class="sup">'+fmt(r[4])+'</td>':'')+(HAS_INT?'<td class="sup">'+fmt(r[5])+'</td>':'')+traceCell+violCell+'</tr>';
   });
   $('tbody').innerHTML=h;
   $('count').textContent=view.length.toLocaleString()+' rules match'+(view.length?'  (showing '+(start+1)+'–'+(start+slice.length)+')':'');

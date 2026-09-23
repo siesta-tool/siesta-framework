@@ -11,6 +11,7 @@
   "drop_unique": true,
   "return_csv": true,
   "output_path": "output/form_log",
-  "mine": false,
-  "clear_existing": false
+  "mine": true,
+  "clear_existing": true,
+  "mined_format": "html"
 }

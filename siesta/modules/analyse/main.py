@@ -138,6 +138,7 @@ class FormAnalysisConfig(BaseModel):
     clear_existing: bool = Field(False, description="mine=true only: drop and rebuild any existing indexed data for log_name before indexing")
     mined_format: str = Field("json", description="mine=true only: format of the mined constraints - 'json', 'csv' (the rules file as-is), or 'html' (interactive report)")
     include_trace_lists: bool = Field(True, description="mine=true only: include the supporting trace_ids alongside each mined constraint")
+    api_base_url: str | None = Field(None, description="Base URL of the Siesta API for the HTML report (e.g. 'http://localhost:8000'). null = relative paths (same origin)")
 
 
 import logging
@@ -999,17 +1000,16 @@ class Analysing(SiestaModule):
             return mined_path
 
         if mined_format == "html":
-            # the report keeps log_name / storage_namespace as constants and, on a rule
-            # click, calls the miner's /mining/traces with that row's source/target for
-            # the backing traces. "/mining/traces" is router.py's "/{module}/{endpoint}"
-            # scheme, module = the Mining class name lowercased.
+            api_base = (self.analyser_config.get("api_base_url") or "").rstrip("/")
+            module_prefix = f"/{Mining.__name__.lower()}"
             html, _stats = build_rules_html(
                 mined_header, mined_rows, src_name=Path(mined_path).name,
                 log_name=self.analyser_config.get("log_name"),
                 storage_namespace=self.analyser_config.get(
                     "storage_namespace", get_config_value("storage_namespace_default", "siesta")
                 ),
-                trace_api=f"/{Mining.__name__.lower()}/traces",
+                trace_api=f"{api_base}{module_prefix}/traces",
+                violation_api=f"{api_base}{module_prefix}/violations",
             )
             if caller == "api":
                 return HTMLResponse(html)
