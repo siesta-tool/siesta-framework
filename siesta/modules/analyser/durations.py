@@ -3,6 +3,8 @@ from pyspark.sql.window import Window
 from typing import Optional, Union
 import logging
 
+from siesta.modules.analyser.duration_format import add_human_duration_columns
+
 logger = logging.getLogger(__name__)
 
 
@@ -85,7 +87,10 @@ def compute_activity_durations(
         Spark DataFrame with columns:
             [<group_col(s)>,] activity, avg_duration_sec, min_duration_sec,
             max_duration_sec, occurrence_count.
-            Group columns are present only when per_group=True.
+            Group columns are present only when per_group=True. Each
+            *_duration_sec column is followed by a human-readable
+            *_duration_human companion (e.g. "2.5h"); see
+            duration_format.add_human_duration_columns.
     """
     # Always resolve group columns - needed for per_group breakdown and/or filtering
     events_df, group_cols = _resolve_group_cols(events_df, grouping_key)
@@ -129,7 +134,7 @@ def compute_activity_durations(
     if per_group:
         result_df = _rename_grp_cols(result_df, group_cols)
 
-    return result_df
+    return add_human_duration_columns(result_df)
 
 
 def compute_group_durations(
@@ -151,8 +156,10 @@ def compute_group_durations(
         grouping_value: Optional value(s) to restrict the output to specific groups.
 
     Returns:
-        Spark DataFrame with columns: <group_key(s)>, duration_sec -
-        one row per group, ordered by the primary group column.
+        Spark DataFrame with columns: <group_key(s)>, duration_sec,
+        duration_human - one row per group, ordered by the primary group
+        column. duration_human is the human-readable rendering of duration_sec
+        (e.g. "2.5h"); see duration_format.add_human_duration_columns.
     """
     events_df, group_cols = _resolve_group_cols(events_df, grouping_key)
 
@@ -178,5 +185,6 @@ def compute_group_durations(
         )
 
     result_df = _rename_grp_cols(result_df, group_cols)
+    result_df = add_human_duration_columns(result_df)
     clean_primary = group_cols[0][5:] if group_cols[0].startswith("_grp_") else group_cols[0]
     return result_df.orderBy(clean_primary)

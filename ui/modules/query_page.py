@@ -2,7 +2,7 @@
 
 import streamlit as st
 
-from common import api_post, format_response
+from common import api_post, format_response, log_options, namespace_options
 
 
 def render_query_response(response: dict, method: str) -> None:
@@ -131,9 +131,12 @@ def render(base_url: str) -> None:
     if method == "exploration":
         explore_mode = st.selectbox("Explore mode", ["accurate", "fast", "hybrid"], index=0)
 
+    # Kept outside the form so picking a namespace immediately refreshes the log
+    # dropdown's options - form widgets only rerun the script on submit.
+    storage_namespace = st.selectbox("Storage namespace", namespace_options(), accept_new_options=True)
+    log_name = st.selectbox("Log name", log_options(storage_namespace), accept_new_options=True)
+
     with st.form("query_form"):
-        log_name = st.text_input("Log name", "example_log")
-        storage_namespace = st.text_input("Storage namespace", "siesta")
         pattern = st.text_input("Query pattern", "A B")
         support_threshold = st.number_input(
             "Support threshold",

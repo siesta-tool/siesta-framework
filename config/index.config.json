@@ -1,6 +1,6 @@
 {
-  "log_name": "test",
-  "log_path": "datasets/test.csv",
+  "log_name": "test_quick",
+  "log_path": "datasets/test_quick.csv",
   "storage_namespace": "siesta",
   "overwrite_data": false,
   "enable_streaming": false,
@@ -17,9 +17,9 @@
     "csv": {
       "activity": "activity",
       "trace_id": "trace_id",
-      "position": null,
+      "position": "position",
       "start_timestamp": "timestamp",
-      "attributes" : ["*"]
+      "attributes" : ["resource", "cost"]
     },
     "json": {
         "activity": "activity",
@@ -29,5 +29,6 @@
     }
   },
   "trace_level_fields": ["trace_id"],
-  "timestamp_fields": ["start_timestamp"]
+  "timestamp_fields": ["start_timestamp"],
+  "composite_separator": "::"
 }

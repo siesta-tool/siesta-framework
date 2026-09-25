@@ -139,7 +139,7 @@ def preprocessed(siesta_app, preprocess_config):
     preprocessor = Indexing()
     preprocessor.siesta_config = siesta_app.config
     preprocessor.storage = storage
-    preprocessor._load_preprocess_config(preprocess_config)
+    preprocessor._load_index_config(preprocess_config)
     preprocessor.storage.initialize_db(preprocessor.index_config)
     _force_clean_tables(TEST_LOG_NAME, TEST_NAMESPACE)
     preprocessor.begin_builders(caller="cli")
@@ -197,7 +197,7 @@ def preprocessed_incremental(siesta_app):
     p1 = Indexing()
     p1.siesta_config = siesta_app.config
     p1.storage = storage
-    p1._load_preprocess_config(b1_config)
+    p1._load_index_config(b1_config)
     p1.storage.initialize_db(p1.index_config)
     _force_clean_tables(INCR_LOG_NAME, TEST_NAMESPACE)
     p1.begin_builders(caller="cli")
@@ -208,7 +208,7 @@ def preprocessed_incremental(siesta_app):
     p2 = Indexing()
     p2.siesta_config = siesta_app.config
     p2.storage = storage
-    p2._load_preprocess_config(b2_config)
+    p2._load_index_config(b2_config)
     p2.storage.initialize_db(p2.index_config)
     p2.begin_builders(caller="cli")
 
@@ -268,7 +268,7 @@ def query_preprocessed(siesta_app):
     preprocessor = Indexing()
     preprocessor.siesta_config = siesta_app.config
     preprocessor.storage = storage
-    preprocessor._load_preprocess_config(config)
+    preprocessor._load_index_config(config)
     preprocessor.storage.initialize_db(preprocessor.index_config)
     _force_clean_tables(QUERY_LOG_NAME, TEST_NAMESPACE)
     preprocessor.begin_builders(caller="cli")

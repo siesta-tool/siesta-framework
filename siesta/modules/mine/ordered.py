@@ -4,6 +4,7 @@ import pandas as pd
 from pyspark.sql import DataFrame
 from siesta.model.StorageModel import ConstraintEntry, MetaData
 from siesta.core.storageFactory import get_storage_manager
+from siesta.modules.mine.pandas_udf_utils import sanitize_udf_output
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +135,10 @@ def _mine_trace_pandas(pdf: pd.DataFrame) -> pd.DataFrame:
             if is_not_chain_succession:
                 rows.append(("not_chain_succession", src_act, trace_id, tgt_act, None))
 
-    return pd.DataFrame(rows, columns=["template", "source", "trace_id", "target", "occurrences"])
+    return sanitize_udf_output(
+        pd.DataFrame(rows, columns=["template", "source", "trace_id", "target", "occurrences"]),
+        ConstraintEntry.get_schema(),
+    )
 
 
 def discover_ordered(evolved_df: DataFrame, metadata: MetaData) -> DataFrame:

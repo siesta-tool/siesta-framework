@@ -21,6 +21,19 @@ services:
       - SPARK_USER=spark
       - MPLCONFIGDIR=/tmp/matplotlib
       - SPARK_IVY_DIR=/tmp/.ivy2
+      # Optional distributed-execution tuning (see sparkManager.py). Commented out so
+      # local/non-distributed runs are unaffected; values below are copied from
+      # docker-compose-com.yml and are sized for that cluster's hardware, so adjust
+      # them for this machine's workers before uncommenting.
+      # - SPARK_DRIVER_HOST=siesta-api
+      # - SPARK_DRIVER_PORT=7078
+      # - SPARK_BLOCKMANAGER_PORT=7079
+      # - SPARK_DRIVER_MEMORY=24g
+      # - SPARK_EXECUTOR_MEMORY=7g
+      # - SPARK_EXECUTOR_CORES=2
+      # - SPARK_EXECUTOR_MEMORY_OVERHEAD=1536m
+      # - SPARK_CORES_MAX=18
+      # - SPARK_SHUFFLE_PARTITIONS=72
     volumes:
       - .:/workspace
       - spark-ivy-cache:/tmp/.ivy2
@@ -43,22 +56,20 @@ services:
       context: siesta/dockerbase/Spark
       dockerfile: Spark.dockerfile
     environment:
-      - SPARK_MODE=master
-      - SPARK_MASTER_MEMORY=8G
-      - SPARK_MASTER_CORES=12
-      - SPARK_RPC_AUTHENTICATION_ENABLED=no
-      - SPARK_RPC_ENCRYPTION_ENABLED=no
-      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
-      - SPARK_SSL_ENABLED=no
       - SPARK_USER=spark
       - LOGS_PATH=/tmp/spark-events
       - RESULTS_PATH=/tmp/output/
-      - SPARK_MASTER_WEBUI_PORT=8085
       - SPARK_SUBMIT_OPTS=-Dlog4j.configurationFile=/opt/spark/conf/log4j2.properties
-      - PYSPARK_PYTHON=python3.12
-    command: >
-      /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
-      --host spark-master --port 7077 --webui-port 8085
+      - PYSPARK_PYTHON=/usr/bin/python3.12
+    command:
+      - /opt/spark/bin/spark-class
+      - org.apache.spark.deploy.master.Master
+      - --host
+      - spark-master
+      - --port
+      - '7077'
+      - --webui-port
+      - '8085'
     networks:
       - siesta-net
     ports:
@@ -81,21 +92,17 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
-        - SPARK_MODE=worker
-        - SPARK_MASTER_URL=spark://spark-master:7077
-        - SPARK_WORKER_MEMORY=10G
-        - SPARK_WORKER_CORES=6
-        - SPARK_RPC_AUTHENTICATION_ENABLED=no
-        - SPARK_RPC_ENCRYPTION_ENABLED=no
-        - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
-        - SPARK_SSL_ENABLED=no
         - SPARK_USER=spark
         - SPARK_SUBMIT_OPTS=-Dlog4j.configurationFile=/opt/spark/conf/log4j2.properties
-        - PYSPARK_PYTHON=python3.12
-        - SPARK_WORKER_WEBUI_PORT=8082
-    command: >
-      /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker
-      spark://spark-master:7077 --webui-port 8082
+        - PYSPARK_PYTHON=/usr/bin/python3.12
+        - SPARK_WORKER_CORES=${SPARK_WORKER_CORES:-12}
+        - SPARK_WORKER_MEMORY=${SPARK_WORKER_MEMORY:-12G}
+    command:
+      - /opt/spark/bin/spark-class
+      - org.apache.spark.deploy.worker.Worker
+      - spark://spark-master:7077
+      - --webui-port
+      - '8082'
     ports:
       - '8082:8082'
     networks:
@@ -115,21 +122,17 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
-        - SPARK_MODE=worker
-        - SPARK_MASTER_URL=spark://spark-master:7077
-        - SPARK_WORKER_MEMORY=10G
-        - SPARK_WORKER_CORES=6
-        - SPARK_RPC_AUTHENTICATION_ENABLED=no
-        - SPARK_RPC_ENCRYPTION_ENABLED=no
-        - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
-        - SPARK_SSL_ENABLED=no
         - SPARK_USER=spark
         - SPARK_SUBMIT_OPTS=-Dlog4j.configurationFile=/opt/spark/conf/log4j2.properties
-        - PYSPARK_PYTHON=python3.12
-        - SPARK_WORKER_WEBUI_PORT=9084
-    command: >
-      /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker
-      spark://spark-master:7077 --webui-port 9084
+        - PYSPARK_PYTHON=/usr/bin/python3.12
+        - SPARK_WORKER_CORES=${SPARK_WORKER_CORES:-12}
+        - SPARK_WORKER_MEMORY=${SPARK_WORKER_MEMORY:-12G}
+    command:
+      - /opt/spark/bin/spark-class
+      - org.apache.spark.deploy.worker.Worker
+      - spark://spark-master:7077
+      - --webui-port
+      - '8083'
     ports:
       - '9084:9084'
     networks:

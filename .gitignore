@@ -219,17 +219,22 @@ __marimo__/
 *.xes
 **/output/*
 
-acc*.*
-com*.*
+acc.json
+com*.json
 docker-compose-com.yml
 nginx.conf
 
-**/eval/results*
-**/tests/eval/results/**
+datasets/los*
+datasets/acc*
 
-.mr_session
-fig*
-*output*
-*.csv
-*.pdf
-siesta/modules/compare/time_bottlenecks.json
+**/modules/compare/acc*
+
+.claude/
+
+demo-eval/*csv
+demo-eval/*jsonl
+
+bpic*
+config/los_aug_workflow.json
+
+analysis/*

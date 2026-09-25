@@ -272,14 +272,19 @@ def _build_dsl_attr_conditions(positive_event_names: list) -> List:
         for constraint in activity_node.constraints:
             attr = constraint.name
             val  = constraint.value
- 
+            neq  = (getattr(constraint, "op", "=") == "!=")
+
             if isinstance(val, StringLiteral):
-                # Unary condition: event[attr] == literal
+                # Unary condition: event[attr] (==|!=) literal
                 literal = val.value
+                if neq:
+                    lit_rel = lambda v, lit=literal: v != lit
+                else:
+                    lit_rel = lambda v, lit=literal: v == lit
                 conditions.append(
                     SimpleCondition(
                         Variable(own_name, lambda x, a=attr: x.get(a)),
-                        relation_op=lambda v, lit=literal: v == lit,
+                        relation_op=lit_rel,
                     )
                 )
  
@@ -310,22 +315,24 @@ def _build_dsl_attr_conditions(positive_event_names: list) -> List:
                 _, ref_name = positive_event_names[ref_id - 1]
                 op     = val.op      # '+' | '-' | None
                 offset = val.offset or 0
- 
+
                 if op == "+":
-                    def rel(rv, ov, off=offset):
+                    def rel(rv, ov, off=offset, neq=neq):
                         try:
-                            return float(ov) == float(rv) + off
+                            eq = float(ov) == float(rv) + off
                         except (TypeError, ValueError):
                             return False
+                        return (not eq) if neq else eq
                 elif op == "-":
-                    def rel(rv, ov, off=offset):
+                    def rel(rv, ov, off=offset, neq=neq):
                         try:
-                            return float(ov) == float(rv) - off
+                            eq = float(ov) == float(rv) - off
                         except (TypeError, ValueError):
                             return False
+                        return (not eq) if neq else eq
                 else:
-                    rel = lambda rv, ov: ov == rv
- 
+                    rel = (lambda rv, ov: ov != rv) if neq else (lambda rv, ov: ov == rv)
+
                 conditions.append(
                     BinaryCondition(
                         Variable(ref_name, lambda x, a=attr: x.get(a)),

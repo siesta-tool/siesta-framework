@@ -16,20 +16,20 @@ COPY siesta/requirements.txt /tmp/req/siesta/requirements.txt
 COPY siesta/api/requirements.txt /tmp/req/siesta/api/requirements.txt
 COPY siesta/core/requirements.txt /tmp/req/siesta/core/requirements.txt
 COPY siesta/storage/S3/requirements.txt /tmp/req/siesta/storage/S3/requirements.txt
-COPY siesta/modules/compare/requirements.txt /tmp/req/siesta/modules/compare/requirements.txt
+COPY siesta/modules/analyser/requirements.txt /tmp/req/siesta/modules/analyser/requirements.txt
 COPY siesta/modules/index/requirements.txt /tmp/req/siesta/modules/index/requirements.txt
-COPY siesta/modules/model/requirements.txt /tmp/req/siesta/modules/model/requirements.txt
 COPY siesta/modules/mine/requirements.txt /tmp/req/siesta/modules/mine/requirements.txt
+COPY siesta/modules/query/requirements.txt /tmp/req/siesta/modules/query/requirements.txt
 
 RUN python3.12 -m pip install --prefer-binary \
       -r /tmp/req/siesta/requirements.txt \
       -r /tmp/req/siesta/api/requirements.txt \
       -r /tmp/req/siesta/core/requirements.txt \
       -r /tmp/req/siesta/storage/S3/requirements.txt \
-      -r /tmp/req/siesta/modules/compare/requirements.txt \
+      -r /tmp/req/siesta/modules/analyser/requirements.txt \
       -r /tmp/req/siesta/modules/index/requirements.txt \
-      -r /tmp/req/siesta/modules/model/requirements.txt \
-      -r /tmp/req/siesta/modules/mine/requirements.txt && \
+      -r /tmp/req/siesta/modules/mine/requirements.txt \
+      -r /tmp/req/siesta/modules/query/requirements.txt && \
     rm -rf /tmp/req
 
 COPY siesta/dockerbase/API/entrypoint.sh /usr/local/bin/siesta-api-entrypoint.sh
