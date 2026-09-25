@@ -35,6 +35,12 @@ from siesta.modules.query.parse_seql import (
 )
 
 
+# Position of an event in the list handed to OpenCEP.  OpenCEP's own
+# Event.INDEX_ATTRIBUTE_NAME is a global serial that Kleene-closure
+# AggregatedEvents also consume, so it drifts away from list positions.
+_EVENT_INDEX_KEY = "SiestaEventIndex"
+
+
 class _OpenCEPEventTypeClassifier(EventTypeClassifier):
     def get_event_type(self, event_payload):
         return event_payload["name"]
@@ -131,6 +137,9 @@ class _DSLPatternBuilder:
         # (ActivityNode, opencep_name) for each positive (non-negated) event,
         # in left-to-right traversal order - used for $N VarExpr resolution.
         self.positive_event_names: List[tuple] = []
+        # (ActivityNode, opencep_name) for each event inside a negation; their
+        # attribute constraints restrict which events are forbidden.
+        self.negated_event_names: List[tuple] = []
  
     def _next_name(self) -> str:
         name = f"e{self._counter}"
@@ -157,7 +166,9 @@ class _DSLPatternBuilder:
         if isinstance(node, ActivityNode):
             name = self._next_name()
             struct = PrimitiveEventStructure(node.label, name)
-            if not inside_negation:
+            if inside_negation:
+                self.negated_event_names.append((node, name))
+            else:
                 self.positive_event_names.append((node, name))
             return struct
  
@@ -213,6 +224,67 @@ def _has_or_dsl(node) -> bool:
     return False
 
 
+def _split_negated_or(node):
+    """
+    Rewrite ``!(b || c)`` as ``!b !c`` inside sequences.
+
+    OpenCEP cannot negate an OR, and forbidding every alternative between the
+    same neighbours is exactly the DSL's (unioned) negation semantics.  Only
+    ORs of single, unquantified activities are rewritten.
+    """
+    if isinstance(node, SeqNode):
+        elements = []
+        for element in node.elements:
+            atom = element.atom
+            if isinstance(atom, NegatedNode):
+                inner = atom.inner
+                if (isinstance(inner, OrNode) and all(
+                        len(b.elements) == 1
+                        and b.elements[0].quantifier == Quantifier.ONE
+                        and isinstance(b.elements[0].atom, ActivityNode)
+                        for b in inner.branches)):
+                    elements.extend(
+                        ElementNode(atom=NegatedNode(inner=b.elements[0].atom),
+                                    quantifier=element.quantifier)
+                        for b in inner.branches
+                    )
+                    continue
+                elements.append(element)
+            else:
+                elements.append(ElementNode(atom=_split_negated_or(atom), quantifier=element.quantifier))
+        return SeqNode(elements)
+    if isinstance(node, OrNode):
+        return OrNode([_split_negated_or(b) for b in node.branches])
+    return node
+
+
+def _drop_unanchored_negations(original_elements, combination):
+    """
+    Build one star-expanded element list, dropping negations whose anchor was
+    omitted.
+
+    A negation constrains the gap between the positive elements around it.
+    When every positive element on one of its sides was a ``*`` that this
+    alternative omits, the negation has nothing to bound on that side and
+    would otherwise turn into a leading/trailing negation over the rest of
+    the trace (``D !E D*`` must not mean "no E after D" when ``D*`` is empty).
+    Negations written at the start or end of the pattern keep their meaning.
+    """
+    is_positive = [not isinstance(e.atom, NegatedNode) for e in original_elements]
+    kept = []
+    for k, element in enumerate(combination):
+        if element is None:
+            continue
+        if not is_positive[k]:
+            left = [i for i in range(k) if is_positive[i]]
+            right = [i for i in range(k + 1, len(original_elements)) if is_positive[i]]
+            if ((left and all(combination[i] is None for i in left))
+                    or (right and all(combination[i] is None for i in right))):
+                continue
+        kept.append(element)
+    return kept
+
+
 def _expand_star_dsl(node):
     """
     Expand every STAR quantifier into two star-free alternatives:
@@ -237,7 +309,7 @@ def _expand_star_dsl(node):
 
         expanded = []
         for combination in product(*per_element):
-            elements = [element for element in combination if element is not None]
+            elements = _drop_unanchored_negations(node.elements, combination)
             if elements:
                 expanded.append(SeqNode(elements))
         return expanded or [node]
@@ -252,7 +324,7 @@ def _expand_star_dsl(node):
     return [node]
 
 
-def _build_dsl_attr_conditions(positive_event_names: list) -> List:
+def _build_dsl_attr_conditions(positive_event_names: list, negated_event_names: list = ()) -> List:
     """
     Convert DSL attribute constraints into native OpenCEP conditions.
  
@@ -262,13 +334,18 @@ def _build_dsl_attr_conditions(positive_event_names: list) -> List:
                                   positive event in left-to-right pattern order
                                   (1-based).
  
+    Constraints on negated events (``negated_event_names``) are attached the
+    same way, so only forbidden events that satisfy them block a match.  A
+    Kleene-closure variable evaluates to a list of events; a condition on it
+    must hold for every event in the closure.
+
     Constraints whose VarExpr index is out of range are silently skipped;
     callers should add a fallback post-filter if strict validation is needed.
     """
     conditions: List = []
     n = len(positive_event_names)
  
-    for own_idx, (activity_node, own_name) in enumerate(positive_event_names):
+    for activity_node, own_name in list(positive_event_names) + list(negated_event_names):
         for constraint in activity_node.constraints:
             attr = constraint.name
             val  = constraint.value
@@ -335,13 +412,22 @@ def _build_dsl_attr_conditions(positive_event_names: list) -> List:
 
                 conditions.append(
                     BinaryCondition(
-                        Variable(ref_name, lambda x, a=attr: x.get(a)),
-                        Variable(own_name, lambda x, a=attr: x.get(a)),
-                        relation_op=rel,
+                        Variable(ref_name, lambda x, a=attr: _attr_values(x, a)),
+                        Variable(own_name, lambda x, a=attr: _attr_values(x, a)),
+                        relation_op=lambda rv, ov, rel=rel: all(
+                            rel(r, o) for r in rv for o in ov
+                        ),
                     )
                 )
  
     return conditions
+
+def _attr_values(payload, attr):
+    """Attribute values of one event, or of every event of a Kleene closure."""
+    if isinstance(payload, list):
+        return [p.get(attr) for p in payload]
+    return [payload.get(attr)]
+
 
 def _has_alt(node):
     if isinstance(node, Alt):
@@ -386,6 +472,7 @@ def _build_engine_events(events):
     for i, event in enumerate(events):
         current = dict(event)
         current["ts"] = _coerce_engine_timestamp(current.get("ts"), i)
+        current[_EVENT_INDEX_KEY] = i
         engine_events.append(current)
     return engine_events
 
@@ -409,7 +496,9 @@ def _empty_result(return_split: bool):
 
 
 def _dedupe_and_sort(matches):
-    unique = {tuple(match) for match in matches}
+    # OpenCEP can bind one event to two pattern positions (e.g. ``D`` and a
+    # following ``D+`` closure); such matches are not valid occurrences.
+    unique = {tuple(match) for match in matches if len(set(match)) == len(match)}
     return [list(match) for match in sorted(unique, key=lambda item: (item[0], item[-1], item))]
 
 
@@ -546,8 +635,8 @@ def _build_gap_condition(gap_constraint, top_level_parts):
         return None
 
     return BinaryCondition(
-        Variable(start_name, lambda x: x[Event.INDEX_ATTRIBUTE_NAME]),
-        Variable(end_name, lambda x: x[Event.INDEX_ATTRIBUTE_NAME]),
+        Variable(start_name, lambda x: x[_EVENT_INDEX_KEY]),
+        Variable(end_name, lambda x: x[_EVENT_INDEX_KEY]),
         relation_op=lambda x, y, gc=gap_constraint: (
             y - x - 1 >= gc.min_gap and
             (gc.max_gap is None or y - x - 1 <= gc.max_gap)
@@ -713,7 +802,7 @@ def find_occurrences_dsl(
     # 1. Parse the DSL pattern and expand every STAR into two star-free queries:
     #    one with PLUS semantics and one with the STAR branch omitted.
     ast = parse_pattern(pattern_str)
-    expanded_asts = _expand_star_dsl(ast)
+    expanded_asts = [_split_negated_or(a) for a in _expand_star_dsl(ast)]
 
     # 2. Prepare the event stream once and reuse it across the expanded queries.
     constraint_events = _normalize_events(sequence, events)
@@ -734,7 +823,8 @@ def find_occurrences_dsl(
             timedelta(days=3650),
         )
 
-        for cond in _build_dsl_attr_conditions(builder.positive_event_names):
+        for cond in _build_dsl_attr_conditions(builder.positive_event_names,
+                                               builder.negated_event_names):
             pattern.condition.add_atomic_condition(cond)
 
         residual_constraints = _attach_native_conditions(
@@ -754,7 +844,7 @@ def find_occurrences_dsl(
         output_items = run_opencep_pattern(pattern, engine_events, preprocessing_params)
         for match in output_items:
             idxs = sorted(
-                event.payload[Event.INDEX_ATTRIBUTE_NAME]
+                event.payload[_EVENT_INDEX_KEY]
                 for event in _flatten_match_events(match.events)
             )
             if not _check_post_filters(residual_constraints, idxs, constraint_events, []):

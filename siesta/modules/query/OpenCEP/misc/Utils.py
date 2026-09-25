@@ -156,6 +156,26 @@ def merge_according_to(arr1: list, arr2: list, actual1: list, actual2: list, key
     return ret
 
 
+def _primitive_events(event):
+    """Flattens an aggregated Kleene-closure event into its primitive events."""
+    nested = getattr(event, "primitive_events", None)
+    if nested is None:
+        return [event]
+    return [p for e in nested for p in _primitive_events(e)]
+
+
+def is_sequence_ordered(events: list):
+    """
+    Returns True if every event (or aggregated Kleene-closure event) ends no later than the next one starts, and
+    no primitive event occurs twice (e.g. once on its own and once inside a neighbouring closure).
+    Comparing only the first timestamps would let a closure overlap its neighbours in a sequence.
+    """
+    if not all(events[i].max_timestamp <= events[i + 1].min_timestamp for i in range(len(events) - 1)):
+        return False
+    primitives = [p for e in events for p in _primitive_events(e)]
+    return len(set(primitives)) == len(primitives)
+
+
 def is_sorted(arr: list, key: callable = lambda x: x, secondary_key: callable = None):
     """
     Returns True if the given list is sorted with respect to the given comparator function and False otherwise.

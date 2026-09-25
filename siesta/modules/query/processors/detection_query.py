@@ -6,7 +6,7 @@ from siesta.model.StorageModel import MetaData
 from typing import Dict, Any
 from pyspark.sql import functions as F
 from pyspark.sql.functions import col
-from siesta.modules.query.parse_seql import Quantifier as SeqlQuantifier, RespondedPair, extract_info_pairs, parse_pattern, extract_responded_pairs
+from siesta.modules.query.parse_seql import Quantifier as SeqlQuantifier, RespondedPair, extract_info_pairs, parse_pattern, extract_responded_pairs, can_match_single_event, pattern_labels
 from siesta.modules.query.CEP_adapter import find_occurrences_dsl
 from siesta.modules.query.processors.predicates import build_event_keep_predicate
 import json
@@ -21,6 +21,46 @@ def detect(pattern: str, config: Dict[str, Any], metadata: MetaData):
     storage = get_storage_manager()
     support_threshold = config.get("support_threshold", 0.0)
 
+    if can_match_single_event(pattern):
+        # A single-event match involves no pair, so the pairs index cannot
+        # deliver it: hand CEP every event of the pattern's activities.
+        events_rdd = (
+            storage.read_activity_events(metadata, sorted(pattern_labels(pattern)))
+            .rdd.map(lambda r: (r.trace_id, _event(r.activity, r.position, r.start_timestamp, r.attributes)))
+            .groupByKey()
+        )
+    else:
+        events_rdd = _events_from_pairs(pattern, storage, metadata)
+
+    return (
+        events_rdd
+        .map(lambda kv: (kv[0], _first_match(pattern, kv[1])))
+        .filter(lambda result: len(result[1]) > support_threshold * metadata.trace_count if metadata.trace_count else 0)
+        .collect()
+    )
+
+
+def _event(name, position, timestamp, attributes) -> dict:
+    """An event dict as CEP expects it; attributes override the base fields."""
+    event = {"name": name, "position": position, "timestamp": timestamp}
+    if attributes:
+        event.update(attributes)
+    return event
+
+
+def _first_match(pattern: str, events) -> list:
+    """Positions of the first CEP match of ``pattern`` over one trace's events."""
+    events = sorted(events, key=lambda e: int(e["position"]))
+    positions = find_occurrences_dsl([e["name"] for e in events], pattern, events=events)
+    return [int(events[i]["position"]) for i in positions]
+
+
+def _events_from_pairs(pattern: str, storage, metadata: MetaData):
+    """
+    (trace_id, events) for the traces that survive pair pruning, with each
+    trace's events rebuilt from the fetched pair rows (responded pairs plus
+    the info pairs that make those rows deliver every event CEP may need).
+    """
     # lf optimizer
     pair_branches = set(extract_responded_pairs(pattern))
 
@@ -84,53 +124,18 @@ def detect(pattern: str, config: Dict[str, Any], metadata: MetaData):
         .repartition("trace_id")
     )
 
-    matches_df = pair_positions_df.rdd.map(lambda r: (
-            r.trace_id,
-            {
-                "source": r.source,
-                "target": r.target,
-                "source_position":    r.source_position,
-                "target_position":    r.target_position,
-                "source_timestamp":   r.source_timestamp,
-                "target_timestamp":   r.target_timestamp,
-                "source_attributes":  r.source_attributes,
-                "target_attributes":  r.target_attributes,
-            }
-        ))
-
-    def validate_trace(trace_id_rows):
+    def rows_to_events(trace_id_rows):
         trace_id, rows = trace_id_rows
-        rows = list(rows)
-
-        # Reconstruct event list (same logic as mine_trace)
+        # Reconstruct the event list (same logic as mine_trace)
         seen_positions = {}
         for r in rows:
-            for side in [("source", "source_position", "source_timestamp", "source_attributes"),
-                         ("target", "target_position", "target_timestamp", "target_attributes")]:
-                name_k, pos_k, ts_k, attr_k = side
-                pos = r[pos_k]
+            for name, pos, ts, attrs in ((r.source, r.source_position, r.source_timestamp, r.source_attributes),
+                                         (r.target, r.target_position, r.target_timestamp, r.target_attributes)):
                 if pos not in seen_positions:
-                    seen_positions[pos] = {
-                        "name":       r[name_k],
-                        "position":   pos,
-                        "timestamp":  r[ts_k],
-                    }
-                    attrs: dict = r[attr_k]
-                    if attrs:
-                        for key, value in attrs.items():
-                            seen_positions[pos][key] = value
+                    seen_positions[pos] = _event(name, pos, ts, attrs)
+        return trace_id, list(seen_positions.values())
 
-
-        events = sorted(seen_positions.values(), key=lambda e: int(e["position"]))
-
-        positions = find_occurrences_dsl(
-            [e["name"] for e in events], pattern, events=events
-        )
-
-        real_positions = [int(events[i]["position"]) for i in positions]
-        return (trace_id, real_positions)
-    
-    return matches_df.groupByKey().map(validate_trace).filter(lambda result: len(result[1]) > support_threshold * metadata.trace_count if metadata.trace_count else 0).collect()
+    return pair_positions_df.rdd.map(lambda r: (r.trace_id, r)).groupByKey().map(rows_to_events)
 
 
 def build_exact_pair_predicate(pairs_2d: set[tuple[str, str]]):

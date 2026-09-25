@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 # CEP when the event has no such attribute, while the Spark map lookup yields
 # NULL — so such constraints are never pushed down.
 _RESERVED_EVENT_KEYS = frozenset(
-    {"name", "position", "timestamp", "ts", "InternalIndexAttributeName"}
+    {"name", "position", "timestamp", "ts", "InternalIndexAttributeName", "SiestaEventIndex"}
 )
 
 

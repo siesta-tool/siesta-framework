@@ -68,10 +68,12 @@ class NegationAlgorithm:
                 positive_indices.append(index)
         return positive_indices, negative_indices
 
-    def __adjust_tree_plan_indices(self, tree_plan: TreePlanNode, pattern: Pattern):
+    def __adjust_tree_plan_indices(self, tree_plan: TreePlanNode, pattern: Pattern, under_negation: bool = False):
         """
         A recursive function that traverses the tree plan (including both positive and negative parts) and adjusts
         the leaf indices to reflect the negative structure.
+        Unary and nested nodes on the positive side carry indices in positive-only order as well, so they are
+        remapped too; nodes under a negation were already given full-pattern indices by _add_negative_part.
         """
         positive_indices, negative_indices = self.__calculate_positive_and_negative_indices(pattern)
         if isinstance(tree_plan, TreePlanLeafNode):
@@ -82,28 +84,43 @@ class NegationAlgorithm:
                 tree_plan.original_event_index = tree_plan.event_index = positive_indices[old_index]
             return
         if isinstance(tree_plan, TreePlanUnaryNode):
-            self.__adjust_tree_plan_indices(tree_plan.child, pattern)
+            if not under_negation and tree_plan.index is not None and tree_plan.index < len(positive_indices):
+                tree_plan.index = positive_indices[tree_plan.index]
+            self.__adjust_tree_plan_indices(tree_plan.child, pattern, under_negation)
             return
         if isinstance(tree_plan, TreePlanNestedNode):
-            sub_pattern = self.__find_nested_sub_pattern(tree_plan, pattern, positive_indices, negative_indices)
+            if not under_negation:
+                tree_plan.nested_event_index = self.__to_full_index(tree_plan.nested_event_index,
+                                                                    positive_indices, negative_indices)
+            sub_pattern = self.__find_nested_sub_pattern(tree_plan, pattern)
             self.__adjust_tree_plan_indices(tree_plan.sub_tree_plan, sub_pattern)
             return
+        if isinstance(tree_plan, TreePlanNegativeBinaryNode):
+            self.__adjust_tree_plan_indices(tree_plan.left_child, pattern, under_negation)
+            self.__adjust_tree_plan_indices(tree_plan.right_child, pattern, True)
+            return
         if isinstance(tree_plan, TreePlanBinaryNode):
-            self.__adjust_tree_plan_indices(tree_plan.left_child, pattern)
-            self.__adjust_tree_plan_indices(tree_plan.right_child, pattern)
+            self.__adjust_tree_plan_indices(tree_plan.left_child, pattern, under_negation)
+            self.__adjust_tree_plan_indices(tree_plan.right_child, pattern, under_negation)
             return
         raise Exception("Unexpected tree plan node")
 
     @staticmethod
-    def __find_nested_sub_pattern(tree_plan: TreePlanNestedNode, pattern: Pattern, positive_indices: List[int],
-                                  negative_indices: List[int]) -> Pattern:
+    def __to_full_index(index: int, positive_indices: List[int], negative_indices: List[int]) -> int:
+        """
+        Converts an index in positive-first order (positive args, then negative args) into a full-pattern index.
+        """
+        if index >= len(positive_indices):
+            return negative_indices[index - len(positive_indices)]
+        return positive_indices[index]
+
+    @staticmethod
+    def __find_nested_sub_pattern(tree_plan: TreePlanNestedNode, pattern: Pattern) -> Pattern:
         """
         Returns a nested subpattern of the given pattern corresponding to the specified nested node of the tree plan.
+        Expects tree_plan.nested_event_index to be a full-pattern index.
         """
-        nested_pattern_index = tree_plan.nested_event_index
-        if nested_pattern_index >= len(positive_indices):
-            nested_pattern_index = negative_indices[nested_pattern_index - len(positive_indices)]
-        nested_pattern_structure = pattern.get_top_level_structure_args()[nested_pattern_index]
+        nested_pattern_structure = pattern.get_top_level_structure_args()[tree_plan.nested_event_index]
         if isinstance(nested_pattern_structure, NegationOperator):
             nested_pattern_structure = nested_pattern_structure.arg
         if isinstance(nested_pattern_structure, KleeneClosureOperator) \

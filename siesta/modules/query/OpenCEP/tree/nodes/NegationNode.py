@@ -6,7 +6,7 @@ from condition.Condition import RelopTypes, EquationSides
 from base.PatternMatch import PatternMatch
 from base.PatternStructure import AndOperator, SeqOperator
 from misc.Utils import find_partial_match_by_timestamp, merge, \
-    is_sorted, merge_according_to, calculate_joint_probability
+    is_sequence_ordered, merge_according_to, calculate_joint_probability
 from tree.nodes.BinaryNode import BinaryNode
 from tree.nodes.Node import Node, PrimitiveEventDefinition, PatternParameters
 from tree.PatternMatchStorage import TreeStorageParameters
@@ -243,7 +243,7 @@ class NegativeSeqNode(NegationNode):
         self._positive_event_defs = positive_event_defs
 
     def _validate_new_match(self, events_for_new_match: List[Event]):
-        if not is_sorted(events_for_new_match, key=lambda x: x.timestamp):
+        if not is_sequence_ordered(events_for_new_match):
             return False
         return super()._validate_new_match(events_for_new_match)
 

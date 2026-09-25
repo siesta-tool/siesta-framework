@@ -468,6 +468,17 @@ def _collect_activities(
         return
 
 
+def _contains_negation(node) -> bool:
+    """True if ``node`` is, or contains, a ``NegatedNode``."""
+    if isinstance(node, NegatedNode):
+        return True
+    if isinstance(node, SeqNode):
+        return any(_contains_negation(e.atom) for e in node.elements)
+    if isinstance(node, OrNode):
+        return any(_contains_negation(b) for b in node.branches)
+    return False
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # 4.  Parser  (recursive-descent)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -543,9 +554,16 @@ class Parser:
         if negated:
             atom = NegatedNode(inner=atom)
         quant = Quantifier.ONE
+        quant_tok = self._peek()
         if   self._at(TT.STAR):  self._consume(); quant = Quantifier.STAR
         elif self._at(TT.PLUS):  self._consume(); quant = Quantifier.PLUS
         elif self._at(TT.OPT):   self._consume(); quant = Quantifier.OPT
+        if quant != Quantifier.ONE and _contains_negation(atom):
+            raise SyntaxError(
+                f"Quantifier '{quant.value}' at position {quant_tok.pos} applies to "
+                f"a negation: a negated element cannot carry a quantifier or sit "
+                f"inside a quantified group"
+            )
         return ElementNode(atom=atom, quantifier=quant)
 
     # atom ::= activity | '(' or_expr ')'
@@ -797,18 +815,21 @@ class RespondedPair:
             f"branch={self.branch_id})"
         )
 
+    def _identity(self):
+        return (self.source, self.target, self.source_quantifier, self.target_quantifier,
+                self.forbidden_between, self.branch_id)
+
     def __eq__(self, other):
-        """Compare to check equality"""
-        return (
-            # instance of the same class
-            isinstance(other, RespondedPair)
-            and self.source == other.source
-            and self.target == other.target
-        )
+        """
+        Pairs are equal only if every field matches: the same (source, target)
+        can occur with different quantifiers, forbidden sets or branches
+        (e.g. ``D A* A`` yields D->A with target ``*`` and with target ONE),
+        and collapsing those would drop a required pair from pruning.
+        """
+        return isinstance(other, RespondedPair) and self._identity() == other._identity()
 
     def __hash__(self):
-        """Generate hash value for this instance"""
-        return hash((self.source, self.target))
+        return hash(self._identity())
 
 def _pairs_from_sequence(
     seq: List[BoundActivity],
@@ -1001,34 +1022,86 @@ def extract_responded_pairs(pattern: str) -> List[RespondedPair]:
 
 def extract_info_pairs(pattern):
     """
-    Adding self pairs for attributes or negation to better inform CEP
+    Extra pairs to fetch so that CEP sees every event it may need.
+
+    Detection rebuilds each trace's events from the fetched pair rows, and the
+    pairs index follows skip-till-next-match: a source occurring before the
+    previous pair's target is skipped, so a responded pair alone does not
+    deliver every occurrence of its activities.  Two kinds of pairs are added:
+
+    * Self-pairs ``(X, X, branch_id)``.  Their rows chain every occurrence of
+      ``X`` in a trace (when ``X`` occurs more than once).  Fetched for
+      activities with attribute constraints, negated activities and ``+``/``*``
+      activities; and for *every* positive activity when the pattern contains
+      a negation or a ``$``-binding, because then a match may need an
+      occurrence other than the one skip-till-next-match keeps (an earlier one
+      is blocked by the negation, or has the wrong bound value).
+
+    * Negation anchors ``(P, X)`` / ``(X, S)`` between a negated activity
+      ``X`` and the positive activities around it: every positive activity
+      before ``X`` up to and including the first non-optional (non-``*``) one,
+      or, when ``X`` has no positive predecessor, every positive activity
+      after it up to the first non-optional one.  A forbidden ``X`` that
+      occurs once in a trace is then delivered by the anchor it actually
+      follows (or precedes), even when a neighbouring ``*`` element is empty.
     """
     ast = parse_pattern(pattern)
     sequences = _linearise(ast)
-    attribute_pairs = set()
+    needs_all_occurrences = any(
+        ba.negated or any(isinstance(c.value, VarExpr) for c in ba.activity.constraints)
+        for seq in sequences for ba in seq
+    )
+    info_pairs = set()
     for branch_id, seq in enumerate(sequences):
         for idx, boundActivity in enumerate(seq):
-            if boundActivity.activity.constraints or boundActivity.negated or boundActivity.quantifier in (Quantifier.PLUS, Quantifier.STAR):
-                attribute_pairs.add((boundActivity.activity.label, boundActivity.activity.label, branch_id))
+            label = boundActivity.activity.label
+            if (boundActivity.activity.constraints or boundActivity.negated
+                    or boundActivity.quantifier in (Quantifier.PLUS, Quantifier.STAR)
+                    or needs_all_occurrences):
+                info_pairs.add((label, label, branch_id))
             if boundActivity.negated:
-                # Find nearest non-negated predecessor
-                prev_positive = next(
-                    (seq[k] for k in range(idx - 1, -1, -1) if not seq[k].negated),
-                    None,
-                )
-                # Find nearest non-negated successor
-                next_positive = next(
-                    (seq[k] for k in range(idx + 1, len(seq)) if not seq[k].negated),
-                    None,
-                )
-                if prev_positive is not None:
-                    attribute_pairs.add((prev_positive.activity.label, boundActivity.activity.label))
-                elif next_positive is not None:
-                    # No positive predecessor - anchor to the next positive event instead
-                    attribute_pairs.add((boundActivity.activity.label, next_positive.activity.label))
-    
-    return attribute_pairs
-    
+                predecessors = _negation_anchors(seq, range(idx - 1, -1, -1))
+                if predecessors:
+                    for anchor in predecessors:
+                        info_pairs.add((anchor.activity.label, label))
+                else:
+                    for anchor in _negation_anchors(seq, range(idx + 1, len(seq))):
+                        info_pairs.add((label, anchor.activity.label))
+
+    return info_pairs
+
+
+def can_match_single_event(pattern) -> bool:
+    """
+    True if some OR-branch of the pattern can be matched by a single event:
+    it has at most one positive element that must bind an event (quantifier
+    ONE or ``+``; ``*`` elements may bind nothing).  Such a match involves no
+    event pair, so the pairs index cannot deliver it.
+    """
+    for seq in _linearise(parse_pattern(pattern)):
+        required = [ba for ba in seq
+                    if not ba.negated and ba.quantifier in (Quantifier.ONE, Quantifier.PLUS)]
+        if len(required) <= 1:
+            return True
+    return False
+
+
+def pattern_labels(pattern) -> set:
+    """Every activity label that occurs in the pattern, positive or negated."""
+    return {ba.activity.label for seq in _linearise(parse_pattern(pattern)) for ba in seq}
+
+
+def _negation_anchors(seq, indices):
+    """Positive activities at ``indices`` (in order) up to and including the first non-``*`` one."""
+    anchors = []
+    for k in indices:
+        if seq[k].negated:
+            continue
+        anchors.append(seq[k])
+        if seq[k].quantifier != Quantifier.STAR:
+            break
+    return anchors
+
 
 def extract_siesta_pairs(pattern: str) -> List[List[BoundActivity]]:
     ast = parse_pattern(pattern)

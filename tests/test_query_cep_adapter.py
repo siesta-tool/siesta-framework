@@ -6,15 +6,10 @@ directly to the adapter and verifies match indices.
 
 NOTE ON INDEX SEMANTICS
 -----------------------
-For plain sequences (no Kleene), ``find_occurrences_dsl`` returns the
-0-based position of each matched event in the input ``sequence`` list.
-
-For Kleene patterns (+ or *), OpenCEP assigns its own internal counter
-to every event (and to each AggregatedEvent node it creates internally).
-The returned indices are those **internal OpenCEP counters**, not the
-original positions - so ``A+ B`` on ``[A, B]`` returns ``[0, 2]``
-(A->0, KC-internal-node->1, B->2).  Tests assert the empirically verified
-values to act as regression guards against future adapter changes.
+``find_occurrences_dsl`` returns the 0-based position of each matched event
+in the input ``sequence`` list, for plain and Kleene (+ / *) patterns alike.
+(OpenCEP's own event counter also numbers the AggregatedEvents a Kleene
+closure creates, so the adapter tracks list positions itself.)
 
 Event dict helpers
 ------------------
@@ -91,14 +86,13 @@ class TestKleeneStar:
         assert result == [0]
 
     def test_star_one_occurrence(self):
-        # A->0, KC-internal-node->1, B->2
         result = run("A* B", mk_event("A"), mk_event("B"))
-        assert result == [0, 2]
+        assert result == [0, 1]
 
     def test_star_two_occurrences(self):
-        # Both A events captured; KC nodes consume additional internal slots
+        # Both A events captured; indices are positions in the event list
         result = run("A* B", mk_event("A"), mk_event("A"), mk_event("B"))
-        assert result == [0, 2, 5]
+        assert result == [0, 1, 2]
 
     def test_star_in_sequence_zero_before_bc(self):
         """A* B C on [B, C] -> zero-A branch: B at 0, C at 1."""
@@ -106,22 +100,21 @@ class TestKleeneStar:
         assert result == [0, 1]
 
     def test_star_in_sequence_one_before_bc(self):
-        # A->0, KC-node->1, B->2, C->3
         result = run("A* B C", mk_event("A"), mk_event("B"), mk_event("C"))
-        assert result == [0, 2, 3]
+        assert result == [0, 1, 2]
 
     def test_star_prefers_longer_match_first(self):
         """When both branches match, the one with the earliest start wins."""
-        # A+ branch: A->0, B->2 (start=0); zero-A branch: B->1 (start=1)
+        # A+ branch: A->0, B->1 (start=0); zero-A branch: B->1 (start=1)
         # Start 0 < 1 so A+ branch is chosen
         result = run("A* B", mk_event("A"), mk_event("B"))
-        assert result == [0, 2]
+        assert result == [0, 1]
 
     def test_star_returnall(self):
         """returnAll with STAR on [A, B, B].
-        A+ branch -> [0,2]; remaining branches overlap -> only [0,2]."""
+        A+ branch -> [0,1]; the zero-A branch then adds the second B -> [2]."""
         results = run("A* B", mk_event("A"), mk_event("B"), mk_event("B"), returnAll=True)
-        assert [0, 2] in results
+        assert results == [[0, 1], [2]]
 
 
 # =====================================================================
@@ -136,17 +129,16 @@ class TestKleenePlus:
         assert result == []
 
     def test_plus_one_match(self):
-        # A->0, KC-internal-node->1, B->2
         result = run("A+ B", mk_event("A"), mk_event("B"))
-        assert result == [0, 2]
+        assert result == [0, 1]
 
     def test_plus_two_match(self):
         result = run("A+ B", mk_event("A"), mk_event("A"), mk_event("B"))
-        assert result == [0, 2, 5]
+        assert result == [0, 1, 2]
 
     def test_plus_in_sequence(self):
         result = run("A B+ C", mk_event("A"), mk_event("B"), mk_event("B"), mk_event("C"))
-        assert result == [0, 1, 3, 6]
+        assert result == [0, 1, 2, 3]
 
 
 # =====================================================================
@@ -420,13 +412,12 @@ class TestStarWithAttribute:
         assert result == [0]
 
     def test_star_with_attr_plus_branch_attr_match(self):
-        # A->0, KC-node->1, B->2
         result = run(
             'A[resource="r1"]* B',
             mk_event("A", resource="r1"),
             mk_event("B"),
         )
-        assert result == [0, 2]
+        assert result == [0, 1]
 
     def test_star_with_attr_plus_branch_attr_mismatch_falls_to_zero_branch(self):
         """[A(r2), B]: A+ branch fails (r2 != r1); zero-A branch matches B at index 1."""
@@ -445,7 +436,7 @@ class TestStarWithAttribute:
             mk_event("A", resource="r1"),
             mk_event("B"),
         )
-        assert result == [0, 2, 5]
+        assert result == [0, 1, 2]
 
 
 # =====================================================================
@@ -484,13 +475,13 @@ class TestReturnAll:
         assert any(r[0] == 2 for r in results)
 
     def test_return_all_star_match(self):
-        """A* B on [A, B, B]: first match [0,2]; others blocked by overlap."""
+        """A* B on [A, B, B]: first match [0,1], then the second B alone -> [2]."""
         results = run(
             "A* B",
             mk_event("A"), mk_event("B"), mk_event("B"),
             returnAll=True,
         )
-        assert [0, 2] in results
+        assert results == [[0, 1], [2]]
 
 
 # =====================================================================
@@ -514,3 +505,51 @@ class TestCombined:
         """A* !X B on [A, X, B]: validates STAR + negation does not crash."""
         result = run("A* !X B", mk_event("A"), mk_event("X"), mk_event("B"))
         assert isinstance(result, list)
+
+
+# =====================================================================
+# 12. Regressions: Kleene indices, event reuse, negation handling
+# =====================================================================
+
+class TestKleeneAndNegationRegressions:
+
+    def test_plus_indices_are_list_positions(self):
+        assert run("A+ B", mk_event("A"), mk_event("B")) == [0, 1]
+        assert run("A B+ C D", *(mk_event(n) for n in "ABBCD")) == [0, 1, 2, 3, 4]
+
+    def test_same_label_before_closure_is_not_reused(self):
+        """D D+ must bind two distinct D events (OpenCEP also emits D0+KC[D0])."""
+        assert run("D D+", mk_event("D"), mk_event("D")) == [0, 1]
+        assert run("D D+", mk_event("D")) == []
+
+    def test_negation_before_closure(self):
+        assert run("A !B C+", mk_event("A"), mk_event("C")) == [0, 1]
+        assert run("A !B C+", mk_event("A"), mk_event("B"), mk_event("C")) == []
+        assert run("D !D D+", *(mk_event("D") for _ in range(3))) == [0, 1]
+
+    def test_star_omission_drops_unanchored_negation(self):
+        """With D* empty, D !E D* is just D - a later E must not block it."""
+        assert run("D !E D*", mk_event("D"), mk_event("E"), mk_event("D")) == [0]
+        assert run("A* !B C", mk_event("B"), mk_event("C")) == [1]
+
+    def test_user_written_trailing_negation_kept(self):
+        assert run("A !B", mk_event("A"), mk_event("B")) == []
+        assert run("A !B", mk_event("A"), mk_event("C")) == [0]
+
+    def test_binding_with_closure_holds_for_every_element(self):
+        events = [mk_event("A", r="x"), mk_event("B", r="y"), mk_event("B", r="x")]
+        assert run("A[r=$1] B[r=$1]+", *events) == [0, 2]
+        assert run("A[r=$1] B[r=$1]+", mk_event("A", r="x"), mk_event("B", r="y")) == []
+
+    def test_negated_constraints_are_honoured(self):
+        assert run('A !B[r="y"] C', mk_event("A"), mk_event("B", r="z"), mk_event("C")) == [0, 2]
+        assert run('A !B[r="y"] C', mk_event("A"), mk_event("B", r="y"), mk_event("C")) == []
+        assert run("A[r=$1] !B[r=$1] C",
+                   mk_event("A", r="x"), mk_event("B", r="z"), mk_event("C")) == [0, 2]
+        assert run("A[r=$1] !B[r=$1] C",
+                   mk_event("A", r="x"), mk_event("B", r="x"), mk_event("C")) == []
+
+    @pytest.mark.parametrize("pattern", ["A !B+ C", "A !B* C", "A !B? C", "A !(B||C)+ D", "A (B !C)+ D"])
+    def test_quantified_negation_is_rejected(self, pattern):
+        with pytest.raises(SyntaxError, match="negation"):
+            run(pattern, mk_event("A"), mk_event("C"))

@@ -208,11 +208,16 @@ class TestExtractInfoPairs:
         info = extract_info_pairs("A !B C")
         assert ("B", "B", 0) in info
 
-    def test_negated_activity_not_positive_self_pair(self):
+    def test_negation_gives_positive_self_pairs(self):
         info = extract_info_pairs("A !B C")
-        # A and C are plain positive, no self-pairs
-        assert ("A", "A", 0) not in info
-        assert ("C", "C", 0) not in info
+        # With a negation, a match may need an occurrence of A that
+        # skip-till-next-match skips, so every positive label gets a self-pair.
+        assert ("A", "A", 0) in info
+        assert ("C", "C", 0) in info
+
+    def test_plain_positives_no_self_pair(self):
+        info = extract_info_pairs("A B C")
+        assert info == set()
 
     # ── OR branches give branch-scoped self-pairs ─────────────────────
 

@@ -297,6 +297,21 @@ class StorageManager(ABC):
         pass
     
     @abstractmethod
+    def read_activity_events(self, metadata: Any, activities: list[str]) -> DataFrame:
+        """
+        Load the activity index events of the given activities only.
+
+        Args:
+            metadata: MetaData object containing the metadata
+            activities: activity labels to read
+
+        Returns:
+            DataFrame with the activity index schema (activity, trace_id,
+            position, start_timestamp, attributes)
+        """
+        pass
+
+    @abstractmethod
     def read_last_checked_table(self, metadata: Any) -> DataFrame:
         """
         Load data from the LastCheckedTable, containing the last timestamp per event type pair per trace.

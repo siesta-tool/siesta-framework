@@ -400,7 +400,21 @@ class S3Manager(StorageManager):
             logger.info(f"Error reading Activity Index: {e}")
             return self.spark.createDataFrame([], schema=Event.get_schema()) # type: ignore
 
-    
+
+    def read_activity_events(self, metadata: MetaData, activities: list[str]) -> DataFrame:
+        """
+        Load the Activity index events of the given activities.
+
+        Reads the Delta table (so only live files are seen) and filters on the
+        ``activity`` partition column, so only those partitions are scanned.
+        """
+        try:
+            return (self.spark.read.format("delta").load(metadata.activity_index_path)
+                    .where(col("activity").isin(list(activities))))
+        except Exception as e:
+            logger.info(f"Error reading Activity Index: {e}")
+            return self.spark.createDataFrame([], schema=Event.get_schema())  # type: ignore
+
     ###########################################
     ########### Pairs index Methods ###########
     ###########################################
