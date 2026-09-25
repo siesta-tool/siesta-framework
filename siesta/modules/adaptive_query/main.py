@@ -93,7 +93,7 @@ from siesta.modules.query.processors.detection_query import (
     detect as eager_detect,
     process_detection_query as eager_process_detection,
 )
-from siesta.modules.adaptive_query.predicates import build_pair_attr_predicate
+from siesta.modules.query.processors.predicates import build_pair_attr_predicate
 from siesta.modules.query.processors.exploration_query import (
     process_exploration_query as eager_process_exploration,
 )

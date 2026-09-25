@@ -8,6 +8,7 @@ from pyspark.sql import functions as F
 from pyspark.sql.functions import col
 from siesta.modules.query.parse_seql import Quantifier as SeqlQuantifier, RespondedPair, extract_info_pairs, parse_pattern, extract_responded_pairs
 from siesta.modules.query.CEP_adapter import find_occurrences_dsl
+from siesta.modules.query.processors.predicates import build_event_keep_predicate
 import json
 import logging
 from functools import reduce
@@ -71,8 +72,14 @@ def detect(pattern: str, config: Dict[str, Any], metadata: MetaData):
     else:
         pruned_trace_ids = reduce(lambda a, b: a.union(b), branch_pruned_dfs).distinct()
 
+    # Attribute pushdown: drop rows whose endpoints can never be part of a
+    # match before they reach CEP.  Pruning above must keep using the
+    # unfiltered rows (see build_event_keep_predicate).
+    keep_pred = build_event_keep_predicate(pattern)
+    cep_rows_df = tagged_df.where(keep_pred) if keep_pred is not None else tagged_df
+
     pair_positions_df = (
-        tagged_df
+        cep_rows_df
         .join(pruned_trace_ids, on="trace_id", how="inner")
         .repartition("trace_id")
     )
