@@ -1,6 +1,7 @@
 from abc import ABC
 
 from base.Pattern import Pattern
+from condition.CompositeCondition import AndCondition
 from base.PatternStructure import PatternStructure, AndOperator, OrOperator, NegationOperator, \
     UnaryStructure, CompositeStructure, PrimitiveEventStructure
 
@@ -23,7 +24,14 @@ class PatternTransformer(ABC):
         """
         if structure == pattern.full_structure:
             return pattern
-        condition_for_new_pattern = pattern.condition.get_condition_of(structure.get_all_event_names())
+        names = structure.get_all_event_names()
+        condition_for_new_pattern = pattern.condition.get_condition_of(names)
+        # get_condition_of returns either regular or Kleene-closure conditions;
+        # the new pattern needs both, or KC conditions are silently dropped.
+        kleene_conditions = pattern.condition.get_condition_of(names, get_kleene_closure_conditions=True)
+        if kleene_conditions is not None and kleene_conditions.get_num_conditions() > 0:
+            regular = [] if condition_for_new_pattern is None else condition_for_new_pattern.get_conditions_list()
+            condition_for_new_pattern = AndCondition(*regular, *kleene_conditions.get_conditions_list())
         return Pattern(structure, condition_for_new_pattern, pattern.window, pattern.consumption_policy, None,
                        pattern.confidence, pattern.statistics)
 

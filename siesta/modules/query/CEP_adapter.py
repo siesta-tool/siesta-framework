@@ -24,7 +24,7 @@ from base.PatternStructure import (
 )
 from condition.CompositeCondition import AndCondition
 from condition.Condition import BinaryCondition, SimpleCondition, TrueCondition, Variable
-from condition.KCCondition import KCValueCondition
+from condition.KCCondition import KCCondition, KCValueCondition
 from stream.Stream import InputStream, OutputStream
 from transformation.PatternPreprocessingParameters import PatternPreprocessingParameters
 from transformation.PatternTransformationRules import PatternTransformationRules
@@ -39,6 +39,20 @@ from siesta.modules.query.parse_seql import (
 # Event.INDEX_ATTRIBUTE_NAME is a global serial that Kleene-closure
 # AggregatedEvents also consume, so it drifts away from list positions.
 _EVENT_INDEX_KEY = "SiestaEventIndex"
+
+
+class _KCAllPairsCondition(KCCondition):
+    """
+    Holds when ``relation_op`` holds for every ordered pair of *distinct*
+    events of a Kleene closure.  Used for a binding that refers to its own
+    closure: ``A[r=$1]+`` (``$1`` being ``A+``) requires all closure events to
+    share ``r``, ``A[r!=$1]+`` requires pairwise different values.  A binding
+    never compares an event with itself.
+    """
+    def _eval(self, event_list: list = None):
+        values = [self._getattr_func(item) for item in event_list or []]
+        return all(self._relation_op(a, b)
+                   for i, a in enumerate(values) for j, b in enumerate(values) if i != j)
 
 
 class _OpenCEPEventTypeClassifier(EventTypeClassifier):
@@ -140,6 +154,8 @@ class _DSLPatternBuilder:
         # (ActivityNode, opencep_name) for each event inside a negation; their
         # attribute constraints restrict which events are forbidden.
         self.negated_event_names: List[tuple] = []
+        # opencep names of events bound by a Kleene closure (x+)
+        self.kleene_names: set = set()
  
     def _next_name(self) -> str:
         name = f"e{self._counter}"
@@ -151,6 +167,8 @@ class _DSLPatternBuilder:
         built = self._build_node(elem.atom, inside_negation=False)
         q = elem.quantifier
         if q == Quantifier.PLUS:
+            if isinstance(built, PrimitiveEventStructure):
+                self.kleene_names.add(built.name)
             return KleeneClosureOperator(built, min_size=1)
         if q == Quantifier.STAR:
             raise NotImplementedError(
@@ -324,7 +342,29 @@ def _expand_star_dsl(node):
     return [node]
 
 
-def _build_dsl_attr_conditions(positive_event_names: list, negated_event_names: list = ()) -> List:
+def _positive_ordinals(node, out=None) -> dict:
+    """
+    ``id(ActivityNode) -> N`` for the pattern's positive activities, numbered
+    1-based in the left-to-right order the pattern builder visits them (OR
+    alternatives included, negated activities excluded).  This is what ``$N``
+    refers to, so it is computed on the original pattern, before the star
+    expansion removes elements.
+    """
+    if out is None:
+        out = {}
+    if isinstance(node, ActivityNode):
+        out[id(node)] = len(out) + 1
+    elif isinstance(node, SeqNode):
+        for element in node.elements:
+            _positive_ordinals(element.atom, out)
+    elif isinstance(node, OrNode):
+        for branch in node.branches:
+            _positive_ordinals(branch, out)
+    return out
+
+
+def _build_dsl_attr_conditions(positive_event_names: list, negated_event_names: list = (),
+                               ordinals: dict | None = None, kleene_names: set = frozenset()) -> List:
     """
     Convert DSL attribute constraints into native OpenCEP conditions.
  
@@ -339,11 +379,20 @@ def _build_dsl_attr_conditions(positive_event_names: list, negated_event_names: 
     Kleene-closure variable evaluates to a list of events; a condition on it
     must hold for every event in the closure.
 
+    ``$N`` is resolved through ``ordinals`` (see ``_positive_ordinals``), the
+    numbering of the original pattern.  A reference to an element that has no
+    event in this (star-expanded) pattern - an omitted ``x*`` - imposes
+    nothing, just like a reference into an OR alternative that did not match.
+    Without ``ordinals`` the numbering of ``positive_event_names`` is used.
+
     Constraints whose VarExpr index is out of range are silently skipped;
     callers should add a fallback post-filter if strict validation is needed.
     """
     conditions: List = []
-    n = len(positive_event_names)
+    if ordinals is None:
+        name_by_ordinal = {i + 1: name for i, (_, name) in enumerate(positive_event_names)}
+    else:
+        name_by_ordinal = {ordinals[id(node)]: name for node, name in positive_event_names}
  
     for activity_node, own_name in list(positive_event_names) + list(negated_event_names):
         for constraint in activity_node.constraints:
@@ -386,10 +435,9 @@ def _build_dsl_attr_conditions(positive_event_names: list, negated_event_names: 
             elif isinstance(val, VarExpr):
                 # Cross-event condition: this event's attr relates to the attr
                 # of the $ref_id-th positive event (1-based).
-                ref_id = val.var_id
-                if ref_id < 1 or ref_id > n:
-                    continue  # out-of-range reference - skip
-                _, ref_name = positive_event_names[ref_id - 1]
+                ref_name = name_by_ordinal.get(val.var_id)
+                if ref_name is None:
+                    continue  # out of range, or its element was omitted - skip
                 op     = val.op      # '+' | '-' | None
                 offset = val.offset or 0
 
@@ -410,6 +458,18 @@ def _build_dsl_attr_conditions(positive_event_names: list, negated_event_names: 
                 else:
                     rel = (lambda rv, ov: ov != rv) if neq else (lambda rv, ov: ov == rv)
 
+                if ref_name == own_name:
+                    if own_name not in kleene_names:
+                        continue  # a single event compared with itself: nothing to check
+                    # the binding refers to its own closure: relate its distinct events
+                    conditions.append(
+                        _KCAllPairsCondition(
+                            names={own_name},
+                            getattr_func=lambda x, a=attr: x.get(a),
+                            relation_op=lambda rv, ov, rel=rel: rel(rv, ov),
+                        )
+                    )
+                    continue
                 conditions.append(
                     BinaryCondition(
                         Variable(ref_name, lambda x, a=attr: _attr_values(x, a)),
@@ -802,6 +862,7 @@ def find_occurrences_dsl(
     # 1. Parse the DSL pattern and expand every STAR into two star-free queries:
     #    one with PLUS semantics and one with the STAR branch omitted.
     ast = parse_pattern(pattern_str)
+    ordinals = _positive_ordinals(ast)
     expanded_asts = [_split_negated_or(a) for a in _expand_star_dsl(ast)]
 
     # 2. Prepare the event stream once and reuse it across the expanded queries.
@@ -824,7 +885,8 @@ def find_occurrences_dsl(
         )
 
         for cond in _build_dsl_attr_conditions(builder.positive_event_names,
-                                               builder.negated_event_names):
+                                               builder.negated_event_names,
+                                               ordinals, builder.kleene_names):
             pattern.condition.add_atomic_condition(cond)
 
         residual_constraints = _attach_native_conditions(

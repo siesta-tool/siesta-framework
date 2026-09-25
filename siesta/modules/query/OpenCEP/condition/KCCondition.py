@@ -17,14 +17,12 @@ class KCCondition(AtomicCondition, ABC):
         self._relation_op = relation_op
 
     def is_condition_of(self, names: set):
-        if names == self._names:
-            return True
-        if len(names) != len(self._names):
-            return False
-        for name in names:
-            if not any([name in n for n in self._names]):
-                return False
-        return True
+        """
+        True if every event name of this condition appears in the given set (the AtomicCondition contract).
+        Requiring an equally sized set made KC conditions unreachable from any pattern with more events than the
+        closure, e.g. when OR preprocessing re-derives each sub-pattern's conditions from its event names.
+        """
+        return set(self._names) <= set(names)
 
     @staticmethod
     def _validate_index(index: int, lst: list):
