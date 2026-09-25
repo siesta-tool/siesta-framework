@@ -18,8 +18,8 @@ pattern = ""
 
 
 def detect(pattern: str, config: Dict[str, Any], metadata: MetaData):
+    """(trace_id, positions of the first match) for every trace that matches ``pattern``."""
     storage = get_storage_manager()
-    support_threshold = config.get("support_threshold", 0.0)
 
     if can_match_single_event(pattern):
         # A single-event match involves no pair, so the pairs index cannot
@@ -35,7 +35,7 @@ def detect(pattern: str, config: Dict[str, Any], metadata: MetaData):
     return (
         events_rdd
         .map(lambda kv: (kv[0], _first_match(pattern, kv[1])))
-        .filter(lambda result: len(result[1]) > support_threshold * metadata.trace_count if metadata.trace_count else 0)
+        .filter(lambda result: len(result[1]) > 0)
         .collect()
     )
 
@@ -180,6 +180,12 @@ def process_detection_query(config: Dict[str, Any], metadata: MetaData):
     end = time.time()
     
 
-    result = [{"trace_id": trace_id, "support": len(positions) / metadata.trace_count if metadata.trace_count else 0, "positions": positions} for trace_id, positions in result if len(positions) >= support_threshold]
+    # Support is the fraction of traces that match the pattern; below the
+    # threshold the pattern counts as not detected.
+    support = len(result) / metadata.trace_count if metadata.trace_count else 0.0
+    detected = [] if support < support_threshold else [
+        {"trace_id": trace_id, "support": support, "positions": positions}
+        for trace_id, positions in result
+    ]
     logger.info(f"Parsing query took: {end - start}")
-    return {"code": 200, "total": len(result), "detected": result, "time": end - start}
+    return {"code": 200, "total": len(detected), "support": support, "detected": detected, "time": end - start}

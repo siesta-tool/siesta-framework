@@ -77,6 +77,7 @@ from siesta.modules.adaptive_index.builders import (
     promote_to_l1,
     promote_to_l2,
     _get_perspective_seq_df,
+    _grouping_col,
     _perspective_pair_path,
 )
 from siesta.modules.adaptive_index.catalog import get_catalog
@@ -202,6 +203,8 @@ class Adaptive_Querying(SiestaModule):
         self._promotion_queues:  dict[str, queue.Queue] = {}
         self._promotion_workers: dict[str, threading.Thread] = {}
         self._promotion_lock = threading.Lock()
+        # (namespace, log, perspective, event_count) -> number of groups
+        self._group_counts: dict = {}
 
 
     # ------------------------------------------------------------------
@@ -606,14 +609,13 @@ class Adaptive_Querying(SiestaModule):
         has_pos = stats.level >= PerspectiveLevel.L2_POS_ESTABLISHED
         sort_key = "position" if (references_pos and has_pos) else "start_timestamp"
 
-        group_count = self.metadata.trace_count if self.metadata.trace_count else 0
+        group_count = self._perspective_group_count(pid, grouping_keys)
 
         if can_match_single_event(pattern):
             # A single-event match involves no pair, so pair tables cannot
             # deliver it: hand CEP every event of the pattern's activities.
             result = self._detect_from_group_events(
                 pattern, pid, grouping_keys, has_pos, sort_key,
-                support_threshold, group_count,
             )
             return self._finish_detection(
                 catalog, pid, stats, result, set(), {},
@@ -927,11 +929,6 @@ class Adaptive_Querying(SiestaModule):
                 .agg(F.min(col("pos_pair")).alias("positions"))
             )
 
-            if group_count:
-                per_group = per_group.filter(
-                    F.size("positions") >= F.lit(support_threshold * group_count)
-                )
-
             collected = per_group.collect()
 
             result = [(row.trace_id, list(row.positions)) for row in collected]
@@ -997,11 +994,7 @@ class Adaptive_Querying(SiestaModule):
                 matches_rdd
                 .groupByKey()
                 .map(validate_group)
-                .filter(
-                    lambda r: len(r[1]) >= support_threshold * group_count
-                    if group_count
-                    else True
-                )
+                .filter(lambda r: len(r[1]) > 0)
                 .collect()
             )
         logger.info(f"TIMING cep_done: {time.time() - t_start:.2f}s  pattern={pattern!r}")
@@ -1012,8 +1005,7 @@ class Adaptive_Querying(SiestaModule):
             references_pos, support_threshold, group_count, t_start,
         )
 
-    def _detect_from_group_events(self, pattern, pid, grouping_keys, has_pos, sort_key,
-                                  support_threshold, group_count):
+    def _detect_from_group_events(self, pattern, pid, grouping_keys, has_pos, sort_key):
         """
         Run CEP over each group's events of the pattern's activities, read
         from the perspective's sequence (group positions as in pair tables).
@@ -1043,9 +1035,30 @@ class Adaptive_Querying(SiestaModule):
             seq_df.rdd.map(to_event)
             .groupByKey()
             .map(validate_group)
-            .filter(lambda r: len(r[1]) >= support_threshold * group_count if group_count else True)
+            .filter(lambda r: len(r[1]) > 0)
             .collect()
         )
+
+    def _perspective_group_count(self, pid, grouping_keys) -> int:
+        """
+        Number of groups of the perspective: the denominator of a pattern's
+        support.  Cached per (log, perspective, event_count), so a new ingest
+        recounts.  The trace-level perspective uses ``trace_count`` when the
+        log's metadata has it (the adaptive indexer does not maintain it).
+        """
+        if list(grouping_keys) == ["trace_id"] and self.metadata.trace_count:
+            return self.metadata.trace_count
+        key = (self.metadata.storage_namespace, self.metadata.log_name, pid,
+               getattr(self.metadata, "event_count", None))
+        if key not in self._group_counts:
+            self._group_counts[key] = (
+                self.storage.read_sequence_table(self.metadata)
+                .select(_grouping_col(grouping_keys).alias("group_value"))
+                .where(col("group_value").isNotNull())
+                .distinct()
+                .count()
+            )
+        return self._group_counts[key]
 
     def _finish_detection(self, catalog, pid, stats, result, all_pairs_2d, lazy_costs,
                           references_pos, support_threshold, group_count, t_start):
@@ -1094,22 +1107,19 @@ class Adaptive_Querying(SiestaModule):
         self._get_promotion_worker(pid).put(_promote_and_flush)
 
 
-        formatted = [
-            {
-                "group_id": gid,
-                "support": (
-                    len(positions) / group_count if group_count else 0
-                ),
-                "positions": positions,
-            }
+        # Support is the fraction of the perspective's groups that match the
+        # pattern; below the threshold the pattern counts as not detected.
+        support = len(result) / group_count if group_count else 0.0
+        formatted = [] if support < support_threshold else [
+            {"group_id": gid, "support": support, "positions": positions}
             for gid, positions in result
-            if len(positions) > support_threshold
         ]
 
         return {
             "code": 200,
             "perspective": pid,
             "total": len(formatted),
+            "support": support,
             "detected": formatted,
             "time": t_total,
             "pair_status_after": pair_status_after,
@@ -1217,22 +1227,16 @@ class Adaptive_Querying(SiestaModule):
 
             try:
                 result = self._run_adaptive_detection()
-                count = result.get("total", 0)
+                support = result.get("support", 0.0)
             except Exception as exc:
                 logger.warning(
                     f"{self.name}: exploration detection failed for "
                     f"'{target}': {exc}"
                 )
-                count = 0
+                support = 0.0
             finally:
                 self.query_config["query"]["pattern"] = saved_pattern
 
-            group_count = (
-                self.metadata.trace_count
-                if self.metadata.trace_count
-                else 1
-            )
-            support = count / group_count if group_count else 0.0
             if support >= support_threshold:
                 propositions.append({
                     "next_activity": target,

@@ -33,6 +33,9 @@ def render_query_response(response: dict, method: str) -> None:
 
         total = response.get("total", len(response.get("detected", [])))
         st.metric("Detected traces", total)
+        if response.get("support") is not None:
+            # fraction of traces that contain a match of the pattern
+            st.metric("Pattern support", f"{float(response['support']):.2%}")
 
         detected = response["detected"]
         rows = []
@@ -40,15 +43,11 @@ def render_query_response(response: dict, method: str) -> None:
             rows.append(
                 {
                     "trace_id": item.get("trace_id"),
-                    "support": item.get("support"),
                     "positions": ", ".join(str(p) for p in item.get("positions", [])),
                 }
             )
         if rows:
             st.table(rows)
-            support_chart = {row["trace_id"]: row["support"] for row in rows if row["trace_id"] is not None}
-            if support_chart:
-                st.bar_chart(support_chart)
         return
 
     if method == "exploration" and isinstance(response.get("explored"), list):

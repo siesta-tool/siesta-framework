@@ -156,7 +156,9 @@ class Querying(SiestaModule):
         - `log_name` *(str, default: `"example_log"`)* - name of the indexed log.
         - `storage_namespace` *(str, default: `"siesta"`)* - storage namespace.
         - `query.pattern` *(str)* - pattern to detect, e.g. `"A B* C"` or `"A[pos=?1]+ B[pos=?1+5]"`.
-        - `support_threshold` *(float [0,1], default: `0.0`)* - minimum per-trace support to include a match.
+        - `support_threshold` *(float [0,1], default: `0.0`)* - minimum support of the pattern, i.e. the fraction
+          of traces that contain a match. Below it no detections are returned. The response's `support` (and each
+          detection's `support`) is that fraction.
         """
         self.siesta_config = get_system_config()
         self.storage = get_storage_manager()
