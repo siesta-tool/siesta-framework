@@ -1,6 +1,7 @@
 from typing import Any, Dict
 from pyspark.sql import SparkSession
 import os
+import sys
 import subprocess
 import zipfile
 from pathlib import Path
@@ -46,6 +47,16 @@ def startup(config: Dict[str, Any] = {}) -> None:
     app_name = config.get("spark_app_name", "SiestaFramework")
     driver_memory = config.get("spark_driver_memory", os.getenv("SPARK_DRIVER_MEMORY", "8g"))
     executor_memory = config.get("spark_executor_memory", os.getenv("SPARK_EXECUTOR_MEMORY", "8g"))
+    executor_cores = config.get("spark_executor_cores", os.getenv("SPARK_EXECUTOR_CORES"))
+    cores_max = config.get("spark_cores_max", os.getenv("SPARK_CORES_MAX"))
+    executor_memory_overhead = config.get("spark_executor_memory_overhead", os.getenv("SPARK_EXECUTOR_MEMORY_OVERHEAD"))
+    shuffle_partitions = config.get("spark_shuffle_partitions", os.getenv("SPARK_SHUFFLE_PARTITIONS"))
+    driver_host = config.get("spark_driver_host", os.getenv("SPARK_DRIVER_HOST"))
+    driver_port = os.getenv("SPARK_DRIVER_PORT")
+    block_manager_port = os.getenv("SPARK_BLOCKMANAGER_PORT")
+    # Local mode runs Python workers on this machine; cluster executors use the Spark image's python3.12
+    default_python = sys.executable if spark_master_url.startswith("local") else "/usr/bin/python3.12"
+    pyspark_python = os.getenv("PYSPARK_PYTHON", default_python)
     
     global spark_session 
     try:
@@ -87,10 +98,9 @@ def startup(config: Dict[str, Any] = {}) -> None:
             .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
             .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem") \
             .config("spark.hadoop.fs.s3a.path.style.access", "true") \
-            .config("spark.pyspark.python", "/opt/python/bin/python3") \
-            .config("spark.pyspark.driver.python", "python3") \
-            .config("spark.executorEnv.PYSPARK_PYTHON", "/opt/python/bin/python3") \
-            .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
+            .config("spark.pyspark.python", pyspark_python) \
+            .config("spark.pyspark.driver.python", os.getenv("PYSPARK_DRIVER_PYTHON", pyspark_python)) \
+            .config("spark.executorEnv.PYSPARK_PYTHON", pyspark_python) \
             .config("spark.databricks.delta.optimizeWrite.enabled", "true") \
             .config("spark.databricks.delta.autoCompact.enabled", "true") \
             .config("spark.delta.logStore.class", "org.apache.spark.sql.delta.storage.S3SingleDriverLogStore") \
@@ -99,9 +109,30 @@ def startup(config: Dict[str, Any] = {}) -> None:
             .config("spark.jars.packages", packages) \
             .config("spark.sql.adaptive.enabled", "true") \
             .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
-            .config("spark.sql.adaptive.coalescePartitions.minPartitionNum", "6") \
-            .config("spark.sql.execution.pyspark.udf.faulthandler.enabled", "true") \
-            .config("spark.sql.execution.arrow.useLargeVarTypes", "true")
+            .config("spark.sql.adaptive.coalescePartitions.minPartitionNum", str(cores_max or 6)) \
+            .config("spark.sql.execution.pyspark.udf.faulthandler.enabled", "true")
+
+        # Optional cluster sizing (used for scalability experiments; unset in local mode)
+        if executor_cores:
+            builder = builder.config("spark.executor.cores", str(executor_cores))
+        if cores_max:
+            builder = builder.config("spark.cores.max", str(cores_max))
+        if executor_memory_overhead:
+            builder = builder.config("spark.executor.memoryOverhead", executor_memory_overhead)
+        if shuffle_partitions:
+            builder = builder \
+                .config("spark.sql.shuffle.partitions", str(shuffle_partitions)) \
+                .config("spark.default.parallelism", str(shuffle_partitions))
+
+        # Driver networking: executors on other swarm nodes must reach the driver
+        if driver_host:
+            builder = builder \
+                .config("spark.driver.host", driver_host) \
+                .config("spark.driver.bindAddress", "0.0.0.0")
+        if driver_port:
+            builder = builder.config("spark.driver.port", driver_port)
+        if block_manager_port:
+            builder = builder.config("spark.blockManager.port", block_manager_port)
 
         if os.getenv("SPARK_IVY_DIR"):
             builder = builder.config("spark.jars.ivy", os.getenv("SPARK_IVY_DIR"))
@@ -124,14 +155,16 @@ def startup(config: Dict[str, Any] = {}) -> None:
         
         spark_session = builder.getOrCreate()
         spark_session.sparkContext.setLogLevel("ERROR")
-        # Builder .config() is ignored when getOrCreate() returns a pre-existing
-        # session, so set the Arrow large-var-types flag on the live session too.
-        # It widens Arrow string/list offsets to 64-bit, which stops PyArrow from
-        # splitting oversized varlen columns (e.g. large trace_ids lists returned
-        # by the branching UDF) into a ChunkedArray that its StructArray output
-        # serializer then rejects. It is a dynamic SQL conf, applied per job.
-        spark_session.conf.set("spark.sql.execution.arrow.useLargeVarTypes", "true")
         logger.info(f"SparkSession initialized and connected to Spark Master at {spark_master_url}.")
+        conf = spark_session.sparkContext.getConf()
+        logger.info(
+            "Spark resources: cores.max=%s, executor.cores=%s, executor.memory=%s, executor.memoryOverhead=%s, shuffle.partitions=%s",
+            conf.get("spark.cores.max", "unset"),
+            conf.get("spark.executor.cores", "unset"),
+            conf.get("spark.executor.memory", "unset"),
+            conf.get("spark.executor.memoryOverhead", "unset"),
+            conf.get("spark.sql.shuffle.partitions", "unset"),
+        )
         
         # Ship code to executors
         try:
@@ -163,19 +196,6 @@ def get_spark_session() -> SparkSession:
     """
     if spark_session is None:
         raise RuntimeError("SparkSession not initialized. Call startup() first.")
-    # The session is created on the startup thread, so other threads (e.g. an API
-    # request handler) have no active thread-local session -- only the global
-    # default. Structured Streaming spawns its microbatch/offset threads from the
-    # thread that calls query.start(), inheriting that thread's active session via
-    # an InheritableThreadLocal. Delta-source offset planning runs *outside*
-    # foreachBatch (which is the only place Spark sets `withActive`), so without
-    # this it raises "No active or default Spark session found". Setting the active
-    # session on every caller thread makes streams started here resolve correctly;
-    # it does not change any pipeline stage, order, trigger, or output.
-    try:
-        SparkSession.setActiveSession(spark_session)
-    except Exception:
-        pass
     return spark_session
 
 
@@ -191,15 +211,14 @@ def cleanup():
 
     # Clear all cached RDDs/DataFrames
     try:
-        sc = spark_session.sparkContext
-        for rdd_id in list(sc._jsc.getPersistentRDDs().keys()):
-            sc._jsc.getPersistentRDDs().get(rdd_id).unpersist(True)
+        spark_session.catalog.clearCache()
     except Exception:
         pass
 
+
     # Clear Delta Lake's transaction log cache
     try:
-        spark_session._jvm.org.apache.spark.sql.delta.DeltaLog.clearCache()
+        spark_session._jvm.org.apache.spark.sql.delta.DeltaLog.clearCache()  # type: ignore[union-attr]
     except Exception:
         pass
 

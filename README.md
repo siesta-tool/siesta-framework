@@ -3,25 +3,18 @@
 Siesta is a Spark-based process mining and querying framework for event logs.
 It can run as:
 - an API server (FastAPI), or
-- module-oriented CLI jobs (indexer, miner, executor).
+- module-oriented CLI jobs (Index, mining, query).
 
 Core data assumptions:
-- `trace_id` is a string; it may be derived at indexing time from a combination of source
-  columns instead of a single one (see `field_mappings` in the indexer config)
+- `trace_id` is a string
 - `activity` is a string
 - `position` inside a trace is 0-indexed integer (derived from timestamp)
 
-## Demo video
-
-[Watch the demo](https://canva.link/85edzr7tp3yuxfg)
-
 ## What each module does
 
-- `indexer`: ingests batch/stream events and builds storage indexes/tables.
-- `miner`: discovers constraints from stored traces.
-- `executor`: executes statistics/detection/exploration queries over indexed logs.
-- `analyser`: process-mining analytics (directly-follows, durations, loop/deviation detection, DFG/BPMN/Petri net models, bottlenecks).
-- `manager`: log/metadata management endpoints.
+- `Index`: ingests batch/stream events and builds storage indexes/tables.
+- `mining`: discovers constraints from stored traces.
+- `query`: executes statistics/detection/exploration queries over indexed logs.
 
 ## Architecture
 ![Siesta Framework Architecture](siesta-architecture.svg)
@@ -31,13 +24,11 @@ Core data assumptions:
 - `main.py`: top-level entrypoint.
 - `siesta/core`: framework bootstrapping (config, Spark, storage factory, interfaces).
 - `siesta/model`: shared schemas and typed config/data models (system, storage, mining/event structures).
-- `siesta/modules`: feature modules (`indexer`, `miner`, `executor`, `analyser`, `manager`).
+- `siesta/modules`: feature modules (`Index`, `Mining`, `Querying`).
 - `siesta/storage`: storage implementations (currently S3/MinIO-based).
 - `config`: sample runtime and module config JSON files.
 - `docker-compose.yml` + `siesta/dockerbase`: API + Spark + MinIO + Kafka stack.
 - `tests`: integration/unit tests and test utilities.
-- `ui`: standalone Streamlit frontend for the API (see `ui/README.md`).
-- `demo-eval`: benchmark/evaluation scripts (see [Demo-eval benchmarks](#demo-eval-benchmarks) below).
 
 ## Dependencies
 
@@ -74,7 +65,7 @@ python3 main.py --config config/siesta.config.json
 API routes are auto-registered from modules and exposed as:
 - `POST /indexing/run`
 - `POST /mining/run`
-- `POST /querying/statistics`, `POST /querying/detection`, `POST /querying/exploration`
+- `POST /querying/run`
 
 ### 2. CLI module mode
 
@@ -84,29 +75,26 @@ General pattern:
 python3 main.py --config <system_config.json> <module> <module_args>
 ```
 
-`<module>` is each module's CLI name (`indexer`, `miner`, `executor`), not its API route prefix.
-
 Examples:
 
 ```bash
 # Index (batch/stream setup)
-python3 main.py --config config/siesta.config.json indexer --index_config config/index.config.json
+python3 main.py --config config/siesta.config.json Index --index_config config/Index.config.json
 
 # Mining
-python3 main.py --config config/siesta.config.json miner --mining_config config/mining.config.json
+python3 main.py --config config/siesta.config.json mining --mining_config config/mining.config.json
 
 # Querying
-python3 main.py --config config/siesta.config.json executor --query_config config/query.config.json
+python3 main.py --config config/siesta.config.json query --query_config config/query.config.json
 ```
 
 ## Configuration files
 
 - `config/siesta.config.json`: local host-oriented system config.
 - `config/siesta.docker.config.json`: container-network hostnames (`minio`, `kafka`, `spark-master`).
-- `config/index.config.json`: ingestion and field mappings.
+- `config/Index.config.json`: ingestion and field mappings.
 - `config/mining.config.json`: mining categories, thresholds, output path.
 - `config/query.config.json`: method and query payload.
-- `config/analyser.config.json`: analyser method, target log, output path.
 
 ## Docker (recommended for full stack)
 
@@ -133,6 +121,29 @@ This starts:
 - `Spark/`: Spark image and logging config.
 - `Kafka/`: Kafka image and startup script.
 
+### Spark: default vs. distributed execution
+
+By default, `docker-compose.yml` runs Spark standalone on a single host: `spark-master` plus
+`spark-worker`/`spark-worker2`, each with 12 cores / 12G (override via `SPARK_WORKER_CORES` /
+`SPARK_WORKER_MEMORY`).
+
+`sparkManager.py` resolves each Spark setting in this order: key in the `SIESTA_CONFIG` JSON →
+`SPARK_*` env var → built-in default. With the default `config/siesta.docker.config.json`:
+- driver memory `12g` and executor memory `10g` come from the JSON (`spark_driver_memory`,
+  `spark_executor_memory`), so the matching env vars have no effect unless you remove those keys;
+- executor cores, max cores, memory overhead, shuffle partitions and driver host/port are unset,
+  so Spark's own defaults apply (one executor per worker using all its cores).
+
+The `SPARK_*` lines in the `siesta-api` service are commented out and pre-filled with the values
+used for multi-node scaling, as a reference. Uncomment and adjust them to tune sizing on a single
+host.
+
+For true distributed execution across multiple machines, use `docker-compose-com.yml` instead: a
+Docker Swarm stack (see the comment block at the top of that file for image registry setup and
+deploy commands) that runs `siesta-api`/`spark-master` on one leader node and one `spark-worker`
+replica per worker node, with the same `SPARK_*` env vars controlling executor/driver sizing
+across the cluster, e.g. `SPARK_CORES_MAX=18 docker stack deploy -c docker-compose-com.yml siesta`.
+
 ## Extending Siesta (developer hints)
 
 ### Add a new module
@@ -156,47 +167,6 @@ Module discovery is automatic from `siesta.modules.*.main`.
 
 ## Practical run order
 
-1. Run indexer on a log.
-2. Run miner/executor on the same `log_name` and `storage_namespace`.
+1. Run Index on a log.
+2. Run mining/query on the same `log_name` and `storage_namespace`.
 3. Check outputs under `output/` (and persisted data in configured storage).
-
-## Demo-eval benchmarks
-
-`demo-eval/` holds standalone benchmark/evaluation scripts that drive a running Siesta stack (and, for the ELK comparison, a separate Elasticsearch instance). They are not part of the framework's module system — run them directly with Python. Each script also accepts `--help` for its full flag list.
-
-### SIESTA vs. ELK query-latency benchmark (`exp_predicates.py`)
-
-Compares SIESTA query latency against Elasticsearch as a function of the number of event-attribute predicates, at a fixed pattern length.
-
-```bash
-# 1. Start Elasticsearch
-docker compose -f demo-eval/docker-compose-elk.yml up -d
-
-# 2. Start the Siesta API (see "Docker" above), then index the target log into both stores
-python3 demo-eval/exp_predicates.py --log bpic2017 --ingest-elk --ingest-siesta
-
-# 3. Run the benchmark (assumes both stores are already indexed)
-python3 demo-eval/exp_predicates.py --log bpic2017
-
-# Dry run: print the generated queries without hitting either server
-python3 demo-eval/exp_predicates.py --log bpic2017 --dry-run
-```
-
-Results are written as `demo-eval/exp_pred_<log>_len<N>_summary.csv`, `..._queries.jsonl`, and a latency plot PNG.
-
-### Time-to-Queryable (TTQ) streaming sweep (`ttq_run.py`)
-
-Measures how long streamed events take to become queryable, sweeping the Kafka injection rate. Requires the full Docker stack (`docker compose up --build siesta-api`) with Kafka reachable.
-
-```bash
-# Smoke test (short sweep, quick sanity check)
-python3 demo-eval/ttq_run.py --smoke
-
-# Full sweep (defaults to lambdas 250..3000 events/s, driving the siesta-api container)
-python3 demo-eval/ttq_run.py
-
-# Optional: commit-visibility sanity check against a running API
-python3 demo-eval/ttq_sanity.py --endpoint http://localhost:8000
-```
-
-`ttq_run.py` orchestrates `ttq_producer.py` (Kafka replay) per lambda, collects results into `demo-eval/ttq_results.csv`, and calls `ttq_analyze.py` to produce `ttq_summary.csv` and `ttq_plot.png`. It uses `demo-eval/ttq_index.config.json` as the base streaming index config.
