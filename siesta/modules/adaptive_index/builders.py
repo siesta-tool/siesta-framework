@@ -71,9 +71,11 @@ STNM computation by joining the shared table with the overlay and
 renaming columns so that downstream functions see the familiar
 (trace_id = group_value, position = group_pos) schema.
 
-Position semantics: at L1 (has_pos=False) _extract_single_pair_from_df
-assigns sequential positions by timestamp, same as before.  At L2
-(has_pos=True) group_pos values from the overlay are used.
+Position semantics: at L1 (has_pos=False) _get_perspective_seq_df ranks
+each group's full event sequence by timestamp (ties: activity, trace_id,
+position), before any activity filter, so every pair table of a perspective
+uses the same positions.  At L2 (has_pos=True) group_pos values from the
+overlay are used.
 """
 
 from __future__ import annotations
@@ -210,8 +212,14 @@ def _get_perspective_seq_df(
 
     Output schema
     -------------
-    trace_id (= group_value), activity, start_timestamp, attributes
-    [, position (= group_pos)  — only when has_pos is True]
+    trace_id (= group_value), activity, start_timestamp, attributes, position
+
+    ``position`` is the intra-group position: the positions overlay's
+    ``group_pos`` at L2, and otherwise the event's rank within its group
+    ordered by (start_timestamp, activity, trace_id, position).  The L1 rank
+    is computed over the group's full sequence, before any activity filter,
+    so pair tables built from filtered reads (e.g. batched transient builds)
+    agree with those built from full reads.
 
     Parameters
     ----------
@@ -256,11 +264,15 @@ def _get_perspective_seq_df(
         )
         if group_ids_filter:
             result = result.filter(col("group_value").isin(group_ids_filter))
+        group_order = Window.partitionBy("group_value").orderBy(
+            col("start_timestamp"), col("activity"), col("trace_id"), col("position")
+        )
         return result.select(
             col("group_value").alias("trace_id"),
             col("activity"),
             col("start_timestamp"),
             col("attributes"),
+            (F.row_number().over(group_order) - 1).alias("position"),
         )
 
 
@@ -892,13 +904,16 @@ def _extract_single_pair_from_df(
 
     Expects seq_df to have schema:
         trace_id (= group_value), activity, start_timestamp, attributes
-        [, position (= group_pos)  — when has_pos is True]
+        [, position (= intra-group position, see _get_perspective_seq_df)]
+    When no position column is present, positions are assigned per group
+    from the (start_timestamp, activity) order of the rows given.
 
     This function is unchanged from the previous implementation; the
     schema contract is now fulfilled by _get_perspective_seq_df.
     """
     spark = get_spark_session()
     real_lookback = _parse_lookback(lookback_str)
+    uses_pos = "position" in seq_df.columns
 
     trace_rdd = seq_df.rdd.map(
         lambda row: (
@@ -906,7 +921,7 @@ def _extract_single_pair_from_df(
             (
                 row.activity,
                 row.start_timestamp,
-                row.position if has_pos and hasattr(row, "position") else 0,
+                row.position if uses_pos else 0,
                 row.attributes,
             ),
         )
@@ -925,7 +940,7 @@ def _extract_single_pair_from_df(
         group_id, events = kv
         events = list(events)
 
-        if not has_pos:
+        if not uses_pos:
             events.sort(key=lambda e: (e[1], e[0]))
             events = [
                 (act, ts, idx, attrs)
