@@ -83,8 +83,10 @@ from siesta.modules.adaptive_index.catalog import get_catalog
 from siesta.modules.adaptive_index.retention import RetentionPolicy
 from siesta.modules.adaptive_query.lru_cache import PairLRUCache, get_lru_cache
 from siesta.modules.query.parse_seql import (
+    can_match_single_event,
     extract_info_pairs,
     extract_responded_pairs,
+    pattern_labels,
     split_pattern_to_list,
     Quantifier as SeqlQuantifier,
 )
@@ -93,7 +95,7 @@ from siesta.modules.query.processors.detection_query import (
     detect as eager_detect,
     process_detection_query as eager_process_detection,
 )
-from siesta.modules.query.processors.predicates import build_pair_attr_predicate
+from siesta.modules.query.processors.predicates import build_event_keep_predicate
 from siesta.modules.query.processors.exploration_query import (
     process_exploration_query as eager_process_exploration,
 )
@@ -507,33 +509,24 @@ class Adaptive_Querying(SiestaModule):
         info_pairs: set,
     ) -> bool:
         """
-        Return True when the pruning step alone fully validates the
-        pattern, so the downstream CEP pass would only re-prove what is
-        already known.
+        Return True when the pruning step alone fully answers the pattern, so
+        the downstream CEP pass would only re-prove what is already known.
 
         Conditions:
         1. Exactly one ResponsePair.
         2. Both quantifiers are ONE (no Kleene repetition).
         3. No forbidden-between activities (negation).
-        4. Every attribute constraint is pushable as a Spark column
-           predicate (see build_pair_attr_predicate).  When the pair df
-           has already been filtered by that predicate, the surviving rows
-           satisfy the full constraint set, so CEP would only re-prove it.
-        5. The only info-pairs are the self-pairs of this pair's own
-           endpoints — those exist purely to feed attribute values to CEP
-           and are made redundant by the predicate pushdown.
+        4. No attribute constraints on either endpoint.
+        5. No info-pairs (none are needed without constraints/negation).
 
-        Under these conditions every row of the (attribute-filtered) pair
-        table for (A, B) that survives the prune is, by construction, a
-        valid match of the pattern: the row represents a co-occurrence of
-        A and B in the same group with A before B, satisfying all declared
-        attribute constraints, and there are no further predicates to check.
+        Under these conditions the smallest (source, target) STNM row of a
+        group is exactly CEP's first match: the earliest source that has a
+        later target, together with the first target after it.
 
-        Note: this is not specific to the adaptive path — the same
-        reasoning applies to eager.  The savings are largest when the
-        matcher's input sequence (after regrouping by a non-trace
-        perspective) is long and dense in the pattern's activities, as
-        happens for warmup queries on busy resources.
+        Attribute constraints are *not* allowed: the pairs index follows
+        skip-till-next-match, so a valid attribute-satisfying match A -> B
+        often has no (A, B) row of its own.  CEP recovers it from the
+        (A, A) / (B, B) self-pair rows, which only the CEP path fetches.
         """
         if len(pair_branches) != 1:
             return False
@@ -544,160 +537,29 @@ class Adaptive_Querying(SiestaModule):
             return False
         if rp.forbidden_between:
             return False
-
-        # Attribute constraints are tolerated only when every one of them
-        # can be pushed down as a Spark column predicate.
         if rp.source.constraints or rp.target.constraints:
-            _, all_pushable = build_pair_attr_predicate(rp)
-            if not all_pushable:
-                return False
+            return False
+        return not info_pairs
 
-        # The only acceptable info-pairs are the constrained endpoints'
-        # self-pairs ((A,A) / (B,B)); anything else (e.g. negation anchors)
-        # genuinely needs CEP.
-        if info_pairs:
-            allowed_self = {
-                (rp.source.label, rp.source.label),
-                (rp.target.label, rp.target.label),
-            }
-            for p in info_pairs:
-                if (p[0], p[1]) not in allowed_self:
-                    return False
-        return True
-
-    def _fast_path_mode(self, pattern, pair_branches, info_pairs):
+    def _fast_path_mode(self, pattern, pair_branches, info_pairs) -> str:
         """
-        Decide how the pattern can be answered without the Python CEP engine.
+        Decide how the pattern is answered.
 
-        Returns (mode, ordered_labels):
-          "single" — exactly one responded pair; handled by the single-pair
-                     skip-CEP path (min position-pair per group).
-          "chain"  — a linear sequence of >= 2 DISTINCT positive activities,
-                     all with the ONE quantifier, no negation, and every
-                     attribute constraint pushable as a Spark predicate.
-                     Answered by joining CONSECUTIVE pair tables on the shared
-                     intermediate position (Step 5 chain join) — fully native,
-                     no per-group Python validation.
-          "cep"    — anything else (Kleene quantifiers, negation, OR branches,
-                     repeated labels, non-pushable constraints): the general
-                     CEP path is required.
-        ordered_labels is the positive activity sequence (only for "chain").
+        Returns:
+          "single" — exactly one unconstrained responded pair; answered from
+                     the pair rows directly (min position-pair per group).
+          "cep"    — anything else: the general CEP path.
 
-        Why a chain join is correct for "chain"
-        ---------------------------------------
-        Pairwise STNM existence is NOT sufficient for a multi-activity match:
-        the pruning count (pair_count == #required) can pass even when no
-        single increasing position sequence exists (different pair instances
-        use different occurrences of a shared activity).  Joining consecutive
-        pair tables on  prev.target_position == next.source_position  stitches
-        the pairs through the SAME intermediate event, so a surviving row is a
-        genuine increasing chain v0 < v1 < ... < v_{k-1} — exactly the STNM
-        eventually-follows semantics the CEP engine would compute.
+        A native multi-pair chain join is not used: stitching STNM pair rows
+        on a shared position misses matches, because a source that falls
+        before the previous pair's target is skipped (e.g. ``A B C`` on
+        ``B A B C`` has no (B, C) row starting at the second B).
         """
-        # No negation, no Kleene repetition, single OR-branch.
-        if any(rp.forbidden_between for rp in pair_branches):
-            return "cep", []
-        if any(rp.source_quantifier != SeqlQuantifier.ONE
-               or rp.target_quantifier != SeqlQuantifier.ONE
-               for rp in pair_branches):
-            return "cep", []
         if len({rp.branch_id for rp in pair_branches}) > 1:
-            return "cep", []
-
-        # Every attribute constraint must be pushable as a column predicate.
-        for rp in pair_branches:
-            if rp.source.constraints or rp.target.constraints:
-                _, all_pushable = build_pair_attr_predicate(rp)
-                if not all_pushable:
-                    return "cep", []
-
-        # One responded pair → existing, tested single-pair fast path.
+            return "cep"
         if self._cep_is_redundant(pair_branches, info_pairs):
-            return "single", []
-
-        # Multi-pair: require a linear sequence of positive activities with no
-        # Kleene quantifiers.  Repeated labels are fine: the createTuples fix
-        # ensures every source occurrence is stored with its first-target
-        # position, so the consecutive-pair position stitch is valid even when
-        # the same activity label appears multiple times in the chain.
-        acts = [a for a in split_pattern_to_list(pattern) if not a.get("negated")]
-        labels = [a["label"] for a in acts]
-        if len(labels) < 2:
-            return "cep", []
-        if any(a.get("quantifier") for a in acts):
-            return "cep", []
-
-        # info-pairs must only be the constrained activities' self-pairs;
-        # the attribute pushdown makes those redundant.  Anything else
-        # (e.g. negation anchors) requires CEP.
-        allowed_self = {(l, l) for l in labels}
-        for p in info_pairs:
-            if (p[0], p[1]) not in allowed_self:
-                return "cep", []
-
-        return "chain", labels
-
-    def _chain_join_result(self, index_df, ordered_labels,
-                           support_threshold, group_count):
-        """
-        Answer a linear-sequence pattern by joining the CONSECUTIVE pair
-        tables in `index_df` on the shared intermediate position.
-
-        index_df is assumed to already be attribute-filtered (constraints
-        pushed down) and to contain the consecutive pair rows
-        (v_i, v_{i+1}) for the ordered activity labels.
-
-        Returns the same shape as the other paths: a list of
-        (group_id, positions) where positions is the flattened, ascending
-        list of matched positions [p0, p1, ..., p_{k-1}] for one match
-        (the lexicographically smallest — i.e. earliest — per group).
-        """
-        v0, v1 = ordered_labels[0], ordered_labels[1]
-        chain = (
-            index_df
-            .where((col("source") == v0) & (col("target") == v1))
-            .select(
-                col("trace_id"),
-                col("source_position").alias("p0"),
-                col("target_position").alias("p1"),
-            )
-        )
-        # Stitch each subsequent consecutive pair on the shared position so
-        # the result is a single strictly-increasing chain of positions.
-        for idx in range(2, len(ordered_labels)):
-            a, b = ordered_labels[idx - 1], ordered_labels[idx]
-            nxt = (
-                index_df
-                .where((col("source") == a) & (col("target") == b))
-                .select(
-                    col("trace_id").alias("_tid"),
-                    col("source_position").alias("_src"),
-                    col("target_position").alias(f"p{idx}"),
-                )
-            )
-            chain = (
-                chain.join(
-                    nxt,
-                    (chain["trace_id"] == nxt["_tid"])
-                    & (chain[f"p{idx - 1}"] == nxt["_src"]),
-                    "inner",
-                )
-                .drop("_tid", "_src")
-            )
-
-        pos_cols = [f"p{i}" for i in range(len(ordered_labels))]
-        per_group = (
-            chain
-            .withColumn("positions", F.array(*[col(c) for c in pos_cols]))
-            .groupBy("trace_id")
-            .agg(F.min("positions").alias("positions"))
-        )
-        if group_count:
-            per_group = per_group.filter(
-                F.size("positions") >= F.lit(support_threshold * group_count)
-            )
-        collected = per_group.collect()
-        return [(row.trace_id, list(row.positions)) for row in collected]
+            return "single"
+        return "cep"
 
     def _run_adaptive_detection(self) -> Any:
         """
@@ -744,6 +606,20 @@ class Adaptive_Querying(SiestaModule):
         has_pos = stats.level >= PerspectiveLevel.L2_POS_ESTABLISHED
         sort_key = "position" if (references_pos and has_pos) else "start_timestamp"
 
+        group_count = self.metadata.trace_count if self.metadata.trace_count else 0
+
+        if can_match_single_event(pattern):
+            # A single-event match involves no pair, so pair tables cannot
+            # deliver it: hand CEP every event of the pattern's activities.
+            result = self._detect_from_group_events(
+                pattern, pid, grouping_keys, has_pos, sort_key,
+                support_threshold, group_count,
+            )
+            return self._finish_detection(
+                catalog, pid, stats, result, set(), {},
+                references_pos, support_threshold, group_count, t_start,
+            )
+
         # --- Step 2: Determine required pairs ---------------------------
         pair_branches = set(extract_responded_pairs(pattern))
         info_pairs = extract_info_pairs(pattern)
@@ -753,20 +629,9 @@ class Adaptive_Querying(SiestaModule):
 
         # Decide the execution mode (single-pair skip / multi-pair chain join
         # / CEP) up front so we fetch exactly the pairs each path needs.
-        mode, ordered_labels = self._fast_path_mode(
-            pattern, pair_branches, info_pairs
-        )
-        if mode == "chain":
-            # Only the consecutive pairs (v_i, v_{i+1}) are needed to stitch
-            # the chain — avoid lazy scans for the non-consecutive responded
-            # pairs and for the self info-pairs (made redundant by pushdown).
-            all_pairs_2d = {
-                (ordered_labels[i], ordered_labels[i + 1])
-                for i in range(len(ordered_labels) - 1)
-            }
-        elif mode == "single":
-            # Self info-pairs ((A,A)/(B,B)) only fed attributes to CEP and are
-            # redundant under predicate pushdown — don't pay to materialise them.
+        mode = self._fast_path_mode(pattern, pair_branches, info_pairs)
+        if mode == "single":
+            # An unconstrained single pair has no info-pairs to fetch.
             all_pairs_2d = set(all_responded)
         else:
             all_pairs_2d = all_responded | {(p[0], p[1]) for p in info_pairs}
@@ -893,87 +758,63 @@ class Adaptive_Querying(SiestaModule):
         index_df = reduce(DataFrame.unionByName, pair_dfs)
         logger.info(f"TIMING pair_fetch done: {time.time() - t_start:.2f}s  pattern={pattern!r}")
 
-        # --- Attribute predicate pushdown -------------------------------
-        # The pair index stores each endpoint's attributes
-        # (source_attributes / target_attributes MapType columns).  If the
-        # single responded pair carries attribute constraints expressible as
-        # Spark column predicates, filter the index now so prune, position
-        # extraction and the skip-CEP path all operate on rows that already
-        # satisfy the constraints.  This is what lets attribute-constrained
-        # queries use the fast DataFrame path (and benefit from PERSISTENT
-        # pairs) instead of shipping every (A,B) co-occurrence to the Python
-        # CEP validator.  Each predicate is scoped to its own pair's rows
-        # (other pairs' rows pass through untouched), so multi-pair patterns
-        # get every pushable constraint applied to the correct pair table.
-        for rp_c in pair_branches:
-            if not (rp_c.source.constraints or rp_c.target.constraints):
-                continue
-            attr_pred, _ = build_pair_attr_predicate(rp_c)
-            if attr_pred is not None:
-                is_pair_row = (
-                    (col("source") == rp_c.source.label)
-                    & (col("target") == rp_c.target.label)
-                )
-                index_df = index_df.where((~is_pair_row) | attr_pred)
-                logger.info(
-                    f"{self.name}: pushed down attribute predicate for "
-                    f"pair ({rp_c.source.label},{rp_c.target.label})"
-                )
-
         # --- Step 4: Prune candidate groups -----------------------------
-        # The chain join (Step 5) computes its result directly from index_df,
-        # so the prune + position-materialisation actions below are only built
-        # for the single-pair skip path and the general CEP path.
-        pair_positions_df = None
-        if mode != "chain":
-            branch_required: dict[int, set[tuple[str, str]]] = {}
-            for rp in pair_branches:
-                if (
-                    rp.source_quantifier == SeqlQuantifier.STAR
-                    or rp.target_quantifier == SeqlQuantifier.STAR
-                ):
-                    continue
-                branch_required.setdefault(rp.branch_id, set()).add(
-                    (rp.source.label, rp.target.label)
-                )
-
-            branch_pruned_dfs = []
-            for bid, required_2d in branch_required.items():
-                if not required_2d:
-                    continue
-                branch_pred = build_exact_pair_predicate(required_2d)
-                branch_pruned = (
-                    index_df
-                    .where(branch_pred)
-                    .dropDuplicates(["trace_id", "source", "target"])
-                    .groupBy("trace_id")
-                    .agg(F.count("*").alias("pair_count"))
-                    .filter(col("pair_count") == len(required_2d))
-                    .select("trace_id")
-                )
-                branch_pruned_dfs.append(branch_pruned)
-
-            if not branch_pruned_dfs:
-                pruned_group_ids = index_df.select("trace_id").distinct()
-            elif len(branch_pruned_dfs) == 1:
-                pruned_group_ids = branch_pruned_dfs[0].distinct()
-            else:
-                pruned_group_ids = reduce(
-                    lambda a, b: a.union(b), branch_pruned_dfs
-                ).distinct()
-
-            # pruned_count = pruned_group_ids.count()
-            # logger.info(f"TIMING prune={time.time()-t_start:.2f}s  pruned_groups={pruned_count}")
-
-            pair_positions_df = (
-                index_df
-                .join(pruned_group_ids, on="trace_id", how="inner")
-                .repartition("trace_id")
+        # Pruning must see the unfiltered pair rows: the pairs index follows
+        # skip-till-next-match, so an attribute-satisfying match may have no
+        # (A, B) row of its own (see build_event_keep_predicate).
+        branch_required: dict[int, set[tuple[str, str]]] = {}
+        for rp in pair_branches:
+            if (
+                rp.source_quantifier == SeqlQuantifier.STAR
+                or rp.target_quantifier == SeqlQuantifier.STAR
+            ):
+                continue
+            branch_required.setdefault(rp.branch_id, set()).add(
+                (rp.source.label, rp.target.label)
             )
 
-            # after .rdd.map (just inspect the count):
-            # positions_count = pair_positions_df.count()
-            # logger.info(f"TIMING positions_built={time.time()-t_start:.2f}s  row_count={positions_count}")
+        branch_pruned_dfs = []
+        for bid, required_2d in branch_required.items():
+            if not required_2d:
+                continue
+            branch_pred = build_exact_pair_predicate(required_2d)
+            branch_pruned = (
+                index_df
+                .where(branch_pred)
+                .dropDuplicates(["trace_id", "source", "target"])
+                .groupBy("trace_id")
+                .agg(F.count("*").alias("pair_count"))
+                .filter(col("pair_count") == len(required_2d))
+                .select("trace_id")
+            )
+            branch_pruned_dfs.append(branch_pruned)
+
+        if not branch_pruned_dfs:
+            pruned_group_ids = index_df.select("trace_id").distinct()
+        elif len(branch_pruned_dfs) == 1:
+            pruned_group_ids = branch_pruned_dfs[0].distinct()
+        else:
+            pruned_group_ids = reduce(
+                lambda a, b: a.union(b), branch_pruned_dfs
+            ).distinct()
+
+        # pruned_count = pruned_group_ids.count()
+        # logger.info(f"TIMING prune={time.time()-t_start:.2f}s  pruned_groups={pruned_count}")
+
+        # Attribute pushdown for CEP: drop rows whose endpoints can never be
+        # part of a match.  Applied after pruning, never to the prune input.
+        keep_pred = build_event_keep_predicate(pattern) if mode == "cep" else None
+        cep_rows_df = index_df.where(keep_pred) if keep_pred is not None else index_df
+
+        pair_positions_df = (
+            cep_rows_df
+            .join(pruned_group_ids, on="trace_id", how="inner")
+            .repartition("trace_id")
+        )
+
+        # after .rdd.map (just inspect the count):
+        # positions_count = pair_positions_df.count()
+        # logger.info(f"TIMING positions_built={time.time()-t_start:.2f}s  row_count={positions_count}")
 
         # # --- Step 5: Validate via CEP -----------------------------------
         # # Build per-group pseudo-sequences and run OpenCEP, same as the
@@ -1059,20 +900,8 @@ class Adaptive_Querying(SiestaModule):
         # co-occurrence in the right order, and each surviving row
         # carries the matching positions directly.
         sort_field = "position" if sort_key == "position" else "timestamp"
-        group_count = (
-            self.metadata.trace_count
-            if self.metadata.trace_count
-            else 0
-        )
 
-        if mode == "chain":
-            # Multi-activity linear sequence: stitch consecutive pair tables
-            # on shared positions (native joins, no Python CEP).
-            result = self._chain_join_result(
-                index_df, ordered_labels, support_threshold, group_count
-            )
-
-        elif mode == "single":
+        if mode == "single":
             rp = next(iter(pair_branches))
             # Restrict to the rows that actually match the pair label
             # (the union upstream may have included extra info-pair
@@ -1085,13 +914,9 @@ class Adaptive_Querying(SiestaModule):
             )
 
 
-            # Match the existing result shape: list of (group_id, positions)
-            # where positions is a list of ints (the CEP path returns a
-            # flat list — first match only).  For the skip-CEP path we
-            # return ALL match position-pairs flattened so the existing
-            # `len(positions)` support filter and `formatted` consumer
-            # still work.  Each match contributes 2 ints (source, target),
-            # so len(positions) // 2 == number of matches for the group.
+            # Match the CEP path's result shape: (group_id, positions) with
+            # the positions of the first match, i.e. the smallest
+            # (source, target) row of the group.
             per_group = (
                 matching_rows
                 .withColumn(
@@ -1113,9 +938,7 @@ class Adaptive_Querying(SiestaModule):
 
 
         else:
-            # General CEP path — unchanged from the existing
-            # implementation.  Kept verbatim because the pattern shape
-            # may involve quantifiers, negation, attribute constraints,
+            # General CEP path: quantifiers, negation, attribute constraints,
             # multiple pairs requiring cross-pair ordering, etc.
             matches_rdd = pair_positions_df.rdd.map(
                 lambda r: (
@@ -1166,7 +989,9 @@ class Adaptive_Querying(SiestaModule):
                     pattern,
                     events=events,
                 )
-                return (group_id, positions)
+                # CEP returns indices into `events`; report their positions,
+                # as the eager engine does.
+                return (group_id, [int(events[i]["position"]) for i in positions])
 
             result = (
                 matches_rdd
@@ -1182,6 +1007,49 @@ class Adaptive_Querying(SiestaModule):
         logger.info(f"TIMING cep_done: {time.time() - t_start:.2f}s  pattern={pattern!r}")
 
 
+        return self._finish_detection(
+            catalog, pid, stats, result, all_pairs_2d, lazy_costs,
+            references_pos, support_threshold, group_count, t_start,
+        )
+
+    def _detect_from_group_events(self, pattern, pid, grouping_keys, has_pos, sort_key,
+                                  support_threshold, group_count):
+        """
+        Run CEP over each group's events of the pattern's activities, read
+        from the perspective's sequence (group positions as in pair tables).
+        """
+        sort_field = "position" if sort_key == "position" else "timestamp"
+        seq_df = _get_perspective_seq_df(
+            pid=pid,
+            grouping_keys=grouping_keys,
+            metadata=self.metadata,
+            storage=self.storage,
+            has_pos=has_pos,
+        ).where(col("activity").isin(sorted(pattern_labels(pattern))))
+
+        def to_event(r):
+            event = {"name": r.activity, "position": r.position, "timestamp": r.start_timestamp}
+            if r.attributes:
+                event.update(r.attributes)
+            return r.trace_id, event
+
+        def validate_group(group_id_events):
+            group_id, events = group_id_events
+            events = sorted(events, key=lambda e: (int(e[sort_field]), e.get("name", "")))
+            positions = find_occurrences_dsl([e["name"] for e in events], pattern, events=events)
+            return (group_id, [int(events[i]["position"]) for i in positions])
+
+        return (
+            seq_df.rdd.map(to_event)
+            .groupByKey()
+            .map(validate_group)
+            .filter(lambda r: len(r[1]) >= support_threshold * group_count if group_count else True)
+            .collect()
+        )
+
+    def _finish_detection(self, catalog, pid, stats, result, all_pairs_2d, lazy_costs,
+                          references_pos, support_threshold, group_count, t_start):
+        """Step 6 (workload statistics, promotion) and response formatting."""
         t_total = time.time() - t_start
 
         # --- Step 6: Record workload statistics -------------------------
