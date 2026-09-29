@@ -1,7 +1,10 @@
 # Siesta Framework
 
 Siesta is a Spark-based process mining and querying framework for event logs.
-It can run as:
+
+<img height="600" alt="image" src="https://github.com/user-attachments/assets/82c79a54-eb4d-4bd6-8f63-3bcf028d977b" />
+
+Siesta can run as:
 - an API server (FastAPI), or
 - module-oriented CLI jobs (Index, mining, query).
 
