@@ -65,7 +65,7 @@ class Siesta:
                 ):
                     discovered.add(obj)
 
-        return list(discovered)
+        return sorted(list(discovered), key=lambda x: x.__name__)
 
     def startup(self) -> None:
         """
