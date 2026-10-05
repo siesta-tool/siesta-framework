@@ -83,6 +83,19 @@ from siesta.modules.adaptive_index.builders import (
 from siesta.modules.adaptive_index.catalog import get_catalog
 from siesta.modules.adaptive_index.retention import RetentionPolicy
 from siesta.modules.adaptive_query.lru_cache import PairLRUCache, get_lru_cache
+from siesta.modules.adaptive_query.state import (
+    GROUP_COUNTS,
+    drain_promotions,
+    pair_table_files,
+    reset_log_state,
+    set_log_option,
+    submit_promotion,
+)
+from siesta.modules.index.pair_attributes import (
+    has_attribute_constraints,
+    join_back_attributes,
+    strip_pair_attributes,
+)
 from siesta.modules.query.parse_seql import (
     can_match_single_event,
     extract_info_pairs,
@@ -195,16 +208,10 @@ class Adaptive_Querying(SiestaModule):
         super().__init__()
         self.query_config = {}
         self._retention = None
-        self._retention_params = None   
-        # Per-perspective promotion queues and worker threads.
-        # Each perspective gets one worker thread that serialises
-        # build_pair_persistent calls, preventing concurrent MERGE
-        # conflicts on the shared last_checked_table.
-        self._promotion_queues:  dict[str, queue.Queue] = {}
-        self._promotion_workers: dict[str, threading.Thread] = {}
-        self._promotion_lock = threading.Lock()
-        # (namespace, log, perspective, event_count) -> number of groups
-        self._group_counts: dict = {}
+        self._retention_params = None
+        # Promotion workers and group counts live in
+        # siesta.modules.adaptive_query.state so the indexer can reset
+        # them and evaluation code can wait for pending promotions.
 
 
     # ------------------------------------------------------------------
@@ -220,6 +227,11 @@ class Adaptive_Querying(SiestaModule):
             "exploration": ("POST", self.api_exploration),
             "statistics": ("POST", self.api_statistics),
             "pair_coverage": ("POST", self.api_pair_coverage),
+            "eval_catalog": ("POST", self.api_eval_catalog),
+            "eval_reset": ("POST", self.api_eval_reset),
+            "eval_drain": ("POST", self.api_eval_drain),
+            "eval_force_persist": ("POST", self.api_eval_force_persist),
+            "eval_pair_digest": ("POST", self.api_eval_pair_digest),
         }
 
     # ------------------------------------------------------------------
@@ -432,6 +444,220 @@ class Adaptive_Querying(SiestaModule):
         }
 
     # ------------------------------------------------------------------
+    # Evaluation endpoints
+    # ------------------------------------------------------------------
+    # Instrumentation for benchmarks: inspect the lifecycle state, reset
+    # the in-memory adaptive state, wait for asynchronous promotions, and
+    # persist pairs without a query workload (the all-pairs counterfactual).
+
+    @staticmethod
+    def _eval_metadata(body: dict) -> MetaData:
+        return MetaData(
+            storage_namespace=body.get("storage_namespace", "siesta"),
+            log_name=body["log_name"],
+            storage_type=body.get("storage_type", "s3"),
+        )
+
+    def api_eval_catalog(self, body: Annotated[dict, Body(...)]) -> Any:
+        """
+        Snapshot of the catalog of a log: per perspective its level and,
+        per pair, status, decayed query count, build / savings /
+        maintenance costs.  Also reports the LRU contents.
+
+        Body: {log_name, storage_namespace?, grouping_keys?, drain?}.
+        With ``drain`` (default true) pending promotions finish first so
+        the snapshot reflects them.
+        """
+        from siesta.modules.adaptive_index.catalog import _make_perspective_id
+
+        metadata = self._eval_metadata(body)
+        waited = drain_promotions(metadata) if body.get("drain", True) else 0.0
+        catalog = get_catalog(metadata, get_storage_manager())
+        pid = (
+            _make_perspective_id(body["grouping_keys"])
+            if body.get("grouping_keys") else None
+        )
+        lru = get_lru_cache(metadata)
+        lru_keys = [k for k in lru.keys() if pid is None or k[0] == pid]
+        return {
+            "code": 200,
+            "drained_s": waited,
+            "perspectives": catalog.snapshot(pid),
+            "lru": {
+                "capacity": lru.capacity,
+                "size": len(lru),
+                "evictions": lru.evictions,
+                "entries": [f"{k[0]}:{k[1]}->{k[2]}" for k in lru_keys],
+            },
+        }
+
+    def api_eval_reset(self, body: Annotated[dict, Body(...)]) -> Any:
+        """
+        Drop the in-memory adaptive state of a log (pending promotions are
+        drained first): LRU cache, group-count cache and catalog singleton.
+        Storage is untouched; the catalog reloads from Delta on next use.
+
+        Body: {log_name, storage_namespace?}.
+        """
+        return {"code": 200, **reset_log_state(self._eval_metadata(body))}
+
+    def api_eval_drain(self, body: Annotated[dict, Body(...)]) -> Any:
+        """
+        Block until the asynchronous post-query promotions of a log (or of
+        every log when ``log_name`` is omitted) have finished.
+
+        Body: {log_name?, storage_namespace?, timeout_s?}.
+        """
+        metadata = self._eval_metadata(body) if body.get("log_name") else None
+        waited = drain_promotions(metadata, timeout_s=body.get("timeout_s"))
+        return {"code": 200, "drained_s": waited}
+
+    def api_eval_force_persist(self, body: Annotated[dict, Body(...)]) -> Any:
+        """
+        Build and persist pair indices of a perspective without a query
+        workload.  Used for the counterfactual in which every pair of every
+        perspective is maintained.
+
+        Body: {log_name, storage_namespace?, grouping_keys, pairs: [[A, B],
+        ...] | "all", lookback?, lookback_mode?}.  ``"all"`` persists every
+        ordered pair of distinct activities that co-occurs in some group,
+        plus the self-pairs of activities that occur twice in a group.
+        """
+        from siesta.modules.adaptive_index.builders import build_pairs_persistent_batched
+
+        metadata = self._eval_metadata(body)
+        storage = get_storage_manager()
+        metadata = storage.read_metadata_table(metadata)
+        grouping_keys = body["grouping_keys"]
+        drain_promotions(metadata)
+        set_log_option(metadata, "embed_pair_attributes",
+                       body.get("pair_attributes", "embedded") != "join")
+
+        catalog = get_catalog(metadata, storage)
+        pid, stats = catalog.get_or_declare(
+            grouping_keys=grouping_keys,
+            lookback=body.get("lookback", "3650d"),
+            lookback_mode=body.get("lookback_mode", "time"),
+        )
+        if stats.level < PerspectiveLevel.L1_POS_FREE:
+            promote_to_l1(pid, grouping_keys, metadata, storage)
+            catalog.promote(pid, PerspectiveLevel.L1_POS_FREE)
+
+        requested = body.get("pairs", "all")
+        if requested == "all":
+            pairs = self._cooccurring_pairs(metadata, storage, grouping_keys)
+        else:
+            pairs = [tuple(p) for p in requested]
+        todo = [
+            (a, b) for (a, b) in pairs
+            if catalog.get_pair_status(pid, a, b) != PairStatus.PERSISTENT
+        ]
+
+        t0 = time.time()
+        costs = build_pairs_persistent_batched(
+            pid=pid,
+            pairs=todo,
+            lookback=stats.lookback,
+            lookback_mode=stats.lookback_mode,
+            grouping_keys=grouping_keys,
+            metadata=metadata,
+            storage=storage,
+            has_pos=stats.level >= PerspectiveLevel.L2_POS_ESTABLISHED,
+        )
+        for pair, ms in costs.items():
+            catalog.record_pair_build_cost(pid, pair[0], pair[1], ms)
+        # Pinned: the counterfactual maintains these pairs whatever the
+        # workload, so retention must not demote them.
+        catalog.promote_pairs(pid, pairs, PairStatus.PERSISTENT, pinned=True)
+        return {
+            "code": 200,
+            "perspective": pid,
+            "requested": len(pairs),
+            "built": len(todo),
+            "time": time.time() - t0,
+        }
+
+    def api_eval_pair_digest(self, body: Annotated[dict, Body(...)]) -> Any:
+        """
+        Row count and an order-independent digest of the persisted pair
+        tables of a perspective, to check that incrementally maintained
+        pairs equal a from-scratch build.
+
+        Body: {log_name, storage_namespace?, grouping_keys, pairs?}.  Without
+        ``pairs`` every PERSISTENT pair of the perspective is digested.
+        """
+        from siesta.modules.adaptive_index.catalog import _make_perspective_id
+
+        metadata = self._eval_metadata(body)
+        drain_promotions(metadata)
+        storage = get_storage_manager()
+        catalog = get_catalog(metadata, storage)
+        pid = _make_perspective_id(body["grouping_keys"])
+        stats = catalog.get(pid)
+        if body.get("pairs"):
+            pairs = [tuple(p) for p in body["pairs"]]
+        elif stats is not None:
+            pairs = sorted(
+                p for p, ps in stats.pairs.items()
+                if ps.status == PairStatus.PERSISTENT
+            )
+        else:
+            pairs = []
+
+        spark = get_spark_session()
+        digests = {}
+        for (a, b) in pairs:
+            path = _perspective_pair_path(metadata, pid, a, b)
+            try:
+                row = (
+                    spark.read.format("delta").load(path)
+                    .select(F.xxhash64(
+                        "trace_id", "source_position", "target_position",
+                        "source_timestamp", "target_timestamp",
+                    ).alias("h"))
+                    .agg(
+                        F.count("*").alias("n"),
+                        F.sum(col("h").cast("decimal(38,0)")).alias("s"),
+                    )
+                    .collect()[0]
+                )
+                digests[f"{a}->{b}"] = {"rows": int(row.n), "digest": str(row.s or 0)}
+            except Exception as exc:
+                digests[f"{a}->{b}"] = {"error": str(exc)[:200]}
+        return {"code": 200, "perspective": pid, "pairs": digests}
+
+    @staticmethod
+    def _cooccurring_pairs(metadata, storage, grouping_keys) -> list:
+        """Ordered activity pairs (A, B) with an A before a B in some group."""
+        from pyspark.sql.functions import min as F_min, max as F_max, count as F_count
+
+        per_group_activity = (
+            storage.read_sequence_table(metadata)
+            .withColumn("group_value", _grouping_col(grouping_keys))
+            .filter(col("group_value").isNotNull())
+            .groupBy("group_value", "activity")
+            .agg(
+                F_min("start_timestamp").alias("first_ts"),
+                F_max("start_timestamp").alias("last_ts"),
+                F_count("*").alias("n"),
+            )
+        )
+        a_side = per_group_activity.alias("a")
+        b_side = per_group_activity.alias("b")
+        rows = (
+            a_side.join(b_side, col("a.group_value") == col("b.group_value"))
+            .filter(
+                ((col("a.activity") != col("b.activity"))
+                 & (col("a.first_ts") < col("b.last_ts")))
+                | ((col("a.activity") == col("b.activity")) & (col("a.n") > 1))
+            )
+            .select(col("a.activity").alias("source"), col("b.activity").alias("target"))
+            .distinct()
+            .collect()
+        )
+        return sorted((r.source, r.target) for r in rows)
+
+    # ------------------------------------------------------------------
     # CLI
     # ------------------------------------------------------------------
 
@@ -575,9 +801,19 @@ class Adaptive_Querying(SiestaModule):
         6. Record workload statistics
         """
         t_start = time.time()
+        # Stage timings (seconds) and per-pair sources, reported in the
+        # response for evaluation: which tier served each pair and where
+        # the query time went.
+        tm: Dict[str, float] = {}
+        pair_sources: Dict[str, str] = {}
+        status_before: Dict[str, str] = {}
 
         pattern = self.query_config.get("query", {}).get("pattern", "")
         grouping_keys = self.query_config["grouping_keys"]
+        # "join": pair tables carry no attributes (embed_pair_attributes =
+        # False); attributes are joined back from an event table.
+        join_attrs = self.query_config.get("pair_attributes", "embedded") == "join"
+        set_log_option(self.metadata, "embed_pair_attributes", not join_attrs)
         lookback = self.query_config.get("lookback", "7d")
         lookback_mode = self.query_config.get("lookback_mode", "time")
         support_threshold = self.query_config.get("support_threshold", 0.0)
@@ -608,18 +844,24 @@ class Adaptive_Querying(SiestaModule):
 
         has_pos = stats.level >= PerspectiveLevel.L2_POS_ESTABLISHED
         sort_key = "position" if (references_pos and has_pos) else "start_timestamp"
+        tm["resolve"] = time.time() - t_start
 
+        t0 = time.time()
         group_count = self._perspective_group_count(pid, grouping_keys)
+        tm["group_count"] = time.time() - t0
 
         if can_match_single_event(pattern):
             # A single-event match involves no pair, so pair tables cannot
             # deliver it: hand CEP every event of the pattern's activities.
+            t0 = time.time()
             result = self._detect_from_group_events(
                 pattern, pid, grouping_keys, has_pos, sort_key,
             )
+            tm["validate"] = time.time() - t0
             return self._finish_detection(
                 catalog, pid, stats, result, set(), {},
                 references_pos, support_threshold, group_count, t_start,
+                tm, pair_sources, status_before,
             )
 
         # --- Step 2: Determine required pairs ---------------------------
@@ -655,31 +897,37 @@ class Adaptive_Querying(SiestaModule):
         pair_dfs: list[DataFrame] = []
         lazy_costs: Dict[Tuple[str, str], float] = {}
         spark = get_spark_session()
-        lru = get_lru_cache(self.metadata)
+        lru = get_lru_cache(self.metadata, self.query_config.get("lru_capacity"))
  
         persistent_pairs: list[Tuple[str, str]] = []
         absent_pairs:     list[Tuple[str, str]] = []
+        # Rows of LRU hits and freshly scanned pairs: one local DataFrame
+        # for all of them (a createDataFrame per pair cost ~1 s each).
+        local_rows: list = []
  
+        t0 = time.time()
         for (act_a, act_b) in all_pairs_2d:
             pair_status = catalog.get_pair_status(pid, act_a, act_b)
+            key = f"{act_a}->{act_b}"
+            status_before[key] = pair_status.name if pair_status is not None else "ABSENT"
  
             if pair_status == PairStatus.PERSISTENT:
                 persistent_pairs.append((act_a, act_b))
             elif pair_status == PairStatus.TRANSIENT:
                 cached = lru.get(pid, act_a, act_b)
                 if cached is not None:
-                    df = spark.createDataFrame(
-                        cached, schema=EventPair.get_schema()
-                    )
-                    pair_dfs.append(df)
+                    local_rows.extend(cached)
                     lazy_costs[(act_a, act_b)] = 0.0
+                    pair_sources[key] = "LRU"
                 else:
                     # Cache miss — treat as absent.
                     absent_pairs.append((act_a, act_b))
             else:
                 absent_pairs.append((act_a, act_b))
+        tm["fetch_lru"] = time.time() - t0
  
         # ── PERSISTENT: parallel Delta snapshot resolution ─────────────
+        t0 = time.time()
         if persistent_pairs:
             from concurrent.futures import ThreadPoolExecutor
  
@@ -687,7 +935,7 @@ class Adaptive_Querying(SiestaModule):
                 a, b = pair
                 path = _perspective_pair_path(self.metadata, pid, a, b)
                 try:
-                    return pair, spark.read.format("delta").load(path)
+                    return pair, pair_table_files(spark, path)
                 except Exception:
                     logger.warning(
                         f"{self.name}: L3 read failed for "
@@ -696,15 +944,29 @@ class Adaptive_Querying(SiestaModule):
                     return pair, None
  
             n_workers = min(16, len(persistent_pairs))
+            delta_files: list = []
             with ThreadPoolExecutor(max_workers=n_workers) as ex:
-                for pair, df in ex.map(_load_pair, persistent_pairs):
-                    if df is not None:
-                        pair_dfs.append(df)
+                for pair, files in ex.map(_load_pair, persistent_pairs):
+                    if files is not None:
+                        delta_files.extend(files)
                         lazy_costs[pair] = 0.0
+                        pair_sources[f"{pair[0]}->{pair[1]}"] = "DELTA"
                     else:
                         absent_pairs.append(pair)
+            if delta_files:
+                # ONE Parquet scan over the live files of all persisted pair
+                # tables: a union of per-table reads schedules a task per
+                # file of every table.  Pair tables are append / overwrite
+                # only (no deletion vectors), so the snapshot's files are
+                # exactly its rows.
+                pair_dfs.append(
+                    spark.read.schema(EventPair.get_schema()).parquet(*delta_files)
+                )
+        tm["fetch_delta"] = time.time() - t0
  
         # ── ABSENT: one shared scan for all missing pairs ──────────────
+        tm["scan"] = 0.0
+        tm["catalog_writes"] = 0.0
         if absent_pairs:
             t0 = time.time()
             rows_by_pair = build_pairs_transient_batched(
@@ -721,10 +983,12 @@ class Adaptive_Querying(SiestaModule):
             # All absent pairs shared one scan; attribute the amortised
             # per-pair share so the retention policy sees the true
             # per-pair price under batching.
-            shared_cost_ms = (
-                (time.time() - t0) * 1000 / max(1, len(absent_pairs))
-            )
+            tm["scan"] = time.time() - t0
+            shared_cost_ms = tm["scan"] * 1000 / max(1, len(absent_pairs))
+            t0 = time.time()
+            cached_pairs = []
             for (act_a, act_b) in absent_pairs:
+                pair_sources[f"{act_a}->{act_b}"] = "SCAN"
                 lazy_costs[(act_a, act_b)] = shared_cost_ms
                 catalog.record_pair_build_cost(
                     pid, act_a, act_b, shared_cost_ms
@@ -732,28 +996,39 @@ class Adaptive_Querying(SiestaModule):
                 collected = rows_by_pair.get((act_a, act_b), [])
                 try:
                     lru.put(pid, act_a, act_b, collected)
-                    catalog.promote_pair(
-                        pid, act_a, act_b, PairStatus.TRANSIENT
-                    )
+                    cached_pairs.append((act_a, act_b))
                 except Exception as exc:
                     logger.warning(
                         f"{self.name}: failed to cache transient pair "
                         f"({act_a},{act_b}): {exc}"
                     )
-                if collected:
-                    pair_dfs.append(
-                        spark.createDataFrame(
-                            collected, schema=EventPair.get_schema()
-                        )
-                    )
+                local_rows.extend(collected)
+            # One write-through for all newly cached pairs.  A pair that is
+            # already PERSISTENT (its Delta read failed) keeps its status.
+            catalog.promote_pairs(
+                pid,
+                [
+                    p for p in cached_pairs
+                    if catalog.get_pair_status(pid, *p) != PairStatus.PERSISTENT
+                ],
+                PairStatus.TRANSIENT,
+                write_through=False,
+            )
+            tm["catalog_writes"] = time.time() - t0
  
+        if local_rows:
+            pair_dfs.append(spark.createDataFrame(local_rows, schema=EventPair.get_schema()))
+
+        t_validate = time.time()
         if not pair_dfs:
-            return {
-                "code": 200,
-                "total": 0,
-                "detected": [],
-                "time": time.time() - t_start,
-            }
+            # No pair has an instance in any group: nothing can match.  The
+            # query still counts towards the workload statistics.
+            tm["validate"] = 0.0
+            return self._finish_detection(
+                catalog, pid, stats, [], all_pairs_2d, lazy_costs,
+                references_pos, support_threshold, group_count, t_start,
+                tm, pair_sources, status_before,
+            )
 
         # Union all pair DataFrames
         from functools import reduce
@@ -805,8 +1080,21 @@ class Adaptive_Querying(SiestaModule):
 
         # Attribute pushdown for CEP: drop rows whose endpoints can never be
         # part of a match.  Applied after pruning, never to the prune input.
+        rows_df = index_df
+        if join_attrs:
+            t0 = time.time()
+            # LRU / scanned rows still carry their maps in memory; this
+            # variant must not use them.
+            rows_df = strip_pair_attributes(index_df)
+            if has_attribute_constraints(pattern):
+                rows_df = join_back_attributes(
+                    rows_df.join(pruned_group_ids, on="trace_id", how="left_semi"),
+                    self._attribute_events(pid, grouping_keys, has_pos, pattern, pruned_group_ids),
+                )
+            tm["join_back_plan"] = time.time() - t0
+
         keep_pred = build_event_keep_predicate(pattern) if mode == "cep" else None
-        cep_rows_df = index_df.where(keep_pred) if keep_pred is not None else index_df
+        cep_rows_df = rows_df.where(keep_pred) if keep_pred is not None else rows_df
 
         pair_positions_df = (
             cep_rows_df
@@ -976,9 +1264,10 @@ class Adaptive_Querying(SiestaModule):
                                 for key, value in attrs.items():
                                     seen_positions[pos][key] = value
 
+                # Timestamp ties keep the group order, as in the eager engine.
                 events = sorted(
                     seen_positions.values(),
-                    key=lambda e: (int(e[sort_field]), e.get("name", "")),
+                    key=lambda e: (int(e[sort_field]), int(e["position"])),
                 )
 
                 positions = find_occurrences_dsl(
@@ -998,12 +1287,33 @@ class Adaptive_Querying(SiestaModule):
                 .collect()
             )
         logger.info(f"TIMING cep_done: {time.time() - t_start:.2f}s  pattern={pattern!r}")
-
+        tm["validate"] = time.time() - t_validate
 
         return self._finish_detection(
             catalog, pid, stats, result, all_pairs_2d, lazy_costs,
             references_pos, support_threshold, group_count, t_start,
+            tm, pair_sources, status_before,
         )
+
+    def _attribute_events(self, pid, grouping_keys, has_pos, pattern, group_ids_df) -> DataFrame:
+        """
+        (trace_id, position, attributes) of the pattern's activities, with
+        the positions the perspective's pair tables use.  Under the case
+        perspective group positions are trace positions, so the Activity
+        index (partitioned by activity) serves them.
+        """
+        labels = sorted(pattern_labels(pattern))
+        if list(grouping_keys) == ["trace_id"]:
+            ev = self.storage.read_activity_events(self.metadata, labels)
+            return ev.join(group_ids_df, on="trace_id", how="left_semi")
+        return _get_perspective_seq_df(
+            pid=pid,
+            grouping_keys=grouping_keys,
+            metadata=self.metadata,
+            storage=self.storage,
+            has_pos=has_pos,
+            group_ids_df=group_ids_df,
+        ).where(col("activity").isin(labels))
 
     def _detect_from_group_events(self, pattern, pid, grouping_keys, has_pos, sort_key):
         """
@@ -1027,7 +1337,7 @@ class Adaptive_Querying(SiestaModule):
 
         def validate_group(group_id_events):
             group_id, events = group_id_events
-            events = sorted(events, key=lambda e: (int(e[sort_field]), e.get("name", "")))
+            events = sorted(events, key=lambda e: (int(e[sort_field]), int(e["position"])))
             positions = find_occurrences_dsl([e["name"] for e in events], pattern, events=events)
             return (group_id, [int(events[i]["position"]) for i in positions])
 
@@ -1050,27 +1360,38 @@ class Adaptive_Querying(SiestaModule):
             return self.metadata.trace_count
         key = (self.metadata.storage_namespace, self.metadata.log_name, pid,
                getattr(self.metadata, "event_count", None))
-        if key not in self._group_counts:
-            self._group_counts[key] = (
+        if key not in GROUP_COUNTS:
+            GROUP_COUNTS[key] = (
                 self.storage.read_sequence_table(self.metadata)
                 .select(_grouping_col(grouping_keys).alias("group_value"))
                 .where(col("group_value").isNotNull())
                 .distinct()
                 .count()
             )
-        return self._group_counts[key]
+        return GROUP_COUNTS[key]
 
     def _finish_detection(self, catalog, pid, stats, result, all_pairs_2d, lazy_costs,
-                          references_pos, support_threshold, group_count, t_start):
-        """Step 6 (workload statistics, promotion) and response formatting."""
-        t_total = time.time() - t_start
+                          references_pos, support_threshold, group_count, t_start,
+                          tm=None, pair_sources=None, status_before=None):
+        """
+        Step 6 (workload statistics, promotion) and response formatting.
+
+        ``time`` is the query latency: everything up to and including the
+        workload-statistics update.  The promotion it may trigger runs on the
+        perspective's background worker.  With ``wait_promotion`` in the
+        request the response waits for it and reports ``pair_status_after``;
+        that wait is not part of ``time``.
+        """
+        tm = tm if tm is not None else {}
+        t0 = time.time()
+        retention = self._get_retention()
 
         # --- Step 6: Record workload statistics -------------------------
         catalog.record_query_touch(
             pid=pid,
             pairs_touched=list(all_pairs_2d),
             references_pos=references_pos,
-            total_query_ms=t_total * 1000,
+            total_query_ms=(time.time() - t_start) * 1000,
             pair_savings_ms={
                 (a, b): (
                     stats.pairs.get((a, b), PairStats()).build_cost_ms
@@ -1080,31 +1401,41 @@ class Adaptive_Querying(SiestaModule):
                 if cost == 0.0
                 and stats.pairs.get((a, b), PairStats()).build_cost_ms > 0
             },
+            decay=retention,
         )
+        tm["finish"] = time.time() - t0
+        t_total = time.time() - t_start
 
-        # Diagnostic: report the lifecycle level of each touched pair AFTER
-        # the (possibly synchronous) post-query promotion fires.  Consumers
-        # of the API can plot how many reps it took for each pair to reach
-        # PERSISTENT.  Levels: ABSENT, TRANSIENT, PERSISTENT.
-        pair_status_after = {}
-        post_stats = catalog.get(pid)
-        if post_stats is not None:
-            for (a, b) in all_pairs_2d:
-                ps = post_stats.pairs.get((a, b))
-                pair_status_after[f"{a}->{b}"] = (
-                    ps.status.name if ps is not None else "ABSENT"
-                )
+        # Promotion (and the catalog flush) run on the perspective's worker
+        # so they do not block the response.
+        metadata = self.metadata
+        pairs_touched = list(all_pairs_2d)
 
-        # secure the catalog flush with a background thread so it does not block
-        # self._maybe_promote_after_query(pid, all_pairs_2d, references_pos)
-        # catalog.flush()
         def _promote_and_flush():
             try:
-                self._maybe_promote_after_query(pid, all_pairs_2d, references_pos)
+                self._maybe_promote_after_query(
+                    pid, pairs_touched, references_pos, metadata, retention,
+                )
             finally:
                 catalog.flush()
 
-        self._get_promotion_worker(pid).put(_promote_and_flush)
+        submit_promotion(metadata, pid, _promote_and_flush)
+
+        pair_status_after = None
+        promotion_s = None
+        if self.query_config.get("wait_promotion", False):
+            # The wait is the promotion's own cost (pair builds + catalog
+            # flush); it is reported separately and is not part of ``time``.
+            promotion_s = drain_promotions(metadata, pid)
+            post_stats = catalog.get(pid)
+            pair_status_after = {
+                f"{a}->{b}": (
+                    post_stats.pairs[(a, b)].status.name
+                    if post_stats is not None and (a, b) in post_stats.pairs
+                    else "ABSENT"
+                )
+                for (a, b) in pairs_touched
+            }
 
 
         # Support is the fraction of the perspective's groups that match the
@@ -1115,15 +1446,23 @@ class Adaptive_Querying(SiestaModule):
             for gid, positions in result
         ]
 
-        return {
+        response = {
             "code": 200,
             "perspective": pid,
             "total": len(formatted),
             "support": support,
+            "matched_groups": len(result),
+            "group_count": group_count,
             "detected": formatted,
             "time": t_total,
-            "pair_status_after": pair_status_after,
+            "timings": tm,
+            "pair_sources": pair_sources or {},
+            "pair_status_before": status_before or {},
         }
+        if pair_status_after is not None:
+            response["pair_status_after"] = pair_status_after
+            response["promotion_s"] = promotion_s
+        return response
 
     # ------------------------------------------------------------------
     # Adaptive exploration
@@ -1255,71 +1594,40 @@ class Adaptive_Querying(SiestaModule):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
-    def _get_promotion_worker(self, pid: str) -> queue.Queue:
+    def _get_retention(self) -> RetentionPolicy:
         """
-        Return the promotion queue for perspective `pid`, creating a
-        background worker thread on first access.
-
-        The worker drains the queue sequentially, ensuring that
-        build_pair_persistent calls for the same perspective never
-        run concurrently and cannot conflict on last_checked_table.
+        The retention policy for the current request's overrides
+        (half_life_seconds / min_query_count / hysteresis / cost_scale).  Rebuilt
+        whenever they change; RetentionPolicy is stateless, so this is free.
         """
-        with self._promotion_lock:
-            if pid not in self._promotion_queues:
-                q: queue.Queue = queue.Queue()
-                self._promotion_queues[pid] = q
-
-                def _worker(q=q):
-                    while True:
-                        fn = q.get()
-                        if fn is None:   # sentinel — shutdown
-                            break
-                        try:
-                            fn()
-                        except Exception as exc:
-                            logger.error(
-                                f"Promotion worker for '{pid}' failed: {exc}",
-                                exc_info=True,
-                            )
-                        finally:
-                            q.task_done()
-
-                t = threading.Thread(target=_worker, daemon=True, name=f"promote-{pid}")
-                t.start()
-                self._promotion_workers[pid] = t
-
-            return self._promotion_queues[pid]
-    
-    def _maybe_promote_after_query(self, pid, pairs_touched, references_pos):
-        """
-        Lightweight per-pair retention check after each query.
-
-        Only evaluates the predicates for artefacts this query touched.
-        Full sweep over all perspectives still happens at ingest time.
-
-        The retention policy is rebuilt whenever the request-level
-        overrides (min_query_count / hysteresis / half_life_seconds)
-        differ from the cached values.  RetentionPolicy is stateless,
-        so reconstruction is free; without this, the first request
-        after process startup would lock in its parameters for the
-        lifetime of the process.
-        """
-        from siesta.modules.adaptive_index.retention import RetentionPolicy
-
         params = (
             float(self.query_config.get("half_life_seconds", 3600.0)),
             int(self.query_config.get("min_query_count", 3)),
             float(self.query_config.get("hysteresis", 0.15)),
+            float(self.query_config.get("cost_scale", 1.0)),
         )
         if self._retention is None or self._retention_params != params:
             self._retention = RetentionPolicy(
                 half_life_seconds=params[0],
                 min_query_count=params[1],
                 hysteresis=params[2],
+                cost_scale=params[3],
             )
             self._retention_params = params
+        return self._retention
 
-        catalog = get_catalog(self.metadata, self.storage)
+    def _maybe_promote_after_query(self, pid, pairs_touched, references_pos,
+                                   metadata, retention):
+        """
+        Lightweight per-pair retention check after each query.
+
+        Only evaluates the predicates for artefacts this query touched.
+        Full sweep over all perspectives still happens at ingest time.
+        Runs on the perspective's promotion worker, so it takes the
+        metadata and retention policy of the query that submitted it
+        rather than reading the (shared, mutable) module state.
+        """
+        catalog = get_catalog(metadata, self.storage)
         stats = catalog.get(pid)
         if stats is None:
             return
@@ -1328,39 +1636,46 @@ class Adaptive_Querying(SiestaModule):
         # L2 promotion can fire here if pos queries cross threshold.
         if (references_pos
             and stats.level == PerspectiveLevel.L1_POS_FREE
-            and self._retention.should_promote_l2(stats)):
+            and retention.should_promote_l2(stats)):
             try:
                 t0 = time.time()
-                promote_to_l2(pid, stats.grouping_keys, self.metadata, self.storage)
+                promote_to_l2(pid, stats.grouping_keys, metadata, self.storage)
                 stats.l2_build_cost_ms = (time.time() - t0) * 1000
                 catalog.promote(pid, PerspectiveLevel.L2_POS_ESTABLISHED)
             except Exception as exc:
                 logger.error(f"{self.name}: synchronous L2 promotion failed: {exc}")
 
-        # Per-pair L3 promotion.
+        # L3 promotion of the touched pairs that pass the retention gate:
+        # one batched build (one scan, one grouped extraction) and one
+        # catalog write for all of them.
+        to_persist = []
         for (a, b) in pairs_touched:
             ps = stats.pairs.get((a, b))
             if ps is None or ps.status == PairStatus.PERSISTENT:
                 continue
-            if self._retention.should_persist_pair(ps):
-                try:
-                    from siesta.modules.adaptive_index.builders import build_pair_persistent
-                    t0 = time.time()
-                    has_pos = stats.level >= PerspectiveLevel.L2_POS_ESTABLISHED
-                    build_pair_persistent(
-                        pid=pid, act_a=a, act_b=b,
-                        lookback=stats.lookback, lookback_mode=stats.lookback_mode,
-                        grouping_keys=stats.grouping_keys,
-                        metadata=self.metadata, storage=self.storage,
-                        has_pos=has_pos,
-                    )
-                    ps.build_cost_ms = (time.time() - t0) * 1000
-                    catalog.promote_pair(pid, a, b, PairStatus.PERSISTENT)
-                except Exception as exc:
-                    logger.error(
-                        f"{self.name}: synchronous L3 promotion failed for "
-                        f"({a},{b}): {exc}"
-                    )
+            if retention.should_persist_pair(ps):
+                to_persist.append((a, b))
+        if to_persist:
+            try:
+                from siesta.modules.adaptive_index.builders import build_pairs_persistent_batched
+                costs = build_pairs_persistent_batched(
+                    pid=pid, pairs=to_persist,
+                    lookback=stats.lookback, lookback_mode=stats.lookback_mode,
+                    grouping_keys=stats.grouping_keys,
+                    metadata=metadata, storage=self.storage,
+                    has_pos=stats.level >= PerspectiveLevel.L2_POS_ESTABLISHED,
+                )
+                for pair, ms in costs.items():
+                    stats.pairs[pair].build_cost_ms = ms
+                catalog.promote_pairs(pid, to_persist, PairStatus.PERSISTENT)
+                # Resolve the new tables' snapshots here, off the query path.
+                spark = get_spark_session()
+                for (a, b) in to_persist:
+                    pair_table_files(spark, _perspective_pair_path(metadata, pid, a, b))
+            except Exception as exc:
+                logger.error(
+                    f"{self.name}: L3 promotion failed for {to_persist}: {exc}"
+                )
     def _get_lru(self) -> PairLRUCache:
         return get_lru_cache(self.metadata)
 

@@ -9,6 +9,7 @@ from pyspark.sql.functions import col
 from siesta.modules.query.parse_seql import Quantifier as SeqlQuantifier, RespondedPair, extract_info_pairs, parse_pattern, extract_responded_pairs, can_match_single_event, pattern_labels
 from siesta.modules.query.CEP_adapter import find_occurrences_dsl
 from siesta.modules.query.processors.predicates import build_event_keep_predicate
+from siesta.modules.index.pair_attributes import has_attribute_constraints, join_back_attributes
 import json
 import logging
 from functools import reduce
@@ -30,7 +31,8 @@ def detect(pattern: str, config: Dict[str, Any], metadata: MetaData):
             .groupByKey()
         )
     else:
-        events_rdd = _events_from_pairs(pattern, storage, metadata)
+        events_rdd = _events_from_pairs(pattern, storage, metadata,
+                                        join_attrs=config.get("pair_attributes", "embedded") == "join")
 
     return (
         events_rdd
@@ -55,11 +57,15 @@ def _first_match(pattern: str, events) -> list:
     return [int(events[i]["position"]) for i in positions]
 
 
-def _events_from_pairs(pattern: str, storage, metadata: MetaData):
+def _events_from_pairs(pattern: str, storage, metadata: MetaData, join_attrs: bool = False):
     """
     (trace_id, events) for the traces that survive pair pruning, with each
     trace's events rebuilt from the fetched pair rows (responded pairs plus
     the info pairs that make those rows deliver every event CEP may need).
+
+    ``join_attrs``: the pairs index was written without attributes
+    (embed_pair_attributes = False); an attribute-aware pattern gets them
+    from the Activity index for the surviving traces.
     """
     # lf optimizer
     pair_branches = set(extract_responded_pairs(pattern))
@@ -115,8 +121,15 @@ def _events_from_pairs(pattern: str, storage, metadata: MetaData):
     # Attribute pushdown: drop rows whose endpoints can never be part of a
     # match before they reach CEP.  Pruning above must keep using the
     # unfiltered rows (see build_event_keep_predicate).
+    rows_df = tagged_df
+    if join_attrs and has_attribute_constraints(pattern):
+        events_df = storage.read_activity_events(metadata, sorted(pattern_labels(pattern)))
+        rows_df = join_back_attributes(
+            tagged_df.join(pruned_trace_ids, on="trace_id", how="left_semi"),
+            events_df.join(pruned_trace_ids, on="trace_id", how="left_semi"),
+        )
     keep_pred = build_event_keep_predicate(pattern)
-    cep_rows_df = tagged_df.where(keep_pred) if keep_pred is not None else tagged_df
+    cep_rows_df = rows_df.where(keep_pred) if keep_pred is not None else rows_df
 
     pair_positions_df = (
         cep_rows_df

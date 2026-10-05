@@ -1,550 +1,261 @@
 """
-tests/eval/exp_maintenance_savings.py
+tests/vldb_eval/exp_maintenance_savings.py — Exp 4 and 5: ingest cost that
+adaptivity avoids, per batch, under a multiperspective query workload.
 
-Experiment — Eager vs Adaptive incremental maintenance cost.
+The log is split into B0 (bootstrap, not measured) + B1..B5 (measured), a
+stratified trace sample (suite_data).  P is the case perspective plus the top
+attribute perspectives.  Configurations, each on its own log:
 
-Goal
-----
-Show that the naive eager approach of pre-building indices for every
-perspective is increasingly expensive as the number of perspectives
-grows, while the adaptive system only maintains what the workload
-demands.
+  eager       original SIESTA, one independent ingest per perspective per
+              batch (the perspective's attribute used as trace_id), each
+              building the full PairsIndex of all pairs.
+              T_eager(b) = sum over P of those ingests.
+  adaptive    one adaptive ingest per batch; the pairs it maintains are the
+              ones the query workload promoted.
+  pinned_<n>  adaptive, with the n highest-coverage pairs of every
+              perspective force-persisted after B0 (pinned, never demoted)
+              and no queries: maintenance cost as a function of the number
+              of maintained pairs.
+  allpairs    adaptive with every co-occurring pair of every perspective
+              pinned: the counterfactual that maintains what eager maintains,
+              in the adaptive engine.  Run when every perspective has at most
+              ``--allpairs-cap`` co-occurring pairs; otherwise T_allpairs is
+              extrapolated from the pinned sweep (plot_indexing does this).
 
-Core comparison
----------------
-The eager indexer (SIESTA) builds the full PairsIndex for ALL A²
-activity pairs on every batch ingest, but it only supports a single
-grouping key (trace_id column) per log.  To simulate eager indexing
-across P perspectives, we ingest the same batch P+1 times: once for
-the original case-centric perspective and once for each attribute
-perspective (resource, department, region, …), each under a separate
-log_name with field_mappings.csv.trace_id remapped to the perspective
-attribute.  The eager total is the sum.
+Saving ratio R(b) = T_eager(b) / T_adaptive(b), saving = 1 - 1/R, and
+    R = F_persp * F_pair,  F_persp = T_eager / T_allpairs,
+                           F_pair  = T_allpairs / T_adaptive.
+F_persp: P independent ingests, each rebuilding the shared structures, vs one
+shared base with P per-perspective pair indices.  F_pair: maintaining the
+workload's hot pairs instead of all pairs; depends on the hot-set size.
 
-The adaptive indexer handles all perspectives in a single ingest call,
-maintaining only the pairs that the workload has promoted to PERSISTENT.
-Under a skewed workload, this is a small subset.
+Workload: one multiperspective stream (a uniformly chosen perspective per
+query, then 80 % hot / 20 % cold within it; ``--n-hot`` hot pairs per
+perspective).  After B0 its first ``--promo-cap`` queries are the promotion
+phase (adaptive stops early once every hot pair is PERSISTENT); after each
+measured batch the next ``--slice`` queries run against eager and adaptive
+on the adaptive log, so retention stays live (eager maintains everything
+regardless of queries and runs none).
 
-Protocol
---------
-For each batch k ∈ {1, …, N}:
+Output: results/exp4_maintenance/<dataset>.jsonl with ``ingest`` records
+(config, batch, perspective, time, timings), ``query`` records and
+``catalog`` records.  Exp 5 (BPIC 2017 figure, all-dataset table) is
+plotted from these files.
 
-  1. Issue a workload slice (adaptive only) to drive promotions.
-  2. Eager:    ingest batch_k under each perspective log_name, sum times.
-     Adaptive: ingest batch_k once via the adaptive endpoint.
-  3. Record both times.
-
-The experiment produces a per-batch bar chart (eager stacked by
-perspective vs adaptive single bar) and a cumulative time comparison.
-
-The independent variable is batch index; the dependent variable is
-wall-clock maintenance time.  The story is: eager maintenance grows
-linearly with the number of perspectives, while adaptive maintenance
-stays bounded by the workload footprint.
+Usage:
+    python -m tests.vldb_eval.exp_maintenance_savings --datasets bpic2017
 """
 
 from __future__ import annotations
 
 import argparse
-import json
-import re
-import sys
-import time
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tests.vldb_eval.eval_common import (
-    API_BASE, API_TIMEOUT_S, EAGER_INDEXER,
-    CONFIG_DIR, RESULTS_DIR,
-    Recorder, health_check,
-    ingest_adaptive, ingest_eager,
-    timed_query, detect_adaptive,
-    perspective_pair_set,
-    resolve_dataset,
-    quote_label,
-    _guess_mime,
+    ResultWriter, delete_log, eval_catalog, eval_force_persist, eval_reset,
+    ingest, restart_api,
 )
-from tests.vldb_eval.workload import build_workloads, fetch_pair_coverage
-from tests.vldb_eval.batch_splitter import split_log
+from tests.vldb_eval.indexing_common import (
+    eager_log, run_adaptive_query, warm_up,
+)
+from tests.vldb_eval.suite_data import ALL_DATASETS, CASE, N_BATCHES, prepare, safe_name
+from tests.vldb_eval.workload import hot_set, multiperspective, pair_coverage, save
 
-import requests
-from urllib.parse import urljoin
-
-# ── Defaults ──────────────────────────────────────────────────────────────
-N_BATCHES          = 5
-SPLIT_MODE         = "trace_sample"
-ADAPTIVE_CONFIG    = CONFIG_DIR / "adaptive_index.config.json"
-
-RETENTION_OVERRIDES = {"min_query_count": 1, "half_life_seconds": 300}
-N_FORCE_QUERIES    = 3
-
-_REGEX_OP  = re.compile(r"[*+?]")
-_LOG_EXTS  = {".csv", ".xes"}
+EXPERIMENT = "exp4_maintenance"
+MEASURED = range(1, N_BATCHES)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Helpers
-# ═══════════════════════════════════════════════════════════════════════════
-
-def _pat2(a: str, b: str) -> str:
-    return f"{quote_label(a)} {quote_label(b)}"
-
-
-def is_simple_pattern(pattern: str) -> bool:
-    return not _REGEX_OP.search(pattern)
-
-
-def _count_events(path: Path) -> int:
-    with path.open() as f:
-        return max(0, sum(1 for _ in f) - 1)
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Eager ingest with field_mappings override
-# ═══════════════════════════════════════════════════════════════════════════
-
-def ingest_eager_as_perspective(
-    log_name: str,
-    dataset_path: Path,
-    config_path: Path,
-    perspective_key: str | None = None,
-    clear_existing: bool = False,
-) -> dict:
+def _check_maintained(resp: dict, config: str, batch: int) -> None:
     """
-    Call the eager indexer.  When perspective_key is provided, override
-    field_mappings so that trace_id maps to that attribute column.  This
-    makes the eager indexer build its full PairsIndex grouped by that
-    attribute instead of the original trace_id.
-
-    When perspective_key is None, use the default (case-centric) mapping.
+    A measured ingest of a log with persisted pairs must report maintenance
+    for their perspectives; an empty report means the pairs were silently
+    left stale (the indexer lost the catalog) and the timing is meaningless.
     """
-    config = json.loads(config_path.read_text())
-    config["log_name"] = log_name
-    config["clear_existing"] = clear_existing
-
-    if perspective_key is not None:
-        # Override the trace_id mapping for CSV format.
-        fmt = dataset_path.suffix.lstrip(".").lower()
-        if fmt == "xes":
-            fmt = "xes"
-        elif fmt in ("csv", "tsv"):
-            fmt = "csv"
-        else:
-            fmt = "csv"
-
-        if "field_mappings" not in config:
-            config["field_mappings"] = {}
-        if fmt not in config["field_mappings"]:
-            config["field_mappings"][fmt] = {}
-        config["field_mappings"][fmt]["trace_id"] = perspective_key
-
-    with dataset_path.open("rb") as fp:
-        r = requests.post(
-            urljoin(API_BASE, f"/{EAGER_INDEXER}/run"),
-            files={"log_file": (dataset_path.name, fp, _guess_mime(dataset_path))},
-            data={"index_config": json.dumps(config)},
-            timeout=API_TIMEOUT_S,
-        )
-    r.raise_for_status()
-    return r.json()
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Pair-coverage & workload helpers
-# ═══════════════════════════════════════════════════════════════════════════
-
-def fetch_all_coverage(log_name, perspectives, activities=None):
-    result = {}
-    for gk in perspectives:
-        key = tuple(gk)
-        try:
-            cov = fetch_pair_coverage(log_name, gk, activities=activities)
-            pairs = cov.get("pairs", [])
-            result[key] = sorted(pairs, key=lambda p: -p["groups"])
-        except Exception as exc:
-            print(f"  [coverage] pair_coverage failed for {gk}: {exc}")
-            result[key] = []
-    return result
-
-
-def schema_combos_from_coverage(coverage):
-    return sum(len(pairs) for pairs in coverage.values())
-
-
-def _q(qid, pattern, *, log_name, gkeys, tag):
-    return {"id": qid, "log_name": log_name, "pattern": pattern,
-            "grouping_keys": list(gkeys), "tags": [tag]}
-
-
-def build_skewed_workload(coverage, log_name, n_queries, hot_ratio, n_hot_pairs):
-    n_hot  = int(n_queries * hot_ratio)
-    n_cold = n_queries - n_hot
-    hot_templates, cold_templates = [], []
-    for gk_tuple, pairs in coverage.items():
-        if not pairs:
-            continue
-        for p in pairs[:n_hot_pairs]:
-            hot_templates.append((_pat2(p["source"], p["target"]), gk_tuple))
-        for p in pairs[n_hot_pairs:]:
-            cold_templates.append((_pat2(p["source"], p["target"]), gk_tuple))
-    if not hot_templates and not cold_templates:
-        return []
-    if not hot_templates:
-        hot_templates = cold_templates[:1]
-    if not cold_templates:
-        cold_templates = hot_templates[-1:]
-    queries = []
-    for i in range(n_hot):
-        pat, gk = hot_templates[i % len(hot_templates)]
-        queries.append(_q(f"H{i}", pat, log_name=log_name, gkeys=gk, tag="hot"))
-    for i in range(n_cold):
-        pat, gk = cold_templates[i % len(cold_templates)]
-        queries.append(_q(f"C{i}", pat, log_name=log_name, gkeys=gk, tag="cold"))
-    return queries
-
-
-def compute_footprint(workload, schema_combos):
-    triples = perspective_pair_set(workload)
-    queried = len(triples)
-    return {"queried_combos": queried, "schema_combos": schema_combos,
-            "ratio": queried / schema_combos if schema_combos else 0.0}
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Adaptive workload promotion
-# ═══════════════════════════════════════════════════════════════════════════
-
-def promote_pairs_via_queries(log_name, workload, n_rounds=3):
-    seen, unique = set(), []
-    for q in workload:
-        key = (q["pattern"], tuple(q["grouping_keys"]))
-        if key not in seen:
-            seen.add(key)
-            unique.append(q)
-    total = 0
-    for _ in range(n_rounds):
-        for q in unique:
-            try:
-                detect_adaptive(log_name, q["pattern"], q["grouping_keys"],
-                                retention_overrides=RETENTION_OVERRIDES)
-                total += 1
-            except:
-                pass
-    return total
-
-
-def queries_per_batch(workload, batch_idx, n_batches):
-    chunk = max(1, len(workload) // n_batches)
-    return workload[batch_idx * chunk : (batch_idx + 1) * chunk]
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Per-dataset entry point
-# ═══════════════════════════════════════════════════════════════════════════
-
-def run_dataset(
-    dataset_path, log_name, *,
-    n_batches, split_mode, n_queries, n_hot_pairs,
-    max_perspectives, promotion_sleep_s, batch_dir,
-):
-    print(f"\n{'='*64}")
-    print(f"  Maintenance savings — {dataset_path}")
-    print(f"{'='*64}")
-
-    # ── Schema discovery ──────────────────────────────────────────────
-    workloads = build_workloads(str(dataset_path), log_name,
-                                max_perspectives=max_perspectives)
-    ctx          = workloads.context
-    perspectives = ctx.perspectives    # e.g. [["resource"], ["department"], ["region"]]
-    activities   = ctx.activities
-    primary_gk   = perspectives[0][0] if perspectives and perspectives[0] else None
-
-    print(f"Activities:     {activities}")
-    print(f"Perspectives:   {perspectives}")
-    print(f"N perspectives: {len(perspectives)}")
-
-    # ── Batches ───────────────────────────────────────────────────────
-    if batch_dir and batch_dir.exists():
-        batch_paths = sorted(batch_dir.glob("batch_*.csv"))
-    else:
-        out_dir = RESULTS_DIR / "batches" / log_name
-        batch_paths = split_log(src=dataset_path, n_batches=n_batches,
-                                mode=split_mode, output_dir=out_dir,
-                                grouping_key=primary_gk)
-
-    print(f"Batches: {len(batch_paths)}")
-    print(f"Events per batch: {[_count_events(p) for p in batch_paths]}")
-
-    rec = Recorder("maintenance_savings",
-                   f"maintenance_savings_{log_name}.jsonl")
-
-    # ── Bootstrap adaptive to discover pair coverage ──────────────────
-    print("\n── Bootstrap + pair-coverage discovery ──")
-    ingest_adaptive(
-        log_name, batch_paths[0], ADAPTIVE_CONFIG,
-        overrides={"perspectives": [{"grouping_keys": gk}
-                                    for gk in perspectives]},
-        clear_existing=True,
-    )
-    coverage = fetch_all_coverage(log_name, perspectives, activities=activities)
-    schema_combos = schema_combos_from_coverage(coverage)
-    print(f"  Schema combos: {schema_combos}")
-    for gk_tuple, pairs in coverage.items():
-        print(f"  {list(gk_tuple)}: {len(pairs)} pairs")
-        rec.emit("pair_coverage", log_name=log_name,
-                 perspective=list(gk_tuple), n_pairs=len(pairs),
-                 pairs=[{"source": p["source"], "target": p["target"],
-                         "groups": p["groups"]} for p in pairs])
-
-    # ── Build a skewed workload for the adaptive system ───────────────
-    # Auto-compute n_queries so every pair gets touched at σ=0.
-    import math
-    min_queries = schema_combos * N_FORCE_QUERIES
-    effective_n_queries = max(n_queries, min_queries)
-    if effective_n_queries != n_queries:
-        print(f"  Auto-adjusted n_queries: {n_queries} → {effective_n_queries}")
-    n_queries = effective_n_queries
-
-    # Use a skewed workload (hot_ratio=0.8): 80% hot, 20% cold.
-    workload = build_skewed_workload(coverage, log_name, n_queries,
-                                     hot_ratio=0.8, n_hot_pairs=n_hot_pairs)
-    workload = [q for q in workload if is_simple_pattern(q["pattern"])]
-    fp = compute_footprint(workload, schema_combos)
-    print(f"  Workload: {len(workload)} queries, "
-          f"footprint={fp['queried_combos']}/{schema_combos} ({fp['ratio']:.0%})")
-
-    # ── Construct perspective log names for eager ─────────────────────
-    # log_name is used as an S3/local path prefix, so perspective keys
-    # containing colons (XES convention: "org:resource") or other
-    # path-unsafe characters must be sanitised before embedding.
-    def _safe_label(k: str) -> str:
-        return re.sub(r"[^a-zA-Z0-9_-]", "_", k)
-
-    eager_perspectives = []
-    # Original case-centric (default trace_id mapping)
-    eager_perspectives.append({
-        "label":           "case",
-        "log_name":        f"{log_name}__case",
-        "perspective_key": None,
-    })
-    # One per discovered perspective
-    for gk in perspectives:
-        key   = gk[0]             # e.g. "org:resource" (original for field_mappings)
-        label = _safe_label(key)  # e.g. "org_resource" (safe for log_name/path)
-        eager_perspectives.append({
-            "label":           label,
-            "log_name":        f"{log_name}__{label}",
-            "perspective_key": key,
-        })
-
-    print(f"\n  Eager will ingest under {len(eager_perspectives)} log names:")
-    for ep in eager_perspectives:
-        print(f"    {ep['log_name']} (trace_id → {ep['perspective_key'] or 'original'})")
-
-    rec.emit("dataset",
-             path=str(dataset_path), log_name=log_name,
-             activities=activities, perspectives=perspectives,
-             n_batches=len(batch_paths), split_mode=split_mode,
-             n_queries=n_queries, n_hot_pairs=n_hot_pairs,
-             schema_combos=schema_combos,
-             n_eager_perspectives=len(eager_perspectives),
-             protocol="eager_sum_vs_adaptive")
-
-    # ══════════════════════════════════════════════════════════════════
-    # Bootstrap phase (batch 0)
-    # ══════════════════════════════════════════════════════════════════
-    print("\n── Bootstrap (batch 0) ──")
-
-    # Eager: bootstrap each perspective log
-    for ep in eager_perspectives:
-        t0 = time.perf_counter()
-        ingest_eager_as_perspective(
-            ep["log_name"], batch_paths[0], ADAPTIVE_CONFIG,
-            perspective_key=ep["perspective_key"],
-            clear_existing=True,
-        )
-        bt = time.perf_counter() - t0
-        print(f"  eager/{ep['label']}: bootstrap {bt:.2f}s")
-
-    # Adaptive: bootstrap + initial workload promotion
-    t0 = time.perf_counter()
-    ingest_adaptive(
-        log_name, batch_paths[0], ADAPTIVE_CONFIG,
-        overrides={"perspectives": [{"grouping_keys": gk}
-                                    for gk in perspectives]},
-        clear_existing=True,
-    )
-    bt = time.perf_counter() - t0
-    print(f"  adaptive: bootstrap {bt:.2f}s")
-
-    # Drive promotions with first workload slice
-    print("  adaptive: promoting via workload queries …")
-    t0 = time.perf_counter()
-    done = promote_pairs_via_queries(log_name, workload, n_rounds=N_FORCE_QUERIES)
-    print(f"  {done} queries in {time.perf_counter()-t0:.1f}s")
-
-    if promotion_sleep_s > 0:
-        print(f"  waiting {promotion_sleep_s}s for async promotions …")
-        time.sleep(promotion_sleep_s)
-
-    # Stabilisation: ingest batch 1 once (not measured) to drain any
-    # leftover async build_pair_persistent jobs from the promotion phase.
-    print("  adaptive: stabilisation ingest (not measured) …", end="", flush=True)
-    t0 = time.perf_counter()
-    ingest_adaptive(log_name, batch_paths[1], ADAPTIVE_CONFIG)
-    stab_t = time.perf_counter() - t0
-    print(f" {stab_t:.2f}s (discarded)")
-    rec.emit("stabilisation", log_name=log_name, stabilisation_s=stab_t)
-
-    # Also bootstrap the eager perspective logs with batch 1
-    # so both systems have ingested the same data before measurement.
-    for ep in eager_perspectives:
-        ingest_eager_as_perspective(
-            ep["log_name"], batch_paths[1], ADAPTIVE_CONFIG,
-            perspective_key=ep["perspective_key"],
+    maint = (resp.get("timings") or {}).get("maintenance") or {}
+    n_pairs = sum(v.get("n_pairs", 0) for v in maint.values())
+    errors = {p: v["error"] for p, v in maint.items() if "error" in v}
+    if n_pairs == 0 or errors:
+        raise RuntimeError(
+            f"{config} B{batch}: no pair maintenance reported "
+            f"(maintenance={maint}); refusing to record a meaningless timing"
         )
 
-    # ══════════════════════════════════════════════════════════════════
-    # Measurement (batches 2 … N-1, pure ingest, no queries)
-    # ══════════════════════════════════════════════════════════════════
-    eager_cumulative   = 0.0
-    adaptive_cumulative = 0.0
-    measurement_paths = batch_paths[2:]  # skip bootstrap (0) and stabilisation (1)
-    n_measurement = len(measurement_paths)
 
-    if n_measurement == 0:
-        print("  WARNING: no measurement batches left. Increase --n-batches.")
-        return
-
-    print(f"\n── Measurement ({n_measurement} batches, no queries) ──")
-    print(f"  {'batch':>5s}  {'eager_total':>12s}  {'adaptive':>10s}  ", end="")
-    for ep in eager_perspectives:
-        print(f"  {ep['label']:>10s}", end="")
-    print()
-    print(f"  {'─'*5}  {'─'*12}  {'─'*10}", end="")
-    for _ in eager_perspectives:
-        print(f"  {'─'*10}", end="")
-    print()
-
-    for batch_idx, batch_path in enumerate(measurement_paths, start=1):
-        n_events = _count_events(batch_path)
-
-        # ── Adaptive: pure ingest, no queries ─────────────────────────
-        t0 = time.perf_counter()
-        body_a = ingest_adaptive(log_name, batch_path, ADAPTIVE_CONFIG)
-        t_adaptive = time.perf_counter() - t0
-        adaptive_cumulative += t_adaptive
-
-        # ── Eager: ingest under each perspective log ──────────────────
-        eager_per_perspective = {}
-        eager_batch_total = 0.0
-        for ep in eager_perspectives:
-            t0 = time.perf_counter()
-            ingest_eager_as_perspective(
-                ep["log_name"], batch_path, ADAPTIVE_CONFIG,
-                perspective_key=ep["perspective_key"],
-            )
-            t_ep = time.perf_counter() - t0
-            eager_per_perspective[ep["label"]] = t_ep
-            eager_batch_total += t_ep
-
-        eager_cumulative += eager_batch_total
-
-        # Record
-        rec.emit("batch_maintenance",
-                 log_name=log_name, batch=batch_idx,
-                 events_in_batch=n_events,
-                 eager_total_s=eager_batch_total,
-                 eager_per_perspective=eager_per_perspective,
-                 adaptive_s=t_adaptive,
-                 adaptive_reported_time=body_a.get("time"),
-                 eager_cumulative_s=eager_cumulative,
-                 adaptive_cumulative_s=adaptive_cumulative)
-
-        # Print
-        print(f"  {batch_idx:5d}  {eager_batch_total:12.3f}  "
-              f"{t_adaptive:10.3f}", end="")
-        for ep in eager_perspectives:
-            print(f"  {eager_per_perspective[ep['label']]:10.3f}", end="")
-        print()
-
-    # ── Summary ───────────────────────────────────────────────────────
-    savings = 1.0 - (adaptive_cumulative / eager_cumulative) if eager_cumulative > 0 else None
-    sr = f"{savings:.1%}" if savings is not None else "N/A"
-
-    rec.emit("summary",
-             log_name=log_name,
-             eager_cumulative_s=eager_cumulative,
-             adaptive_cumulative_s=adaptive_cumulative,
-             savings_ratio=savings,
-             n_perspectives=len(eager_perspectives),
-             n_batches=n_measurement,
-             schema_combos=schema_combos,
-             footprint=fp)
-
-    print(f"\n{'─'*64}")
-    print(f"  SUMMARY — {log_name}")
-    print(f"{'─'*64}")
-    print(f"  Perspectives:         {len(eager_perspectives)} "
-          f"(case + {len(perspectives)} attribute)")
-    print(f"  Schema combos:        {schema_combos}")
-    print(f"  Workload footprint:   {fp['queried_combos']}/{schema_combos} "
-          f"({fp['ratio']:.0%})")
-    print(f"  Eager cumulative:     {eager_cumulative:.3f}s")
-    print(f"  Adaptive cumulative:  {adaptive_cumulative:.3f}s")
-    print(f"  Savings:              {sr}")
-    print(f"\nResults → {rec.path}")
+def _catalog_summary(log: str, perspectives: list[dict], hot: dict[str, set]) -> dict:
+    out = {}
+    for p in perspectives:
+        snap = eval_catalog(log, p["grouping_keys"])["perspectives"]
+        pairs = next(iter(snap.values()))["pairs"] if snap else {}
+        persistent = {k for k, v in pairs.items() if v["status"] == "PERSISTENT"}
+        out[p["label"]] = {
+            "n_persistent": len(persistent),
+            "hot_persistent": len(persistent & hot.get(p["label"], set())),
+            "cold_persistent": len(persistent - hot.get(p["label"], set())),
+            "n_known": len(pairs),
+            "level": next(iter(snap.values()))["level"] if snap else None,
+        }
+    return out
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# CLI
-# ═══════════════════════════════════════════════════════════════════════════
+def run_eager(w, prep, perspectives, slices) -> None:
+    restart_api()
+    for b in range(N_BATCHES):
+        total = 0.0
+        for p in perspectives:
+            label = p["label"]
+            path = prep.eager_batches(label)[b]
+            resp = ingest("eager", eager_log(prep, label), path, clear_existing=(b == 0),
+                          trace_id_column=None if label == CASE else p["attribute"])
+            total += resp["time"]
+            w.emit("ingest", config="eager", batch=b, perspective=label, file=path.name,
+                   time=resp["time"], wall_s=resp["wall_s"], timings=resp.get("timings"))
+            print(f"  eager   B{b} {label:<22} {resp['time']:8.1f}s")
+        w.emit("batch", config="eager", batch=b, time=total)
+        # No query slices on eager: its detection validates every group in
+        # full, which takes minutes per query on coarse perspectives, and
+        # the eager index does not depend on the workload anyway.
 
-def main():
-    ap = argparse.ArgumentParser(
-        description="Eager (all perspectives) vs Adaptive maintenance cost.",
-    )
 
-    src = ap.add_mutually_exclusive_group()
-    src.add_argument("--dataset",      default=None)
-    src.add_argument("--datasets-dir", default=None, type=Path)
+def run_adaptive(w, prep, perspectives, hot, promo, slices) -> None:
+    restart_api()
+    log = f"{prep.name}__adaptive"
+    resp = ingest("adaptive", log, prep.batches[0], clear_existing=True)
+    eval_reset(log)
+    w.emit("ingest", config="adaptive", batch=0, time=resp["time"], wall_s=resp["wall_s"],
+           timings=resp.get("timings"))
+    w.emit("batch", config="adaptive", batch=0, time=resp["time"])
+    warm_up(prep, log)
 
-    ap.add_argument("--log-name",         default=None)
-    ap.add_argument("--n-batches",        type=int,   default=N_BATCHES)
-    ap.add_argument("--split-mode",
-                    choices=["trace_sample", "temporal", "synthetic"],
-                    default=SPLIT_MODE)
-    ap.add_argument("--batch-dir",        default=None, type=Path)
-    ap.add_argument("--n-queries",        type=int,   default=50)
-    ap.add_argument("--n-hot-pairs",      type=int,   default=2)
-    ap.add_argument("--max-perspectives", type=int,   default=4)
-    ap.add_argument("--promotion-sleep",  type=int,   default=120)
+    # Promotion phase: replay the workload until every hot pair is persisted.
+    status = {label: {} for label in hot}
+    used = 0
+    for q in promo:
+        rec = run_adaptive_query(w, log, q, config="adaptive", batch=0, phase="promotion")
+        status[q.perspective].update(rec.get("status_after") or {})
+        used += 1
+        if all(status[l].get(k) == "PERSISTENT" for l, ks in hot.items() for k in ks):
+            break
+    w.emit("promotion", queries=used, cap=len(promo),
+           complete=all(status[l].get(k) == "PERSISTENT" for l, ks in hot.items() for k in ks),
+           catalog=_catalog_summary(log, perspectives, hot))
+    print(f"  adaptive promotion phase: {used} queries")
 
+    for b in MEASURED:
+        resp = ingest("adaptive", log, prep.batches[b])
+        _check_maintained(resp, "adaptive", b)
+        w.emit("ingest", config="adaptive", batch=b, time=resp["time"], wall_s=resp["wall_s"],
+               timings=resp.get("timings"))
+        w.emit("batch", config="adaptive", batch=b, time=resp["time"])
+        print(f"  adaptive B{b} {resp['time']:8.1f}s")
+        for q in slices[b]:
+            run_adaptive_query(w, log, q, config="adaptive", batch=b, phase="batch")
+        w.emit("catalog", config="adaptive", batch=b, summary=_catalog_summary(log, perspectives, hot))
+    return log
+
+
+def run_pinned(w, prep, perspectives, config: str, pairs_for) -> str:
+    """Adaptive ingest with a fixed set of pinned pairs per perspective, no queries."""
+    restart_api()
+    log = f"{prep.name}__{config}"
+    resp = ingest("adaptive", log, prep.batches[0], clear_existing=True)
+    eval_reset(log)
+    w.emit("ingest", config=config, batch=0, time=resp["time"], wall_s=resp["wall_s"],
+           timings=resp.get("timings"))
+    w.emit("batch", config=config, batch=0, time=resp["time"])
+    n_pinned = 0
+    for p in perspectives:
+        fp = eval_force_persist(log, p["grouping_keys"], pairs_for(p["label"]))
+        n_pinned += fp["requested"]
+        w.emit("force_persist", config=config, perspective=p["label"],
+               requested=fp["requested"], built=fp["built"], time=fp["time"])
+    for b in MEASURED:
+        resp = ingest("adaptive", log, prep.batches[b])
+        _check_maintained(resp, config, b)
+        w.emit("ingest", config=config, batch=b, time=resp["time"], wall_s=resp["wall_s"],
+               timings=resp.get("timings"), n_pinned=n_pinned)
+        w.emit("batch", config=config, batch=b, time=resp["time"], n_pinned=n_pinned)
+        print(f"  {config:<12} B{b} {resp['time']:8.1f}s  ({n_pinned} pinned pairs)")
+    return log
+
+
+def run(name: str, args) -> None:
+    prep = prepare(name)
+    perspectives = prep.perspective_list()
+    covs = {p["label"]: pair_coverage(prep, p["label"]) for p in perspectives}
+    keys = {p["label"]: p["grouping_keys"] for p in perspectives}
+    hot = {l: {f"{a}->{b}" for a, b in hot_set(c, args.n_hot)} for l, c in covs.items()}
+
+    stream = multiperspective(covs, keys, args.promo_cap + args.slice * len(MEASURED),
+                              args.n_hot, args.hot_ratio, args.seed)
+    promo = stream[:args.promo_cap]
+    slices = {b: stream[args.promo_cap + (i * args.slice): args.promo_cap + ((i + 1) * args.slice)]
+              for i, b in enumerate(MEASURED)}
+
+    n_acts = prep.perspectives["n_activities"]
+    # Upper bound of the pairs "all" persists: co-occurring cross pairs plus
+    # one self-pair per activity.
+    all_pairs = {l: len(c["pairs"]) + n_acts for l, c in covs.items()}
+    allpairs_feasible = max(all_pairs.values()) <= args.allpairs_cap
+
+    keep = None
+    if getattr(args, "reuse_eager", False) and "eager" not in args.configs:
+        # Partial rerun: keep the eager measurements already on file.
+        keep = lambda r: r.get("config") == "eager" and r["event"] in ("ingest", "batch", "query")  # noqa: E731
+    w = ResultWriter(EXPERIMENT, name, keep=keep)
+    save(stream, w.path.with_suffix(".workload.jsonl"))
+    w.emit("setup", perspectives=[p["label"] for p in perspectives], P=len(perspectives),
+           n_activities=n_acts, n_hot=args.n_hot, hot_ratio=args.hot_ratio, seed=args.seed,
+           hot_set_total=sum(len(v) for v in hot.values()),
+           hot_pairs={l: sorted(v) for l, v in hot.items()},
+           pair_space={l: len(c["pairs"]) for l, c in covs.items()},
+           all_pairs_upper_bound=all_pairs, allpairs_measured=allpairs_feasible,
+           sweep=args.sweep, slice=args.slice, promo_cap=args.promo_cap,
+           batch_events=[sum(1 for _ in open(p)) - 1 for p in prep.batches])
+
+    logs = []
+    configs = args.configs
+    if "eager" in configs:
+        run_eager(w, prep, perspectives, slices)
+        logs += [eager_log(prep, p["label"]) for p in perspectives]
+    if "adaptive" in configs:
+        logs.append(run_adaptive(w, prep, perspectives, hot, promo, slices))
+    if "sweep" in configs:
+        for n in args.sweep:
+            logs.append(run_pinned(
+                w, prep, perspectives, f"pinned_{n}",
+                lambda label, n=n: [list(p) for p in hot_set(covs[label], n)],
+            ))
+    if "allpairs" in configs and allpairs_feasible:
+        logs.append(run_pinned(w, prep, perspectives, "allpairs", lambda label: "all"))
+    w.done()
+    if not args.keep_logs:
+        for log in logs:
+            delete_log(log)
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--datasets", nargs="+", default=ALL_DATASETS)
+    ap.add_argument("--configs", nargs="+", default=["eager", "adaptive", "sweep", "allpairs"],
+                    choices=["eager", "adaptive", "sweep", "allpairs"])
+    ap.add_argument("--n-hot", type=int, default=3, help="hot pairs per perspective")
+    ap.add_argument("--hot-ratio", type=float, default=0.8)
+    ap.add_argument("--slice", type=int, default=10, help="queries after each measured batch")
+    ap.add_argument("--promo-cap", type=int, default=150)
+    ap.add_argument("--sweep", nargs="+", type=int, default=[10, 30, 100],
+                    help="pinned pairs per perspective")
+    ap.add_argument("--allpairs-cap", type=int, default=3000,
+                    help="max co-occurring pairs per perspective for a measured all-pairs run")
+    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--keep-logs", action="store_true")
+    ap.add_argument("--reuse-eager", action="store_true",
+                    help="with --configs lacking eager: keep the eager records already on file")
+    ap.add_argument("--resume", action="store_true")
     args = ap.parse_args()
-    health_check()
-
-    if args.datasets_dir:
-        d = Path(args.datasets_dir)
-        specs = [(p, p.stem) for p in sorted(d.iterdir())
-                 if p.suffix.lower() in _LOG_EXTS]
-    else:
-        spec = resolve_dataset(args.dataset, args.log_name)
-        specs = [(spec.path, spec.log_name)]
-
-    for dataset_path, log_name in specs:
-        try:
-            run_dataset(
-                dataset_path=dataset_path, log_name=log_name,
-                n_batches=args.n_batches, split_mode=args.split_mode,
-                n_queries=args.n_queries, n_hot_pairs=args.n_hot_pairs,
-                max_perspectives=args.max_perspectives,
-                promotion_sleep_s=args.promotion_sleep,
-                batch_dir=args.batch_dir if not args.datasets_dir else None,
-            )
-        except Exception as exc:
-            print(f"\n[ERROR] {log_name}: {exc}")
-            import traceback; traceback.print_exc()
+    for name in args.datasets:
+        if args.resume and ResultWriter.is_complete(EXPERIMENT, name):
+            print(f"[{name}] complete, skipping")
+            continue
+        run(name, args)
 
 
 if __name__ == "__main__":

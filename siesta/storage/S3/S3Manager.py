@@ -574,7 +574,9 @@ class S3Manager(StorageManager):
         """
         try:
             df = self.spark.read.format("delta").load(metadata.sequence_table_path)
-            logger.info(f"Read {df.count()} records from {metadata.sequence_table_path}.")
+            # Counting is a full scan; only pay for it when debugging.
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"Read {df.count()} records from {metadata.sequence_table_path}.")
             if filter_out == "mined" and metadata.last_mined_timestamp:
                 df = df.select("*").where(col("start_timestamp") > lit(metadata.last_mined_timestamp))
             return df

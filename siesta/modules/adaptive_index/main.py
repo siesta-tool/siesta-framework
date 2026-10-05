@@ -24,9 +24,10 @@ from siesta.modules.adaptive_index.builders import (
     _perspective_positions_path,
     _perspective_seq_metadata_path,
 )
-from siesta.modules.adaptive_index.catalog import evict_catalog, get_catalog
+from siesta.modules.adaptive_index.catalog import get_catalog
 from siesta.modules.adaptive_index.retention import RetentionPolicy
 from siesta.modules.adaptive_query.lru_cache import get_lru_cache
+from siesta.modules.adaptive_query.state import drain_promotions, reset_log_state, set_log_option
 from siesta.modules.index.builders import (
     build_activity_index,
     build_sequence_table,
@@ -225,6 +226,8 @@ class Adaptive_Indexing(SiestaModule):
         self._catalog        = None
         self._retention      = None
         self._retention_params = None
+        # Per-stage wall-clock seconds of the last batch ingest.
+        self._last_timings: Dict[str, Any] = {}
 
     # ------------------------------------------------------------------
     # Framework hooks
@@ -294,25 +297,31 @@ class Adaptive_Indexing(SiestaModule):
         self._load_index_config(json.loads(index_config))
         self.storage.initialize_db(self.index_config)
 
-        # If clear_existing is set, evict the stale in-memory catalog
-        # so that begin_builders() starts from a clean slate.
+        candidate = MetaData(
+            storage_namespace=self.index_config.get(
+                "storage_namespace", "siesta"
+            ),
+            log_name=self.index_config.get("log_name", "default_log"),
+            storage_type=self.index_config.get("storage_type", "s3"),
+        )
+        # If clear_existing is set, drop all in-memory adaptive state of the
+        # log (catalog, LRU, group counts, pending promotions) so that
+        # begin_builders() starts from a clean slate.
         if self.index_config.get("clear_existing", False):
-            candidate = MetaData(
-                storage_namespace=self.index_config.get(
-                    "storage_namespace", "siesta"
-                ),
-                log_name=self.index_config.get("log_name", "default_log"),
-                storage_type=self.index_config.get("storage_type", "s3"),
-            )
-            evict_catalog(candidate)
+            reset_log_state(candidate)
             self._retention_params = None
             self._catalog        = None
             self._retention      = None
             logger.info(
-                f"{self.name}: evicted catalog for "
+                f"{self.name}: reset adaptive state for "
                 f"{candidate.storage_namespace}/{candidate.log_name} "
                 "(clear_existing=True)."
             )
+        else:
+            # A pair being persisted concurrently with this ingest could
+            # miss the batch's events; let pending promotions finish first.
+            # Not part of the measured ingest time.
+            drain_promotions(candidate)
 
         if log_file is None:
             if not self.index_config.get("enable_streaming", False):
@@ -355,6 +364,7 @@ class Adaptive_Indexing(SiestaModule):
             "code":    200,
             "message": "AdaptiveIndexing: batch processing completed.",
             "time":    elapsed,
+            "timings": self._last_timings,
         }
 
     def api_register_perspective(
@@ -372,13 +382,12 @@ class Adaptive_Indexing(SiestaModule):
         self.siesta_config = get_system_config()
         self.storage = get_storage_manager()
 
-        if self._catalog is None:
-            meta = MetaData(
-                storage_namespace=request.storage_namespace,
-                log_name=request.log_name,
-                storage_type=request.storage_type,
-            )
-            self._catalog = get_catalog(meta, self.storage or get_storage_manager())
+        meta = MetaData(
+            storage_namespace=request.storage_namespace,
+            log_name=request.log_name,
+            storage_type=request.storage_type,
+        )
+        self._catalog = get_catalog(meta, self.storage or get_storage_manager())
 
         pid, _ = self._catalog.get_or_declare(
             grouping_keys=request.grouping_keys,
@@ -480,16 +489,35 @@ class Adaptive_Indexing(SiestaModule):
             Structured Streaming micro-batch.
         """
 
-        # One-time lazy init - runs exactly once per process lifetime.
-        # After this, self._catalog and self._retention are just there.
-        if self._catalog is None:
+        # Bind to the requested log.  Re-bind whenever the log changes (or
+        # after clear_existing reset the catalog): pinning the first log of
+        # the process would write later logs into its tables.
+        namespace = self.index_config.get("storage_namespace", "siesta")
+        log_name = self.index_config.get("log_name", "default_log")
+        current = getattr(self, "metadata", None)
+        if (
+            self._catalog is None
+            or current is None
+            or current.log_name != log_name
+            or current.storage_namespace != namespace
+        ):
             self.metadata = MetaData(
-                storage_namespace=self.index_config.get("storage_namespace", "siesta"),
-                log_name=self.index_config.get("log_name", "default_log"),
+                storage_namespace=namespace,
+                log_name=log_name,
                 storage_type=self.index_config.get("storage_type", "s3"),
             )
             self.storage.read_metadata_table(self.metadata)
-            self._catalog = get_catalog(self.metadata, self.storage)
+        # Always take the catalog from the process-wide registry: the query
+        # module may have evicted and reloaded it (eval reset), and a cached
+        # reference would then be an orphan that never sees the perspectives
+        # and pairs the queries promoted, so nothing would be maintained.
+        self._catalog = get_catalog(self.metadata, self.storage)
+
+        timings: Dict[str, Any] = {}
+        self._last_timings = timings
+        t_stage = time.time()
+        set_log_option(self.metadata, "embed_pair_attributes",
+                       bool(self.index_config.get("embed_pair_attributes", True)))
 
         # Rebuild the retention policy whenever request-level overrides
         # differ from the cached values.  Stateless, so this is free.
@@ -506,12 +534,14 @@ class Adaptive_Indexing(SiestaModule):
                 "hysteresis",
                 DEFAULT_ADAPTIVE_INDEX_CONFIG["hysteresis"],
             )),
+            float(self.index_config.get("cost_scale", 1.0)),
         )
         if self._retention is None or self._retention_params != retention_params:
             self._retention = RetentionPolicy(
                 half_life_seconds=retention_params[0],
                 min_query_count=retention_params[1],
                 hysteresis=retention_params[2],
+                cost_scale=retention_params[3],
             )
             self._retention_params = retention_params
             
@@ -524,6 +554,7 @@ class Adaptive_Indexing(SiestaModule):
             index_config=self.index_config,
             metadata=self.metadata,
         )
+        timings["sequence_table"] = time.time() - t_stage
 
         # ----------------------------------------------------------------
         # Step 1b  Activity Index (streaming path diverges here)
@@ -539,6 +570,7 @@ class Adaptive_Indexing(SiestaModule):
             return
 
         # ---- Batch path -----------------------------------------------
+        t_stage = time.time()
         activity_index_df = timed(
             build_activity_index,
             f"{self.name}.",
@@ -546,10 +578,16 @@ class Adaptive_Indexing(SiestaModule):
             metadata=self.metadata,
         )
         seq_df.unpersist()
+        # Persist the trace/event counts the sequence-table build updated,
+        # so query-side support denominators and group-count caches see
+        # the new batch.
+        self.storage.write_metadata_table(self.metadata)
+        timings["activity_index"] = time.time() - t_stage
 
         # ----------------------------------------------------------------
         # Steps 2-4
         # ----------------------------------------------------------------
+        t_stage = time.time()
         batch_min_ts = (
             activity_index_df
             .agg({"start_timestamp": "min"})
@@ -557,11 +595,19 @@ class Adaptive_Indexing(SiestaModule):
         )
 
         self._declare_proactive_perspectives()
-        self._run_incremental_maintenance(activity_index_df, batch_min_ts)
-        self._evaluate_retention()   # flush() is called inside here
+        timings["maintenance"] = self._run_incremental_maintenance(
+            activity_index_df, batch_min_ts
+        )
+        timings["maintenance_total"] = time.time() - t_stage
 
+        t_stage = time.time()
+        self._evaluate_retention()   # flush() is called inside here
+        timings["retention"] = time.time() - t_stage
+
+        t_stage = time.time()
         activity_index_df.unpersist()
         spark_cleanup()
+        timings["cleanup"] = time.time() - t_stage
 
     # ------------------------------------------------------------------
     # Streaming path
@@ -660,7 +706,13 @@ class Adaptive_Indexing(SiestaModule):
                     f"(keys={grouping_keys}) at L0."
                 )
 
-    def _run_incremental_maintenance(self, batch_activity_df, batch_min_ts: int) -> None:
+    def _run_incremental_maintenance(self, batch_activity_df, batch_min_ts: int) -> Dict[str, Any]:
+        """
+        Maintain every established perspective for one batch.  Returns
+        per-perspective timings: {pid: {n_pairs, total_s, l2_ms,
+        prepare_ms, pairs_ms}}.
+        """
+        report: Dict[str, Any] = {}
         for pid, stats in self._catalog.all_established_perspectives():
 
             persistent_pairs = [
@@ -670,6 +722,7 @@ class Adaptive_Indexing(SiestaModule):
             ]
 
             t0 = time.time()
+            stage_ms: Dict[str, float] = {}
             try:
                 pair_elapsed = incremental_update_persistent_pairs(
                     pid=pid,
@@ -684,12 +737,16 @@ class Adaptive_Indexing(SiestaModule):
                     ),
                     metadata=self.metadata,
                     storage=self.storage,
+                    timings=stage_ms,
                 )
             except Exception as exc:
                 logger.error(
                     f"{self.name}: maintenance failed for '{pid}': {exc}",
                     exc_info=True,
                 )
+                # The transient pairs may predate this batch; do not serve them.
+                get_lru_cache(self.metadata).invalidate_perspective(pid)
+                report[pid] = {"n_pairs": len(persistent_pairs), "error": str(exc)}
                 continue
 
             # Invalidate the LRU cache for this perspective so that the
@@ -700,16 +757,24 @@ class Adaptive_Indexing(SiestaModule):
             get_lru_cache(self.metadata).invalidate_perspective(pid)
 
             total_ms = (time.time() - t0) * 1000
-            if pair_elapsed:
-                self._catalog.record_batch_maintenance(
-                    pid=pid,
-                    l1_ms=0.0,
-                    l2_ms=0.0,
-                    pair_ms=pair_elapsed,
-                )
-            logger.info(
-                f"{self.name}: maintenance for '{pid}' done in {total_ms:.1f}ms."
+            # L1 has no per-batch work (grouping is computed on the fly);
+            # L2 pays for extending the positions overlay.
+            self._catalog.record_batch_maintenance(
+                pid=pid,
+                l1_ms=0.0,
+                l2_ms=stage_ms.get("l2_ms", 0.0),
+                pair_ms=pair_elapsed,
             )
+            report[pid] = {
+                "n_pairs": len(persistent_pairs),
+                "total_s": total_ms / 1000,
+                **stage_ms,
+            }
+            logger.info(
+                f"{self.name}: maintenance for '{pid}' "
+                f"({len(persistent_pairs)} pairs) done in {total_ms:.1f}ms."
+            )
+        return report
 
     def _evaluate_retention(self) -> None:
         """
@@ -799,8 +864,16 @@ class Adaptive_Indexing(SiestaModule):
                     )
 
             # ---- L1 -> L0 demotion ----
+            # Not while the perspective still has PERSISTENT pairs: they are
+            # maintained only for established (L1+) perspectives, so demoting
+            # would leave them marked PERSISTENT but frozen.  They are
+            # demoted by their own predicate (below) first.
+            has_persistent = any(
+                ps.status == PairStatus.PERSISTENT for ps in stats.pairs.values()
+            )
             if (
                 stats.level == PerspectiveLevel.L1_POS_FREE
+                and not has_persistent
                 and self._retention.should_demote_l1(stats)
             ):
                 logger.info(f"{self.name}: demoting '{pid}' L1->L0.")
@@ -835,6 +908,7 @@ class Adaptive_Indexing(SiestaModule):
                     )
 
             # ---- Per-pair retention -----------------------------------
+            demoted: list = []
             for (act_a, act_b), pair_stats in list(stats.pairs.items()):
 
                 if pair_stats.status == PairStatus.ABSENT:
@@ -888,9 +962,9 @@ class Adaptive_Indexing(SiestaModule):
                         # eviction policy handles the final
                         # TRANSIENT -> ABSENT transition based on
                         # memory pressure.
-                        self._catalog.promote_pair(
-                            pid, act_a, act_b, PairStatus.TRANSIENT
-                        )
-            
+                        demoted.append((act_a, act_b))
+            # One catalog write for all of this perspective's demotions.
+            self._catalog.promote_pairs(pid, demoted, PairStatus.TRANSIENT)
+
         # Flush all write-back mutations accumulated during this cycle.
         self._catalog.flush()

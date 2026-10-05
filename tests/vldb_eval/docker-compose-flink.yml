@@ -1,9 +1,29 @@
+# Flink 1.20 + SQL Gateway for the MATCH_RECOGNIZE competitor
+# (tests/vldb_eval/comp_mr.py).
+#
+#   docker compose -f tests/vldb_eval/docker-compose-flink.yml up -d
+#   docker compose -f tests/vldb_eval/docker-compose-flink.yml stop
+#
+# comp_mr.py writes its source CSVs under tests/vldb_eval/results/data/<ds>/mr/,
+# which is bind-mounted read-only at /opt/flink/siesta_data in every container
+# (the JobManager enumerates splits, the TaskManager reads them).
+#
+# One TaskManager with 4 slots (parallelism 4) and 6 GB of process memory.
+# Queries run in STREAMING mode over the bounded CSV source (event-time
+# MATCH_RECOGNIZE; see comp_mr.py for why batch mode is not used).  The
+# heap (hashmap) state backend buffers the events, so managed memory, which
+# only RocksDB and batch operators use, is cut to 10% in favour of the heap.
+
+name: siesta_flink
+
 networks:
   flink-net:
     driver: bridge
 
-services:
+x-flink-data: &flink-data
+  - ./results/data:/opt/flink/siesta_data:ro
 
+services:
 
   jobmanager:
     image: flink:1.20-java17
@@ -17,25 +37,30 @@ services:
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: jobmanager
         jobmanager.rpc.port: 6123
-        jobmanager.memory.process.size: 2048m
+        jobmanager.memory.process.size: 1600m
         rest.port: 8081
         rest.bind-address: 0.0.0.0
         rest.address: jobmanager
-        execution.runtime-mode: BATCH
-    volumes:
-      - /mnt/datasets:/data:ro       # source logs, read-only
-      - /home/balaktsis/Projects/siesta-framework/tests/eval/flink_data:/opt/flink/flink_data  # converted CSVs, writable
+        execution.runtime-mode: STREAMING
+        parallelism.default: 4
+        restart-strategy.type: none
+        jobstore.max-capacity: 2000
+        heartbeat.timeout: 60000
+    volumes: *flink-data
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8081/overview"]
-      interval: 10s
+      interval: 5s
       timeout: 5s
-      retries: 15
-      start_period: 30s
+      retries: 30
+      start_period: 10s
 
   taskmanager:
     image: flink:1.20-java17
     container_name: siesta_flink_tm
     command: taskmanager
+    # a task stuck in a huge NFA computation may ignore cancellation; after
+    # task.cancellation.timeout Flink kills the TaskManager, which then restarts
+    restart: unless-stopped
     networks:
       - flink-net
     depends_on:
@@ -45,12 +70,13 @@ services:
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: jobmanager
         jobmanager.rpc.port: 6123
-        taskmanager.memory.process.size: 4096m
+        taskmanager.memory.process.size: 6g
+        taskmanager.memory.managed.fraction: 0.1
         taskmanager.numberOfTaskSlots: 4
-        execution.runtime-mode: BATCH
-    volumes:
-      - /mnt/datasets:/data:ro
-      - /home/balaktsis/Projects/siesta-framework/tests/eval/flink_data:/opt/flink/flink_data
+        task.cancellation.timeout: 60000
+        execution.runtime-mode: STREAMING
+        parallelism.default: 4
+    volumes: *flink-data
 
   sql-gateway:
     image: flink:1.20-java17
@@ -75,13 +101,14 @@ services:
         rest.port: 8081
         sql-gateway.endpoint.rest.address: 0.0.0.0
         sql-gateway.endpoint.rest.port: 8083
-        execution.runtime-mode: BATCH
-    volumes:
-      - /mnt/datasets:/data:ro
-      - /home/balaktsis/Projects/siesta-framework/tests/eval/flink_data:/opt/flink/flink_data  # gateway reads converted CSVs from here
+        sql-gateway.session.idle-timeout: 24h
+        execution.runtime-mode: STREAMING
+        parallelism.default: 4
+        restart-strategy.type: none
+    volumes: *flink-data
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8083/v1/info"]
-      interval: 10s
+      interval: 5s
       timeout: 5s
-      retries: 15
-      start_period: 30s
+      retries: 30
+      start_period: 10s

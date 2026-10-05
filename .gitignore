@@ -238,3 +238,6 @@ bpic*
 config/los_aug_workflow.json
 
 analysis/*
+
+tests/vldb_eval/results/*
+tests/vldb_eval/graphdb-eventlogs/*

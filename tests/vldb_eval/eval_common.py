@@ -69,13 +69,8 @@ EAGER_QUERY      = "querying"
 REPO_ROOT       = Path(__file__).resolve().parents[2]
 DATASET_DIR     = REPO_ROOT / "datasets"
 CONFIG_DIR      = REPO_ROOT / "config"
-RESULTS_DIR     = REPO_ROOT / "tests" / "eval" / "results"
-try:
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-except PermissionError:
-    # tests/eval/ is root-owned (created by docker volume); fall back to vldb-eval/results/
-    RESULTS_DIR = Path(__file__).resolve().parent / "results"
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+RESULTS_DIR     = Path(__file__).resolve().parent / "results"
+RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +116,7 @@ def resolve_dataset(
     name = (
         log_name
         or os.environ.get("EVAL_LOG_NAME")
-        or DEFAULT_LOG_NAME
+        or (path.stem if dataset else DEFAULT_LOG_NAME)
     )
     return DatasetSpec(path=path, log_name=name)
 
@@ -754,3 +749,277 @@ def timed_query(
     body = detect_adaptive(log_name, pattern, grouping_keys, lookback,
                            retention_overrides=retention_overrides)
     return body, time.perf_counter() - t0
+
+# ---------------------------------------------------------------------------
+# Indexing-suite client (Exp 1-5)
+# ---------------------------------------------------------------------------
+# Thin wrappers over the adaptive query module's evaluation endpoints and the
+# two indexers, returning server-side timings next to client wall time.
+
+# Retention parameters shared by every indexing experiment; passed to both
+# the indexer and the query module so the two sides agree.
+RETENTION = {"min_query_count": 3, "half_life_seconds": 3600.0, "hysteresis": 0.15}
+LOOKBACK = "3650d"
+API_CONTAINER = os.environ.get("EVAL_API_CONTAINER", "siesta-api")
+SPARK_WORKER_CONTAINER = os.environ.get("EVAL_SPARK_WORKER_CONTAINER", "spark-worker")
+
+
+def post_json(path: str, body: dict, timeout: int | None = None) -> dict:
+    r = requests.post(urljoin(API_BASE, path), json=body, timeout=timeout or API_TIMEOUT_S)
+    r.raise_for_status()
+    return r.json()
+
+
+def eval_reset(log_name: str) -> dict:
+    return post_json(f"/{QUERY_PREFIX}/eval_reset", {"log_name": log_name})
+
+
+def eval_drain(log_name: str | None = None) -> float:
+    body = {"log_name": log_name} if log_name else {}
+    return post_json(f"/{QUERY_PREFIX}/eval_drain", body)["drained_s"]
+
+
+def eval_catalog(log_name: str, grouping_keys: list[str] | None = None) -> dict:
+    body = {"log_name": log_name}
+    if grouping_keys:
+        body["grouping_keys"] = grouping_keys
+    return post_json(f"/{QUERY_PREFIX}/eval_catalog", body)
+
+
+def eval_force_persist(log_name: str, grouping_keys: list[str], pairs="all") -> dict:
+    return post_json(f"/{QUERY_PREFIX}/eval_force_persist", {
+        "log_name": log_name, "grouping_keys": grouping_keys,
+        "pairs": pairs, "lookback": LOOKBACK,
+    })
+
+
+def pair_statuses(log_name: str, grouping_keys: list[str]) -> dict[str, str]:
+    """{"A->B": status} of one perspective, after pending promotions."""
+    snap = eval_catalog(log_name, grouping_keys)["perspectives"]
+    out: dict[str, str] = {}
+    for persp in snap.values():
+        for key, ps in persp["pairs"].items():
+            out[key] = ps["status"]
+    return out
+
+
+def query_adaptive(
+    log_name: str,
+    pattern: str,
+    grouping_keys: list[str],
+    *,
+    wait_promotion: bool = False,
+    retention: dict | None = None,
+    extra: dict | None = None,
+    timeout: float | None = None,
+) -> dict:
+    """
+    Adaptive detection.  Returns the response plus ``wall_s`` (client
+    round trip).  ``time`` in the response is the server-side latency.
+    """
+    body = {
+        "log_name": log_name,
+        "storage_namespace": "siesta",
+        "query": {"pattern": pattern},
+        "grouping_keys": grouping_keys,
+        "lookback": LOOKBACK,
+        "lookback_mode": "time",
+        "support_threshold": 0.0,
+        "wait_promotion": wait_promotion,
+        **(retention or RETENTION),
+        **(extra or {}),
+    }
+    t0 = time.perf_counter()
+    resp = post_json(f"/{QUERY_PREFIX}/detection", body, timeout=timeout)
+    resp["wall_s"] = time.perf_counter() - t0
+    resp.pop("detected", None)  # group lists can be large; not needed
+    return resp
+
+
+def query_eager(log_name: str, pattern: str, extra: dict | None = None,
+                timeout: float | None = None) -> dict:
+    """Eager SIESTA detection on a log indexed with trace_id = the perspective."""
+    t0 = time.perf_counter()
+    resp = post_json(f"/{EAGER_QUERY}/detection", {
+        "log_name": log_name, "storage_namespace": "siesta",
+        "method": "detection", "query": {"pattern": pattern},
+        "support_threshold": 0.0, **(extra or {}),
+    }, timeout=timeout)
+    wall = time.perf_counter() - t0
+    return {
+        "time": float(resp.get("time", wall)),
+        "wall_s": wall,
+        "total": resp.get("total"),
+        "support": resp.get("support"),
+    }
+
+
+INDEX_CONFIG = CONFIG_DIR / "adaptive_index.config.json"
+
+
+def ingest(
+    endpoint: str,
+    log_name: str,
+    path: Path,
+    *,
+    clear_existing: bool = False,
+    trace_id_column: str | None = None,
+    extra: dict | None = None,
+) -> dict:
+    """
+    Upload a CSV batch to ``/adaptive_indexing/run`` (endpoint="adaptive")
+    or ``/indexing/run`` (endpoint="eager").  ``trace_id_column`` groups the
+    eager index by that column (a perspective).  Returns the response plus
+    ``wall_s``; ``time`` is the server-side build time, which excludes the
+    upload.
+    """
+    config = json.loads(INDEX_CONFIG.read_text())
+    config.update({"log_name": log_name, "clear_existing": clear_existing,
+                   "lookback": LOOKBACK, **RETENTION})
+    config["field_mappings"]["csv"]["position"] = None
+    if trace_id_column:
+        config["field_mappings"]["csv"]["trace_id"] = trace_id_column
+    if extra:
+        config.update(extra)
+    prefix = INDEXER_PREFIX if endpoint == "adaptive" else EAGER_INDEXER
+    t0 = time.perf_counter()
+    with path.open("rb") as fp:
+        r = requests.post(
+            urljoin(API_BASE, f"/{prefix}/run"),
+            files={"log_file": (path.name, fp, "text/csv")},
+            data={"index_config": json.dumps(config)},
+            timeout=API_TIMEOUT_S,
+        )
+    r.raise_for_status()
+    resp = r.json()
+    if resp.get("code", 200) != 200:
+        raise RuntimeError(f"ingest failed: {resp}")
+    resp["time"] = float(resp["time"])
+    resp["wall_s"] = time.perf_counter() - t0
+    return resp
+
+
+def delete_log(log_name: str) -> None:
+    try:
+        requests.delete(urljoin(API_BASE, "/manager/delete_log"),
+                        params={"log_name": log_name, "storage_namespace": "siesta"},
+                        timeout=600)
+    except requests.RequestException:
+        pass
+
+
+def restart_api(timeout_s: float = 300.0) -> float:
+    """
+    Restart the API container (fresh JVM and Python state) and wait for
+    /health.  Returns the seconds taken.
+    """
+    import subprocess
+    t0 = time.time()
+    # A killed driver leaves its scratch dir (~1 GB) in the API container and
+    # its application dir (jars, logs) on the worker; with a restart per
+    # workload these fill the disk.  Both are removed for the driver being
+    # stopped, before the new one starts.
+    subprocess.run(["docker", "exec", API_CONTAINER, "sh", "-c",
+                    "rm -rf /tmp/spark-*"], stdout=subprocess.DEVNULL)
+    subprocess.run(["docker", "stop", API_CONTAINER], check=True,
+                   stdout=subprocess.DEVNULL)
+    subprocess.run(["docker", "exec", SPARK_WORKER_CONTAINER, "sh", "-c",
+                    "rm -rf /opt/spark/work/app-*"], stdout=subprocess.DEVNULL)
+    subprocess.run(["docker", "start", API_CONTAINER], check=True,
+                   stdout=subprocess.DEVNULL)
+    while time.time() - t0 < timeout_s:
+        try:
+            if requests.get(urljoin(API_BASE, "/health"), timeout=3).ok:
+                return time.time() - t0
+        except requests.RequestException:
+            pass
+        time.sleep(2)
+    raise TimeoutError("API did not come back after restart")
+
+
+def run_meta() -> dict:
+    """Environment facts recorded at the start of every result file."""
+    import platform
+    import subprocess
+
+    def _sh(cmd):
+        try:
+            return subprocess.run(cmd, capture_output=True, text=True, timeout=10).stdout.strip()
+        except Exception:
+            return None
+
+    sys_cfg = {}
+    try:
+        sys_cfg = json.loads((CONFIG_DIR / "siesta.docker.config.json").read_text())
+    except Exception:
+        pass
+    return {
+        "git_sha": _sh(["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"]),
+        "git_dirty": bool(_sh(["git", "-C", str(REPO_ROOT), "status", "--porcelain"])),
+        "host": platform.node(),
+        "cpu": _sh(["sh", "-c", "grep -m1 'model name' /proc/cpuinfo | cut -d: -f2"]),
+        "mem_total_kb": _sh(["sh", "-c", "grep MemTotal /proc/meminfo | awk '{print $2}'"]),
+        "spark_config": {k: v for k, v in sys_cfg.items() if "spark" in k.lower()},
+        "retention": RETENTION,
+        "lookback": LOOKBACK,
+        "api_timeout_s": API_TIMEOUT_S,
+    }
+
+
+class ResultWriter:
+    """
+    JSONL result file for one (experiment, dataset).  Every record gets
+    {experiment, dataset, run_id, ts, event}; the first is ``run_meta``.
+    A complete run ends with a ``done`` record, which ``--resume`` checks.
+    """
+
+    def __init__(self, experiment: str, dataset: str, suffix: str = "", keep=None):
+        """
+        ``keep``: optional predicate over the existing file's records; the
+        records it accepts are kept (a partial rerun) instead of truncating.
+        """
+        self.experiment = experiment
+        self.dataset = dataset
+        self.run_id = str(uuid.uuid4())[:8]
+        d = RESULTS_DIR / experiment
+        d.mkdir(parents=True, exist_ok=True)
+        self.path = d / f"{dataset}{suffix}.jsonl"
+        kept = []
+        if keep is not None and self.path.exists():
+            kept = [json.loads(l) for l in self.path.read_text().splitlines() if l.strip()]
+            kept = [r for r in kept if keep(r)]
+        self.path.write_text("".join(json.dumps(r, default=str) + "\n" for r in kept))
+        self.emit("run_meta", **run_meta(), kept_records=len(kept))
+
+    @staticmethod
+    def is_complete(experiment: str, dataset: str, suffix: str = "") -> bool:
+        p = RESULTS_DIR / experiment / f"{dataset}{suffix}.jsonl"
+        if not p.exists():
+            return False
+        lines = p.read_text().strip().splitlines()
+        return bool(lines) and json.loads(lines[-1]).get("event") == "done"
+
+    def emit(self, event: str, **fields: Any) -> dict:
+        rec = {"experiment": self.experiment, "dataset": self.dataset,
+               "run_id": self.run_id, "ts": time.time(), "event": event, **fields}
+        with self.path.open("a") as f:
+            f.write(json.dumps(rec, default=str) + "\n")
+        return rec
+
+    def done(self, **fields: Any) -> None:
+        self.emit("done", **fields)
+
+    def read(self) -> list[dict]:
+        return [json.loads(l) for l in self.path.read_text().splitlines() if l.strip()]
+
+
+def read_results(experiment: str, dataset: str | None = None) -> list[dict]:
+    d = RESULTS_DIR / experiment
+    files = [d / f"{dataset}.jsonl"] if dataset else sorted(
+        f for f in d.glob("*.jsonl") if ".workload" not in f.name
+    )
+    out = []
+    for p in files:
+        if p.exists():
+            out += [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
+    return out

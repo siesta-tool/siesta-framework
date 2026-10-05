@@ -17,13 +17,16 @@ class PairStatus(IntEnum):
 class PairStats:
     """Per-(G, A, B) workload statistics used by RetentionPolicy."""
     build_cost_ms: float = 0.0       # c_pair, measured on first build
-    query_count: int = 0             # f_pair, number of queries touching this pair
+    query_count: float = 0.0         # f_pair, decayed number of queries touching this pair
     total_savings_ms: float = 0.0    # cumulative savings vs lazy scan
     total_maintenance_ms: float = 0.0
     maintenance_batch_count: int = 0
     status: PairStatus = PairStatus.ABSENT
     last_accessed_ts: float = 0.0
-    last_decay_ts: float = 0.0  
+    last_decay_ts: float = 0.0
+    # Pinned pairs are exempt from demotion (pre-materialised, e.g. the
+    # all-pairs baseline); the retention policy never evicts them.
+    pinned: bool = False
 
 
 @dataclass
@@ -36,12 +39,12 @@ class PerspectiveStats:
     lookback_mode: str = "time"      # "time" or "position"
     # L1 stats
     l1_build_cost_ms: float = 0.0
-    l1_query_count: int = 0
+    l1_query_count: float = 0.0      # decayed
     l1_total_savings_ms: float = 0.0
     l1_maintenance_ms_per_batch: float = 0.0
     # L2 stats
     l2_build_cost_ms: float = 0.0
-    l2_pos_query_count: int = 0      # f_pos: queries referencing pos
+    l2_pos_query_count: float = 0.0  # f_pos: decayed queries referencing pos
     l2_total_savings_ms: float = 0.0
     l2_maintenance_ms_per_batch: float = 0.0
     # Per-pair stats: keyed by (A, B)

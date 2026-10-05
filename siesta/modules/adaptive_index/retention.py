@@ -63,6 +63,13 @@ All costs and savings are in milliseconds.  The half_life_seconds
 parameter is in seconds.  Query counts are dimensionless decayed
 values; their absolute magnitude is meaningful only relative to the
 hysteresis thresholds and the cost terms.
+
+Counters are kept as floats.  Rounding them on every decay step made
+them sticky: with frequent evaluations the per-step factor is close to 1
+and round(n * factor) == n, so a counter never decayed.  Integer
+thresholds are compared with a half-query tolerance instead (see
+_reached / _is_zero), so three queries a few seconds apart still pass a
+min_query_count of 3 although their decayed sum is slightly below 3.
 """
 
 from __future__ import annotations
@@ -75,6 +82,16 @@ from dataclasses import dataclass
 from siesta.model.PerspectiveModel import PairStats, PerspectiveStats
 
 logger = logging.getLogger(__name__)
+
+
+def _reached(count: float, n: int) -> bool:
+    """Whether a decayed counter has reached the integer threshold n."""
+    return count >= n - 0.5
+
+
+def _is_zero(count: float) -> bool:
+    """Whether a decayed counter has decayed to (rounds to) zero."""
+    return count < 0.5
 
 
 @dataclass
@@ -100,11 +117,18 @@ class RetentionPolicy:
         Minimum number of queries touching an artefact before any
         promotion decision is made.  Protects against premature
         promotion based on a single expensive first query.  Default: 3.
+
+    cost_scale : float
+        Multiplier on every estimated cost (build + maintenance) in the
+        promote / demote gates.  1 uses the measured estimates; other
+        values model systematically under- (< 1) or over-estimated (> 1)
+        costs, for the sensitivity analysis.  Default: 1.
     """
 
     half_life_seconds: float = 3600.0
     hysteresis: float = 0.15
     min_query_count: int = 3
+    cost_scale: float = 1.0
 
     # ------------------------------------------------------------------
     # Decay helpers
@@ -129,9 +153,9 @@ class RetentionPolicy:
         if elapsed <= 0:
             return
         factor = math.exp(-elapsed * math.log(2) / self.half_life_seconds)
-        stats.l1_query_count = round(stats.l1_query_count * factor)
+        stats.l1_query_count *= factor
         stats.l1_total_savings_ms *= factor
-        stats.l2_pos_query_count = round(stats.l2_pos_query_count * factor)
+        stats.l2_pos_query_count *= factor
         stats.l2_total_savings_ms *= factor
         stats.last_decay_ts = now
 
@@ -151,9 +175,17 @@ class RetentionPolicy:
         if elapsed <= 0:
             return
         factor = math.exp(-elapsed * math.log(2) / self.half_life_seconds)
-        ps.query_count = round(ps.query_count * factor)
+        ps.query_count *= factor
         ps.total_savings_ms *= factor
         ps.last_decay_ts = now
+
+    def decay_perspective(self, stats: PerspectiveStats) -> None:
+        """Public alias of _decay_perspective, used before counters are incremented."""
+        self._decay_perspective(stats)
+
+    def decay_pair(self, ps: PairStats) -> None:
+        """Public alias of _decay_pair, used before counters are incremented."""
+        self._decay_pair(ps)
 
     # ------------------------------------------------------------------
     # Eq. 1  Perspective L1
@@ -170,7 +202,7 @@ class RetentionPolicy:
         """
         self._decay_perspective(stats)
 
-        if stats.l1_query_count < self.min_query_count:
+        if not _reached(stats.l1_query_count, self.min_query_count):
             return False
         if stats.l1_build_cost_ms <= 0.0:
             return False
@@ -181,7 +213,7 @@ class RetentionPolicy:
             stats.l1_build_cost_ms
             + stats.l1_maintenance_ms_per_batch * stats.l1_query_count
         )
-        return utility > cost * (1 + self.hysteresis)
+        return utility > cost * self.cost_scale * (1 + self.hysteresis)
 
     def should_demote_l1(self, stats: PerspectiveStats) -> bool:
         """
@@ -194,7 +226,7 @@ class RetentionPolicy:
         """
         self._decay_perspective(stats)
 
-        if stats.l1_query_count == 0:
+        if _is_zero(stats.l1_query_count):
             return True
 
         mean_savings = stats.l1_total_savings_ms / stats.l1_query_count
@@ -203,7 +235,7 @@ class RetentionPolicy:
             stats.l1_build_cost_ms
             + stats.l1_maintenance_ms_per_batch * stats.l1_query_count
         )
-        return utility < cost * (1 - self.hysteresis)
+        return utility < cost * self.cost_scale * (1 - self.hysteresis)
 
     # ------------------------------------------------------------------
     # Eq. 2  Perspective L2 (promotion from L1)
@@ -219,7 +251,7 @@ class RetentionPolicy:
         """
         self._decay_perspective(stats)
 
-        if stats.l2_pos_query_count < self.min_query_count:
+        if not _reached(stats.l2_pos_query_count, self.min_query_count):
             return False
         if stats.l2_build_cost_ms <= 0.0:
             return False
@@ -230,7 +262,7 @@ class RetentionPolicy:
             stats.l2_build_cost_ms
             + stats.l2_maintenance_ms_per_batch * stats.l2_pos_query_count
         )
-        return utility > cost * (1 + self.hysteresis)
+        return utility > cost * self.cost_scale * (1 + self.hysteresis)
 
     def should_demote_l2(self, stats: PerspectiveStats) -> bool:
         """
@@ -244,7 +276,7 @@ class RetentionPolicy:
         """
         self._decay_perspective(stats)
 
-        if stats.l2_pos_query_count == 0:
+        if _is_zero(stats.l2_pos_query_count):
             return True
 
         mean_savings = stats.l2_total_savings_ms / stats.l2_pos_query_count
@@ -253,7 +285,7 @@ class RetentionPolicy:
             stats.l2_build_cost_ms
             + stats.l2_maintenance_ms_per_batch * stats.l2_pos_query_count
         )
-        return utility < cost * (1 - self.hysteresis)
+        return utility < cost * self.cost_scale * (1 - self.hysteresis)
 
     # ------------------------------------------------------------------
     # Eq. 3  Pair L3
@@ -290,7 +322,7 @@ class RetentionPolicy:
         """
         self._decay_pair(ps)
 
-        if ps.query_count < self.min_query_count:
+        if not _reached(ps.query_count, self.min_query_count):
             logger.info(
                 f"should_persist_pair: SKIP demand gate "
                 f"query_count={ps.query_count:.2f} < min={self.min_query_count}"
@@ -325,14 +357,14 @@ class RetentionPolicy:
             ps.build_cost_ms
             + mean_maintenance * batches_per_query * ps.query_count
         )
-        result = utility > cost * (1 + self.hysteresis)
+        result = utility > cost * self.cost_scale * (1 + self.hysteresis)
         logger.info(
             f"should_persist_pair: {'PROMOTE' if result else 'SKIP cost gate'} "
             f"query_count={ps.query_count:.2f} "
             f"mean_savings={mean_savings:.1f}ms "
             f"utility={utility:.1f}ms "
             f"cost={cost:.1f}ms "
-            f"threshold={cost*(1+self.hysteresis):.1f}ms "
+            f"threshold={cost*self.cost_scale*(1+self.hysteresis):.1f}ms "
             f"build_cost={ps.build_cost_ms:.1f}ms "
             f"total_savings={ps.total_savings_ms:.1f}ms"
         )
@@ -353,7 +385,10 @@ class RetentionPolicy:
         """
         self._decay_pair(pair_stats)
 
-        if pair_stats.query_count == 0:
+        if pair_stats.pinned:
+            return False
+
+        if _is_zero(pair_stats.query_count):
             if pair_stats.last_accessed_ts > 0:
                 idle_seconds = time.time() - pair_stats.last_accessed_ts
                 return idle_seconds > self.half_life_seconds
@@ -379,7 +414,7 @@ class RetentionPolicy:
             pair_stats.build_cost_ms
             + mean_maintenance * batches_per_query * pair_stats.query_count
         )
-        return utility < cost * (1 - self.hysteresis)
+        return utility < cost * self.cost_scale * (1 - self.hysteresis)
 
     # ------------------------------------------------------------------
     # Diagnostics
@@ -393,7 +428,7 @@ class RetentionPolicy:
         """
         self._decay_perspective(stats)
 
-        if stats.l1_query_count == 0:
+        if _is_zero(stats.l1_query_count):
             return {"query_count": 0, "verdict": "insufficient_data"}
 
         mean_savings = stats.l1_total_savings_ms / stats.l1_query_count
@@ -418,7 +453,7 @@ class RetentionPolicy:
         """Same as explain_l1 but for the L2 predicate."""
         self._decay_perspective(stats)
 
-        if stats.l2_pos_query_count == 0:
+        if _is_zero(stats.l2_pos_query_count):
             return {
                 "pos_query_count": 0,
                 "verdict": "insufficient_data (no pos queries)",
@@ -446,7 +481,7 @@ class RetentionPolicy:
         """Same as explain_l1 but for the pair L3 predicate."""
         self._decay_pair(pair_stats)
 
-        if pair_stats.query_count == 0:
+        if _is_zero(pair_stats.query_count):
             return {"query_count": 0, "verdict": "insufficient_data"}
 
         mean_savings = pair_stats.total_savings_ms / pair_stats.query_count

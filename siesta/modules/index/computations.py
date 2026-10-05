@@ -197,11 +197,23 @@ def createTuples(
     lookback_number = lookback[0]
     prev = None
     i = 0
-    
+    # For a self-pair (A, A) the last matched target is also the next
+    # source of the chain, which within a batch is allowed (ts >= prev).
+    # The watermark of an incremental run is that same event, so it must
+    # be admitted too; otherwise every batch boundary drops the chain link
+    # (last A of batch k, first A of batch k+1).  For A != B the strict
+    # bound avoids re-pairing a source that shares the watermark's
+    # timestamp.
+    self_pair = key1 == key2
+
     for ea_ts, ea_pos, ea_attr in e_source:
         # Evaluate based on previous and last_checked
-        if ((prev is None or ea_ts >= prev) and 
-            (last_checked is None or ea_ts > last_checked)):
+        after_watermark = (
+            last_checked is None
+            or ea_ts > last_checked
+            or (self_pair and ea_ts == last_checked)
+        )
+        if (prev is None or ea_ts >= prev) and after_watermark:
             
             stop = False
             while i < len(e_target) and not stop:

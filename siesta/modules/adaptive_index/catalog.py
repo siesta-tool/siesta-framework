@@ -42,13 +42,14 @@ change as new activity types appear.
     lookback               STRING             -- e.g. "7d", "255i"
     lookback_mode          STRING             -- "time" | "position"
     l1_build_cost_ms       DOUBLE
-    l1_query_count         LONG
+    l1_query_count         DOUBLE             -- decayed counter
     l1_total_savings_ms    DOUBLE
     l1_maintenance_ms_per_batch   DOUBLE
     l2_build_cost_ms       DOUBLE
-    l2_pos_query_count     LONG
+    l2_pos_query_count     DOUBLE             -- decayed counter
     l2_total_savings_ms    DOUBLE
     l2_maintenance_ms_per_batch   DOUBLE
+    last_decay_ts          DOUBLE             -- when counters were last decayed
     pairs_json             STRING             -- JSON: {"{A}__{B}": {...}}
 
 Path convention (mirrors existing S3Manager paths):
@@ -98,13 +99,14 @@ CATALOG_SCHEMA = StructType([
     StructField("lookback",                    StringType(),        False),
     StructField("lookback_mode",               StringType(),        False),
     StructField("l1_build_cost_ms",            DoubleType(),        True),
-    StructField("l1_query_count",              LongType(),          True),
+    StructField("l1_query_count",              DoubleType(),        True),
     StructField("l1_total_savings_ms",         DoubleType(),        True),
     StructField("l1_maintenance_ms_per_batch", DoubleType(),        True),
     StructField("l2_build_cost_ms",            DoubleType(),        True),
-    StructField("l2_pos_query_count",          LongType(),          True),
+    StructField("l2_pos_query_count",          DoubleType(),        True),
     StructField("l2_total_savings_ms",         DoubleType(),        True),
     StructField("l2_maintenance_ms_per_batch", DoubleType(),        True),
+    StructField("last_decay_ts",               DoubleType(),        True),
     StructField("pairs_json",                  StringType(),        True),
 ])
 
@@ -283,6 +285,45 @@ class PerspectiveCatalog:
                 f"'{pid}' -> {target_status.name}."
             )
 
+    def promote_pairs(
+        self,
+        pid: str,
+        pairs: list[tuple[str, str]],
+        target_status: PairStatus,
+        pinned: Optional[bool] = None,
+        write_through: bool = True,
+    ) -> None:
+        """
+        Set the status of several pairs with a single write-through.
+
+        Same semantics as promote_pair, but one Delta MERGE covers all
+        pairs, so a cold query over k pairs pays one catalog write
+        instead of k.  With ``write_through=False`` the change is only
+        marked dirty and goes out with the next (asynchronous) flush; the
+        query path uses this for TRANSIENT, whose LRU contents are
+        in-memory anyway.
+        """
+        if not pairs:
+            return
+        with self._lock:
+            stats = self._cache.get(pid)
+            if stats is None:
+                raise KeyError(f"Unknown perspective '{pid}'.")
+            for (act_a, act_b) in pairs:
+                ps = stats.pairs.setdefault((act_a, act_b), PairStats())
+                ps.status = target_status
+                if pinned is not None:
+                    ps.pinned = pinned
+            if not write_through:
+                self._dirty.add(pid)
+                return
+            self._dirty.discard(pid)
+        self._persist_one(pid)
+        logger.info(
+            f"PerspectiveCatalog: {len(pairs)} pair(s) under '{pid}' "
+            f"-> {target_status.name}."
+        )
+
     # ------------------------------------------------------------------
     # Workload statistics (write-back)
     # ------------------------------------------------------------------
@@ -294,6 +335,7 @@ class PerspectiveCatalog:
         references_pos: bool,
         total_query_ms: float,
         pair_savings_ms: dict[tuple[str, str], float],
+        decay=None,
     ) -> None:
         """
         Record that a query under perspective `pid` completed.
@@ -310,6 +352,11 @@ class PerspectiveCatalog:
         total_query_ms   : wall-clock time of the full query
         pair_savings_ms  : per-pair savings vs. lazy scan (may be 0.0
                            for pairs that were scanned lazily this time)
+        decay            : optional RetentionPolicy.  When given, the
+                           counters are decayed up to now before this
+                           query is added, so the new touch is not
+                           decayed as if it had happened at the previous
+                           decay timestamp.
         """
         with self._lock:
             stats = self._cache.get(pid)
@@ -320,6 +367,8 @@ class PerspectiveCatalog:
                 )
                 return
 
+            if decay is not None:
+                decay.decay_perspective(stats)
             stats.l1_query_count += 1
             # Coarse savings estimate for L1: the avoided cost of
             # recomputing phi_G and re-partitioning.  We approximate
@@ -335,6 +384,8 @@ class PerspectiveCatalog:
 
             for (a, b) in pairs_touched:
                 ps = stats.pairs.setdefault((a, b), PairStats())
+                if decay is not None:
+                    decay.decay_pair(ps)
                 ps.query_count      += 1
                 ps.total_savings_ms += pair_savings_ms.get((a, b), 0.0)
                 ps.last_accessed_ts  = time.time()
@@ -421,6 +472,44 @@ class PerspectiveCatalog:
                 alpha = 0.3  # slightly higher than maintenance EMA
                 ps.build_cost_ms = (1 - alpha) * ps.build_cost_ms + alpha * build_cost_ms
             self._dirty.add(pid)
+
+    # ------------------------------------------------------------------
+    # Diagnostics
+    # ------------------------------------------------------------------
+
+    def snapshot(self, pid: Optional[str] = None) -> dict:
+        """
+        JSON-serialisable view of the in-memory state, for evaluation and
+        debugging.  Counters are reported as stored (decayed up to their
+        last decay timestamp).
+        """
+        with self._lock:
+            items = [
+                (p, s) for p, s in self._cache.items()
+                if pid is None or p == pid
+            ]
+            out = {}
+            for p, s in items:
+                row = _stats_to_row(p, s)
+                row["pairs"] = {
+                    f"{a}->{b}": {
+                        "source": a,
+                        "target": b,
+                        "status": ps.status.name,
+                        "query_count": ps.query_count,
+                        "build_cost_ms": ps.build_cost_ms,
+                        "total_savings_ms": ps.total_savings_ms,
+                        "total_maintenance_ms": ps.total_maintenance_ms,
+                        "maintenance_batch_count": ps.maintenance_batch_count,
+                        "last_accessed_ts": ps.last_accessed_ts,
+                        "pinned": ps.pinned,
+                    }
+                    for (a, b), ps in s.pairs.items()
+                }
+                del row["pairs_json"]
+                row["level"] = s.level.name
+                out[p] = row
+            return out
 
     # ------------------------------------------------------------------
     # Iteration helpers
@@ -577,15 +666,25 @@ class PerspectiveCatalog:
                     .execute()
                 )
             except Exception as exc:
-                # If the table disappeared between the load and this write
-                # (e.g. clear_existing was called), recreate it.
+                # The table disappeared (e.g. clear_existing) or has an
+                # older schema.  Rewrite it from the in-memory state, which
+                # is the source of truth, so no other perspective is lost.
                 logger.warning(
                     f"PerspectiveCatalog: MERGE failed for '{pid}' "
-                    f"({exc}), attempting table recreation."
+                    f"({exc}), rewriting the catalog table."
                 )
                 try:
-                    self._initialise_delta_table(spark, path)
-                    new_df.write.format("delta").mode("append").save(path)
+                    with self._lock:
+                        rows = [
+                            _stats_to_row(p, s) for p, s in self._cache.items()
+                        ]
+                    (
+                        spark.createDataFrame(rows, schema=CATALOG_SCHEMA)
+                        .write.format("delta")
+                        .mode("overwrite")
+                        .option("overwriteSchema", "true")
+                        .save(path)
+                    )
                 except Exception as exc2:
                     logger.error(
                         f"PerspectiveCatalog: could not persist '{pid}': {exc2}",
@@ -645,6 +744,9 @@ def _stats_to_row(pid: str, stats: PerspectiveStats) -> dict:
             "total_maintenance_ms": ps.total_maintenance_ms,
             "status":              ps.status.value,
             "last_accessed_ts":    ps.last_accessed_ts,
+            "last_decay_ts":       ps.last_decay_ts,
+            "maintenance_batch_count": ps.maintenance_batch_count,
+            "pinned":              ps.pinned,
         }
         for (a, b), ps in stats.pairs.items()
     }
@@ -662,6 +764,7 @@ def _stats_to_row(pid: str, stats: PerspectiveStats) -> dict:
         "l2_pos_query_count":          stats.l2_pos_query_count,
         "l2_total_savings_ms":         stats.l2_total_savings_ms,
         "l2_maintenance_ms_per_batch": stats.l2_maintenance_ms_per_batch,
+        "last_decay_ts":               stats.last_decay_ts,
         "pairs_json":                  json.dumps(pairs_serialised),
     }
 
@@ -683,11 +786,14 @@ def _row_to_stats(row) -> PerspectiveStats:
         a, b = parts
         ps = PairStats(
             build_cost_ms=       v.get("build_cost_ms",       0.0),
-            query_count=         v.get("query_count",         0),
+            query_count=         float(v.get("query_count",   0.0)),
             total_savings_ms=    v.get("total_savings_ms",    0.0),
             total_maintenance_ms=v.get("total_maintenance_ms",0.0),
             status=              PairStatus(v.get("status",   PairStatus.ABSENT.value)),
             last_accessed_ts=    v.get("last_accessed_ts",    0.0),
+            last_decay_ts=       v.get("last_decay_ts",       0.0),
+            maintenance_batch_count=v.get("maintenance_batch_count", 0),
+            pinned=              bool(v.get("pinned", False)),
         )
         pairs[(a, b)] = ps
 
@@ -697,12 +803,13 @@ def _row_to_stats(row) -> PerspectiveStats:
         lookback=      row["lookback"],
         lookback_mode= row["lookback_mode"],
         l1_build_cost_ms=            row["l1_build_cost_ms"]            or 0.0,
-        l1_query_count=              row["l1_query_count"]              or 0,
+        l1_query_count=              float(row["l1_query_count"]        or 0.0),
         l1_total_savings_ms=         row["l1_total_savings_ms"]         or 0.0,
         l1_maintenance_ms_per_batch= row["l1_maintenance_ms_per_batch"] or 0.0,
         l2_build_cost_ms=            row["l2_build_cost_ms"]            or 0.0,
-        l2_pos_query_count=          row["l2_pos_query_count"]          or 0,
+        l2_pos_query_count=          float(row["l2_pos_query_count"]    or 0.0),
         l2_total_savings_ms=         row["l2_total_savings_ms"]         or 0.0,
         l2_maintenance_ms_per_batch= row["l2_maintenance_ms_per_batch"] or 0.0,
+        last_decay_ts=               (row.asDict().get("last_decay_ts") or 0.0),
         pairs=pairs,
     )

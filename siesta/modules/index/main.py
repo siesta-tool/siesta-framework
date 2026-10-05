@@ -77,6 +77,8 @@ class Indexing(SiestaModule):
         super().__init__()
         self.index_config = {}
         self.metadata = None
+        # Per-stage wall-clock seconds of the last batch ingest.
+        self._last_timings: Dict[str, float] = {}
 
     def register_routes(self) -> SiestaModule.ApiRoutes|None:
         return {"run": ('POST', self.api_run)}
@@ -160,7 +162,12 @@ class Indexing(SiestaModule):
             self.begin_builders(caller="api")
             end_time = time.time()
             logger.info("Indexing: Batch processing completed in " + str(end_time - start_time))
-            return {"code": 200, "message": "Indexing: Batch processing completed.", "time": str(end_time - start_time)}
+            return {
+                "code": 200,
+                "message": "Indexing: Batch processing completed.",
+                "time": end_time - start_time,
+                "timings": self._last_timings,
+            }
 
 
     def cli_run(self, args: Any, **kwargs: Any) -> Any:
@@ -224,8 +231,14 @@ class Indexing(SiestaModule):
         # # Load existing metadata from storage if available
         self.storage.read_metadata_table(self.metadata) 
 
+        timings: Dict[str, float] = {}
+        self._last_timings = timings
+        t_stage = time.time()
         seq_df = timed(build_sequence_table, "Indexing.", index_config=self.index_config, metadata=self.metadata)
+        timings["sequence_table"] = time.time() - t_stage
+        t_stage = time.time()
         activity_index_df = timed(build_activity_index, "Indexing.", events_df=seq_df, metadata=self.metadata)
+        timings["activity_index"] = time.time() - t_stage
         
         # seq_df (checkpointed in update_event_positions) is no longer needed in batch mode
         if not isinstance(seq_df, StreamingQuery):
@@ -234,13 +247,20 @@ class Indexing(SiestaModule):
         if isinstance(activity_index_df, StreamingQuery):
             build_last_checked_index_and_count_streamed(self.index_config, self.metadata, batch_activity_index_df=activity_index_df)
         else:
+            t_stage = time.time()
             pairs_df, _ = timed(build_last_checked_table, "Indexing.", self.index_config, self.metadata, batch_activity_index_df=activity_index_df)
             # pairs_df is cached inside build_last_checked_table
-            
+            timings["last_checked"] = time.time() - t_stage
+
+            t_stage = time.time()
             timed(build_pairs_index, "Indexing.", self.index_config, self.metadata, pairs_df)
+            timings["pairs_index"] = time.time() - t_stage
 
+            t_stage = time.time()
             timed(build_count_table, "Indexing.", self.index_config, self.metadata, pairs_df)
+            timings["count_table"] = time.time() - t_stage
 
+            t_stage = time.time()
             self.storage.write_metadata_table(self.metadata)
 
             # Release the memory occupied by pairs_df now it's not needed
@@ -248,6 +268,7 @@ class Indexing(SiestaModule):
 
             # Release cached data and Delta metadata after batch processing
             spark_cleanup()
+            timings["cleanup"] = time.time() - t_stage
 
             # In CLI mode, we want to keep streaming jobs alive until termination
             if caller == "cli" and self.index_config.get("enable_streaming", False):

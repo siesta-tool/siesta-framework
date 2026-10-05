@@ -172,7 +172,11 @@ def build_pairs_index(index_config: Dict, metadata: MetaData, batch_pairs_index_
         logger.info("Pairs index handled by streaming job, skipping.")
         return None
     else:
-        storage.write_pairs_index(new_pairs=batch_pairs_index_df, metadata=metadata)
+        to_write = batch_pairs_index_df
+        if not index_config.get("embed_pair_attributes", True):
+            from siesta.modules.index.pair_attributes import strip_pair_attributes
+            to_write = strip_pair_attributes(batch_pairs_index_df)
+        storage.write_pairs_index(new_pairs=to_write, metadata=metadata)
         return batch_pairs_index_df
 
 
