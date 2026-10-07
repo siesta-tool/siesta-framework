@@ -40,7 +40,7 @@ import time
 import requests
 
 from tests.vldb_eval.eval_common import (
-    ResultWriter, eval_catalog, eval_drain, eval_reset, ingest, query_adaptive, query_eager, restart_api,
+    RETENTION, ResultWriter, eval_catalog, eval_drain, eval_reset, ingest, query_adaptive, query_eager, restart_api,
 )
 from tests.vldb_eval.indexing_common import eager_log
 from tests.vldb_eval.pattern_common import PERSPECTIVES, load_queries
@@ -49,8 +49,8 @@ from tests.vldb_eval.suite_data import CASE, prepare
 from tests.vldb_eval.workload import multiperspective, pair_coverage, save, skewed
 
 EXPERIMENT = "exp_space_time"
-N_QUERIES = 100
-ROUND = 20
+N_QUERIES = 50
+ROUND = 10
 N_HOT = 10
 N_HOT_PERSP = 5
 TIMEOUT_S = 700.0
@@ -63,20 +63,35 @@ def _sizes(w, log: str, **extra) -> dict:
     return rec["summary"]
 
 
+def _with_retry(call) -> dict:
+    """
+    One query; on a timeout the API is restarted and the query recorded as
+    timed out.  When the driver dies (HTTP 500 / dropped connection, e.g.
+    its container's memory limit), the API is restarted and the query
+    retried once (``retried: true``; its latency includes the new JVM's
+    first query).
+    """
+    for attempt in range(2):
+        try:
+            r = call()
+            if attempt:
+                r["retried"] = True
+            return r
+        except requests.exceptions.Timeout:
+            restart_api()
+            return {"timed_out": True, "time": None}
+        except requests.exceptions.RequestException as exc:
+            restart_api()
+            err = str(exc)[:300]
+    return {"error": err, "time": None, "retried": True}
+
+
 def _q_adaptive(log, pattern, keys, **kw) -> dict:
-    try:
-        return query_adaptive(log, pattern, keys, timeout=TIMEOUT_S + 60, **kw)
-    except requests.exceptions.Timeout:
-        restart_api()
-        return {"timed_out": True, "time": None}
+    return _with_retry(lambda: query_adaptive(log, pattern, keys, timeout=TIMEOUT_S + 60, **kw))
 
 
 def _q_eager(log, pattern, **kw) -> dict:
-    try:
-        return query_eager(log, pattern, timeout=TIMEOUT_S, **kw)
-    except requests.exceptions.Timeout:
-        restart_api()
-        return {"timed_out": True, "time": None}
+    return _with_retry(lambda: query_eager(log, pattern, timeout=TIMEOUT_S, **kw))
 
 
 def _ingest_eager(w, prep, label: str, embed: bool = True, suffix: str = "") -> str:
@@ -109,7 +124,8 @@ def _rounds(w, part: str, log: str, qs, eager_logs: dict, eager_sample: dict | N
             w.emit("query", part=part, system="adaptive", round=r0 // ROUND, seq=q.seq,
                    perspective=q.perspective, pair=q.pair, hot=q.hot, time=resp.get("time"),
                    timed_out=resp.get("timed_out", False), matched_groups=resp.get("matched_groups"),
-                   pair_sources=resp.get("pair_sources"), promotion_s=resp.get("promotion_s"))
+                   pair_sources=resp.get("pair_sources"), promotion_s=resp.get("promotion_s"),
+                   retried=resp.get("retried", False), error=resp.get("error"))
         eval_drain(log)
         cat = eval_catalog(log)
         w.emit("catalog", part=part, round=r0 // ROUND, catalog=cat)
@@ -125,7 +141,7 @@ def _rounds(w, part: str, log: str, qs, eager_logs: dict, eager_sample: dict | N
         w.emit("query", part=part, system="eager", round=q.seq // ROUND, seq=q.seq,
                perspective=q.perspective, pair=q.pair, hot=q.hot, time=resp.get("time"),
                timed_out=resp.get("timed_out", False), support=resp.get("support"),
-               matched_groups=resp.get("total"))
+               matched_groups=resp.get("total"), retried=resp.get("retried", False), error=resp.get("error"))
 
 
 def part1(w, prep) -> None:
@@ -169,8 +185,8 @@ def part2(w, prep, eager_sample: int) -> None:
 # Part 3: embedded attributes vs join-back
 # ---------------------------------------------------------------------------
 
-def _sample(ds: str, perspective: str, per: int) -> list[dict]:
-    qs = load_queries(ds, perspective)
+def _sample(ds: str, perspective: str, per: int, max_len: int = 15) -> list[dict]:
+    qs = [q for q in load_queries(ds, perspective) if q["length"] <= max_len]
     out, seen = [], collections.Counter()
     for q in qs:
         k = (q["length"], q["kind"])
@@ -180,37 +196,52 @@ def _sample(ds: str, perspective: str, per: int) -> list[dict]:
     return out
 
 
-def part3(w, prep, per: int) -> None:
+FORCE_PROMOTION = {**RETENTION, "min_query_count": 1}
+
+
+def part3(w, prep, per: int, max_len: int, systems=("eager", "adaptive"), case_only: bool = False) -> None:
     ds = prep.name
     restart_api()
-    case_qs = _sample(ds, CASE, per)
+    case_qs = _sample(ds, CASE, per, max_len)
     for embed in (True, False):
         variant = "embedded" if embed else "join"
         extra = {} if embed else {"pair_attributes": "join"}
-        # eager, case
-        elog = _ingest_eager(w, prep, CASE, embed=embed, suffix="" if embed else "__join")
-        _sizes(w, elog, part="3", system="eager", variant=variant)
-        for q in case_qs:
+        # eager, case: each query is run once unmeasured right before its
+        # measured run, so eager, like adaptive (after its promotion runs),
+        # is measured warm.
+        if "eager" in systems:
+            elog = _ingest_eager(w, prep, CASE, embed=embed, suffix="" if embed else "__join")
+            _sizes(w, elog, part="3", system="eager", variant=variant)
+        for q in (case_qs if "eager" in systems else []):
+            _q_eager(elog, q["siesta_pattern"], extra=extra)
             r = _q_eager(elog, q["siesta_pattern"], extra=extra)
             w.emit("query", part="3", system="eager", variant=variant, qid=q["qid"], length=q["length"],
                    kind=q["kind"], time=r.get("time"), timed_out=r.get("timed_out", False),
-                   matched_groups=r.get("total"), truth=q["truth"]["matched_groups"])
+                   matched_groups=r.get("total"), truth=q["truth"]["matched_groups"],
+                   retried=r.get("retried", False), error=r.get("error"))
         # adaptive: warm (pairs persisted), case + attribute perspectives
+        if "adaptive" not in systems:
+            continue
         alog = _ingest_adaptive(w, prep, f"{ds}__{variant}", embed=embed)
-        persps = [CASE] + PERSPECTIVES.get(ds, [])
+        persps = [CASE] + ([] if case_only else PERSPECTIVES.get(ds, []))
         for persp in persps:
-            qs = case_qs if persp == CASE else _sample(ds, persp, max(1, per // 2))
+            qs = case_qs if persp == CASE else _sample(ds, persp, max(1, per // 2), max_len)
             for q in qs:
-                for _ in range(4):  # scan, LRU, LRU, promote
+                # forced promotion (unmeasured), then the measured warm run
+                for _ in range(2):
                     r = _q_adaptive(alog, q["siesta_pattern"], q["grouping_keys"], wait_promotion=True,
-                                    extra=extra)
+                                    retention=FORCE_PROMOTION, extra=extra)
+                    after = (r.get("pair_status_after") or {}).values()
+                    if r.get("timed_out") or (after and all(v == "PERSISTENT" for v in after)):
+                        break
                 eval_drain(alog)
-                r = _q_adaptive(alog, q["siesta_pattern"], q["grouping_keys"], extra=extra)
+                r = _q_adaptive(alog, q["siesta_pattern"], q["grouping_keys"],
+                                retention=FORCE_PROMOTION, extra=extra)
                 w.emit("query", part="3", system="adaptive", variant=variant, perspective=persp,
                        qid=q["qid"], length=q["length"], kind=q["kind"], time=r.get("time"),
                        timed_out=r.get("timed_out", False), matched_groups=r.get("matched_groups"),
                        truth=q["truth"]["matched_groups"], pair_sources=r.get("pair_sources"),
-                       phases=r.get("timings"))
+                       phases=r.get("timings"), retried=r.get("retried", False), error=r.get("error"))
         _sizes(w, alog, part="3", system="adaptive", variant=variant)
 
 
@@ -218,13 +249,17 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--datasets", nargs="+", default=["bpic2015", "bpic2012", "bpic2017"])
     ap.add_argument("--parts", nargs="+", default=["1", "2", "3"])
-    ap.add_argument("--eager-sample", type=int, default=3,
+    ap.add_argument("--eager-sample", type=int, default=2,
                     help="eager queries per attribute perspective in part 2")
-    ap.add_argument("--per", type=int, default=2, help="part 3: queries per (length, kind)")
+    ap.add_argument("--per", type=int, default=1, help="part 3: queries per (length, kind)")
+    ap.add_argument("--p3-max-length", type=int, default=11, help="part 3: longest pattern")
+    ap.add_argument("--suffix", default="", help="result file suffix (e.g. .part3 for a part-3-only run)")
+    ap.add_argument("--p3-systems", nargs="+", default=["eager", "adaptive"], choices=["eager", "adaptive"])
+    ap.add_argument("--p3-case-only", action="store_true", help="part 3: case perspective only")
     args = ap.parse_args()
     for ds in args.datasets:
         prep = prepare(ds)
-        w = ResultWriter(EXPERIMENT, ds)
+        w = ResultWriter(EXPERIMENT, ds, suffix=args.suffix)
         w.emit("setup", perspectives=[p["label"] for p in prep.perspective_list()],
                n_queries=N_QUERIES, round=ROUND, n_hot=N_HOT, n_hot_persp=N_HOT_PERSP)
         t0 = time.time()
@@ -233,7 +268,9 @@ def main() -> None:
         if "2" in args.parts:
             part2(w, prep, args.eager_sample)
         if "3" in args.parts:
-            part3(w, prep, args.per)
+            w.emit("part3_setup", per=args.per, max_length=args.p3_max_length, promotion="forced (min_query_count=1)",
+                   systems=args.p3_systems, eager_warm="one unmeasured run before each measured run")
+            part3(w, prep, args.per, args.p3_max_length, tuple(args.p3_systems), args.p3_case_only)
         w.done(elapsed_s=time.time() - t0)
 
 

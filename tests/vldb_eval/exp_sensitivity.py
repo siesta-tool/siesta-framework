@@ -14,6 +14,14 @@ happen at ingest time).  Counters decay with a short half-life
 (b) cost   cost_scale ∈ {0.25, 0.5, 1, 2, 4} (estimated build/maintenance
            costs under- / over-estimated), ε = 0.15, same bursty workload.
            Decisions are compared with cost_scale = 1.
+(a2) eps2  ε sweep with a workload that reaches the gates (the bursty one
+           above never demotes anything, so ε has no effect there): graded
+           (Zipf) demand over the 12 most common case pairs, whose ranking
+           rotates by 3 every phase, so each pair's demand rises and falls;
+           half-life 60 s and a ``--quiet-s`` pause (no queries) before every
+           ingest, so counters decay into the promote / demote band before
+           retention runs.  Thrash (promote-demote-promote), wasted builds,
+           maintenance and latency per ε.
 (c) drift  the hot perspective and its hot set change every phase
            (case -> Action -> lifecycle:transition -> EventOrigin -> case),
            each phase a burst.  Re-adaptation lag (queries until the new hot
@@ -34,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import random
+import time
 
 from tests.vldb_eval.eval_common import (
     RETENTION, ResultWriter, eval_catalog, eval_drain, eval_reset, ingest, query_adaptive, restart_api,
@@ -46,6 +55,7 @@ DATASET = "bpic2017"
 EPS = [0.0, 0.05, 0.15, 0.3, 0.5]
 COST = [0.25, 0.5, 1.0, 2.0, 4.0]
 DRIFT_ORDER = ["case", "Action", "lifecycle:transition", "EventOrigin", "case"]
+EPS2_PAIRS = 12
 
 
 def _phase_queries(rng, cov, label, keys, n, hot_share, n_hot, seq0):
@@ -66,6 +76,18 @@ def schedule(prep, sweep: str, args) -> list[tuple[str, list[Query]]]:
     persps = {p["label"]: p["grouping_keys"] for p in prep.perspective_list()}
     covs = {}
     phases, seq = [], 0
+    if sweep == "eps2":
+        label = "case"
+        cov = pair_coverage(prep, label)
+        pairs = [(p["source"], p["target"]) for p in cov["pairs"]][:EPS2_PAIRS]
+        for k in range(5):
+            ranked = pairs[3 * k % len(pairs):] + pairs[:3 * k % len(pairs)]
+            weights = [1.0 / (r + 1) for r in range(len(ranked))]
+            qs = [Query(seq + i, label, persps[label], *rng.choices(ranked, weights)[0], hot=False)
+                  for i in range(args.eps2_queries)]
+            seq += len(qs)
+            phases.append((f"zipf-rot{k}", qs))
+        return phases
     for k in range(5):
         if sweep == "drift":
             label = DRIFT_ORDER[k]
@@ -83,8 +105,10 @@ def schedule(prep, sweep: str, args) -> list[tuple[str, list[Query]]]:
 
 def run_one(prep, sweep: str, value: float, args) -> None:
     retention = {**RETENTION, "half_life_seconds": args.half_life}
-    if sweep == "eps":
+    if sweep in ("eps", "eps2"):
         retention["hysteresis"] = value
+    if sweep == "eps2":
+        retention["half_life_seconds"] = args.eps2_half_life
     elif sweep == "cost":
         retention["cost_scale"] = value
     w = ResultWriter(EXPERIMENT, DATASET, suffix=f".{sweep}_{value:g}")
@@ -105,6 +129,8 @@ def run_one(prep, sweep: str, value: float, args) -> None:
                    status_after=resp.get("pair_status_after"))
         eval_drain(log)
         w.emit("catalog", after="phase", phase=k, catalog=eval_catalog(log))
+        if sweep == "eps2":
+            time.sleep(args.quiet_s)  # counters decay before retention runs at ingest
         r = ingest("adaptive", log, batches[k + 1], extra=retention)
         w.emit("ingest", batch=k + 1, time=r["time"], timings=r.get("timings"))
         eval_drain(log)
@@ -115,7 +141,10 @@ def run_one(prep, sweep: str, value: float, args) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--sweeps", nargs="+", default=["eps", "cost", "drift"], choices=["eps", "cost", "drift"])
+    ap.add_argument("--sweeps", nargs="+", default=["eps", "cost", "drift"], choices=["eps", "eps2", "cost", "drift"])
+    ap.add_argument("--eps2-half-life", type=float, default=60.0)
+    ap.add_argument("--eps2-queries", type=int, default=24, help="queries per eps2 phase")
+    ap.add_argument("--quiet-s", type=float, default=90.0, help="eps2: pause before each ingest")
     ap.add_argument("--half-life", type=float, default=300.0)
     ap.add_argument("--burst", type=int, default=30)
     ap.add_argument("--quiet", type=int, default=6)
@@ -125,7 +154,7 @@ def main() -> None:
     args = ap.parse_args()
     prep = prepare(DATASET)
     for sweep in args.sweeps:
-        values = args.values or {"eps": EPS, "cost": COST, "drift": [RETENTION["hysteresis"]]}[sweep]
+        values = args.values or {"eps": EPS, "eps2": EPS, "cost": COST, "drift": [RETENTION["hysteresis"]]}[sweep]
         for v in values:
             if args.values is None and sweep == "cost" and v == 1.0 and "eps" in args.sweeps:
                 continue  # identical to eps = 0.15

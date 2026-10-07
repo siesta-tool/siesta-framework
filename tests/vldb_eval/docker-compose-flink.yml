@@ -8,7 +8,8 @@
 # which is bind-mounted read-only at /opt/flink/siesta_data in every container
 # (the JobManager enumerates splits, the TaskManager reads them).
 #
-# One TaskManager with 4 slots (parallelism 4) and 6 GB of process memory.
+# One TaskManager with 12 slots (parallelism 12, one per core, as the other
+# systems get) and 10 GB of process memory; it runs alone on the machine.
 # Queries run in STREAMING mode over the bounded CSV source (event-time
 # MATCH_RECOGNIZE; see comp_mr.py for why batch mode is not used).  The
 # heap (hashmap) state backend buffers the events, so managed memory, which
@@ -42,7 +43,7 @@ services:
         rest.bind-address: 0.0.0.0
         rest.address: jobmanager
         execution.runtime-mode: STREAMING
-        parallelism.default: 4
+        parallelism.default: 12
         restart-strategy.type: none
         jobstore.max-capacity: 2000
         heartbeat.timeout: 60000
@@ -70,12 +71,12 @@ services:
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: jobmanager
         jobmanager.rpc.port: 6123
-        taskmanager.memory.process.size: 6g
+        taskmanager.memory.process.size: 10g
         taskmanager.memory.managed.fraction: 0.1
-        taskmanager.numberOfTaskSlots: 4
+        taskmanager.numberOfTaskSlots: 12
         task.cancellation.timeout: 60000
         execution.runtime-mode: STREAMING
-        parallelism.default: 4
+        parallelism.default: 12
     volumes: *flink-data
 
   sql-gateway:
@@ -103,7 +104,7 @@ services:
         sql-gateway.endpoint.rest.port: 8083
         sql-gateway.session.idle-timeout: 24h
         execution.runtime-mode: STREAMING
-        parallelism.default: 4
+        parallelism.default: 12
         restart-strategy.type: none
     volumes: *flink-data
     healthcheck:

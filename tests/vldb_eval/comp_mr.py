@@ -4,8 +4,8 @@ the pattern-detection experiment (Exp 4: case perspective of every dataset,
 plus the attribute perspectives of BPIC 2017; see pattern_common).
 
 Engine: Flink 1.20 behind the SQL Gateway (``docker-compose-flink.yml``:
-JobManager, one TaskManager with 4 slots and 6 GB process memory,
-parallelism 4, gateway on :8083).
+JobManager, one TaskManager with 12 slots and 10 GB process memory,
+parallelism 12, gateway on :8083).
 
 Why STREAMING mode over a bounded source, not batch mode.  In Flink 1.20
 batch MATCH_RECOGNIZE is processing-time: ``BatchExecMatch.isProcTime()``
@@ -36,6 +36,14 @@ are the exact canonical strings, nulls are written as ``\\N`` (the CSV
 gpos is unique within a group, so ``PARTITION BY grp ORDER BY rt`` is exactly
 the group order, while raw timestamps may tie.  The setup scan checks row,
 group and per-attribute non-null counts against pandas.
+
+Attribute perspectives are not pre-grouped (``is_raw``): their source holds
+the raw canonical events in trace order (``grp`` = the raw value of the
+perspective attribute, plus trace_id, position, ts, attributes), and Flink
+groups and orders them in the timed query itself: ``FROM (SELECT * ... WHERE
+grp IS NOT NULL) MATCH_RECOGNIZE (PARTITION BY grp ORDER BY rt, trace_id,
+position ...)`` with ``rt = TO_TIMESTAMP_LTZ(ts, 0)``; ties of the raw
+timestamp are broken by (trace_id, position), the benchmark's group order.
 
 Query (same semantics as ``TruthIndex``)::
 
@@ -142,17 +150,18 @@ COMPOSE = Path(__file__).resolve().parent / "docker-compose-flink.yml"
 CONTAINER_DATA = "/opt/flink/siesta_data"     # bind mount of results/data
 OUT_DIR = RESULTS_DIR / "exp4_patterns" / "mr"
 NULL_LITERAL = "\\N"
-N_PARTS = 4                                    # CSV parts = source parallelism
+N_PARTS = 12                                   # CSV parts = source parallelism
 WATERMARK_DELAY_MS = 86_400_000              # > max gpos: no row is ever late
+RAW_WATERMARK_DAYS = 4000                     # raw (attribute-perspective) sources: > log time span
 FLINK_CONFIG = {
     "flink_version": None,                     # filled from /v1/info
     "execution.runtime-mode": "streaming (bounded source, event time)",
     "state.backend": "hashmap (default)",
     "taskmanager.memory.managed.fraction": 0.1,
-    "parallelism.default": 4,
+    "parallelism.default": 12,
     "taskmanagers": 1,
-    "taskmanager.numberOfTaskSlots": 4,
-    "taskmanager.memory.process.size": "6g",
+    "taskmanager.numberOfTaskSlots": 12,
+    "taskmanager.memory.process.size": "10g",
     "jobmanager.memory.process.size": "1600m",
     "restart-strategy.type": "none",
     "image": "flink:1.20-java17",
@@ -160,7 +169,7 @@ FLINK_CONFIG = {
 }
 SESSION_SET = {
     "execution.runtime-mode": "streaming",
-    "parallelism.default": "4",
+    "parallelism.default": "12",
     "table.exec.mini-batch.enabled": "true",
     "table.exec.mini-batch.allow-latency": "5 s",
     "table.exec.mini-batch.size": "1000000",
@@ -367,12 +376,24 @@ def data_dir(ds: str, persp: str) -> Path:
     return DATA_DIR / ds / "mr" / safe(persp)
 
 
+def is_raw(persp: str) -> bool:
+    """
+    Attribute perspectives are NOT pre-grouped: the source holds the raw
+    canonical events (trace order) and Flink groups and orders them at query
+    time (PARTITION BY the attribute, ORDER BY ts, trace_id, position).  The
+    case perspective's group order is the raw trace position.
+    """
+    return persp != "case"
+
+
 def prepare_data(ds: str, persp: str, attrs: list[str]) -> dict:
-    """Write the perspective's group-ordered events as CSV parts; return facts about it."""
+    """Write the perspective's source events as CSV parts; return facts about it."""
     t0 = time.perf_counter()
     df = load_events(ds)
     t_load = time.perf_counter() - t0
     present = [a for a in attrs if a in attribute_columns(df)]
+    if is_raw(persp):
+        return _prepare_raw(ds, persp, df, present, attrs, t0, t_load)
     g = group_order(df, persp)
     assert int(g["gpos"].max()) < WATERMARK_DELAY_MS, "gpos exceeds the watermark delay"
     out = g[["group", "gpos", "activity", "ts"]].copy()
@@ -415,15 +436,61 @@ def prepare_data(ds: str, persp: str, attrs: list[str]) -> dict:
     }
 
 
+def _write_parts(out: pd.DataFrame, d: Path, cuts: list[int]) -> None:
+    if d.exists():
+        shutil.rmtree(d)
+    d.mkdir(parents=True)
+    for k in range(len(cuts) - 1):
+        out.iloc[cuts[k]:cuts[k + 1]].to_csv(d / f"part-{k}.csv", header=False, index=False,
+                                             na_rep=NULL_LITERAL, lineterminator="\n")
+    for p in d.iterdir():
+        p.chmod(0o644)
+    d.chmod(0o755)
+    d.parent.chmod(0o755)
+
+
+def _prepare_raw(ds, persp, df, present, attrs, t0, t_load) -> dict:
+    """Raw canonical events in trace order (no grouping, no group positions)."""
+    out = df[["trace_id", "position", "activity", "ts"]].copy()
+    out.insert(0, "grp", df[persp].astype(object).where(df[persp].notna(), None))
+    cmap = sanitize_attrs(present)
+    for a in present:
+        col = df[a].astype(object).where(df[a].notna(), None)
+        bad = col.map(lambda v: isinstance(v, str) and (v == NULL_LITERAL or bool(re.search(r"[\r\n]", v))))
+        if bad.any():
+            raise ValueError(f"{ds}/{a}: values clash with the CSV encoding")
+        out[cmap[a]] = col
+    d = data_dir(ds, persp)
+    cuts = [round(k * len(out) / N_PARTS) for k in range(N_PARTS + 1)]
+    _write_parts(out, d, cuts)
+    return {
+        "rows": int(len(out)), "groups": int(out["grp"].nunique(dropna=True)), "raw": True,
+        "attr_columns": cmap, "missing_attrs": [a for a in attrs if a not in present],
+        "nonnull": {cmap[a]: int(out[cmap[a]].notna().sum()) for a in present},
+        "parts": N_PARTS, "host_dir": str(d),
+        "bytes": int(sum(p.stat().st_size for p in d.iterdir())),
+        "load_s": round(t_load, 3), "prep_s": round(time.perf_counter() - t0, 3),
+    }
+
+
 def container_dir(ds: str, persp: str) -> str:
     return f"{CONTAINER_DATA}/{data_dir(ds, persp).relative_to(DATA_DIR).as_posix()}"
 
 
 def ddl(ds: str, persp: str, cmap: dict[str, str]) -> str:
-    cols = ["  grp STRING", "  gpos BIGINT", "  activity STRING", "  ts BIGINT"]
-    cols += [f"  `{c}` STRING" for c in cmap.values()]
-    cols += ["  rt AS TO_TIMESTAMP_LTZ(gpos, 3)",
-             "  WATERMARK FOR rt AS rt - INTERVAL '1' DAY"]
+    if is_raw(persp):
+        # grp is the raw value of the perspective attribute; event time is the
+        # raw timestamp, with a watermark delay longer than the log's time
+        # span, so no row is ever late however the parts are read.
+        cols = ["  grp STRING", "  trace_id STRING", "  `position` BIGINT", "  activity STRING", "  ts BIGINT"]
+        cols += [f"  `{c}` STRING" for c in cmap.values()]
+        cols += ["  rt AS TO_TIMESTAMP_LTZ(ts, 0)",
+                 f"  WATERMARK FOR rt AS rt - INTERVAL '{RAW_WATERMARK_DAYS}' DAY"]
+    else:
+        cols = ["  grp STRING", "  gpos BIGINT", "  activity STRING", "  ts BIGINT"]
+        cols += [f"  `{c}` STRING" for c in cmap.values()]
+        cols += ["  rt AS TO_TIMESTAMP_LTZ(gpos, 3)",
+                 "  WATERMARK FOR rt AS rt - INTERVAL '1' DAY"]
     return (f"CREATE TEMPORARY TABLE {table_name(ds, persp)} (\n" + ",\n".join(cols) + "\n) WITH (\n"
             f"  'connector' = 'filesystem',\n"
             f"  'path' = 'file://{container_dir(ds, persp)}',\n"
@@ -459,7 +526,7 @@ def event_cond(q: dict, i: int, cmap: dict[str, str], var: str) -> str:
 
 
 def mr_sql(q: dict, table: str, cmap: dict[str, str], skip: str = "past",
-           gaps: str = "any", measure_rows: bool = False) -> str:
+           gaps: str = "any", measure_rows: bool = False, raw: bool = False) -> str:
     """
     ``gaps="any"``: every gap ``Gi`` is TRUE (skip-till-any-match; the NFA
     forks a run at every candidate of every pattern event).
@@ -482,10 +549,16 @@ def mr_sql(q: dict, table: str, cmap: dict[str, str], skip: str = "past",
         raise ValueError(gaps)
     skip_sql = {"past": "SKIP PAST LAST ROW", "next": "SKIP TO NEXT ROW"}[skip]
     select = "grp, p1" if measure_rows else "COUNT(DISTINCT grp) AS n"
-    return (f"SELECT {select} FROM {table}\n"
+    if raw:
+        # grouping and group order computed by Flink in the query itself
+        source = f"(SELECT * FROM {table} WHERE grp IS NOT NULL)"
+        order, p1 = "rt, trace_id, `position`", "E1.`position`"
+    else:
+        source, order, p1 = table, "rt", "E1.gpos"
+    return (f"SELECT {select} FROM {source}\n"
             f"MATCH_RECOGNIZE (\n"
-            f"  PARTITION BY grp ORDER BY rt\n"
-            f"  MEASURES E1.gpos AS p1\n"
+            f"  PARTITION BY grp ORDER BY {order}\n"
+            f"  MEASURES {p1} AS p1\n"
             f"  ONE ROW PER MATCH\n"
             f"  AFTER MATCH {skip_sql}\n"
             f"  PATTERN ({pattern})\n"
@@ -608,7 +681,8 @@ def register(gw: Gateway, s: str, ds: str, persp: str, cmap: dict[str, str]) -> 
     t_reg = time.perf_counter() - t0
     # verification scan: row/group counts and non-null counts per attribute
     tb = table_name(ds, persp)
-    sel = ["COUNT(*)", "COUNT(DISTINCT grp)", "MIN(gpos)", "MAX(gpos)"] + [f"COUNT(`{c}`)" for c in cmap.values()]
+    pos = "`position`" if is_raw(persp) else "gpos"
+    sel = ["COUNT(*)", "COUNT(DISTINCT grp)", f"MIN({pos})", f"MAX({pos})"] + [f"COUNT(`{c}`)" for c in cmap.values()]
     t1 = time.perf_counter()
     row = gw.run(s, f"SELECT {', '.join(sel)} FROM {tb}")[-1]   # final changelog row
     t_ver = time.perf_counter() - t1
@@ -675,13 +749,13 @@ def run_perspective(gw: Gateway, jm: JobManager, ds: str, persp: str, args, flin
                 "type": "setup", "system": "mr", "dataset": ds, "perspective": persp,
                 "data": prep, "table": reg, "flink": flink, "session": SESSION_SET,
                 "variant": variant(args), "skip": args.skip, "gaps": args.gaps, "timeout_s": args.timeout, "reps": args.reps,
-                "sql_example": mr_sql(qs[0], tb, cmap, args.skip, args.gaps) if qs else None,
+                "sql_example": mr_sql(qs[0], tb, cmap, args.skip, args.gaps, raw=is_raw(persp)) if qs else None,
                 "meta": run_meta()}) + "\n")
             f.flush()
             if qs:   # warm-up, discarded: the first query cut to its first 2 events
                 wq = {**qs[0], "events": [{**e, "preds": [p for p in e["preds"] if "ref" not in p or p["ref"] <= 1]}
                                           for e in qs[0]["events"][:2]]}
-                w = timed_count(gw, jm, s, mr_sql(wq, tb, cmap, args.skip, args.gaps), f"warmup.{ds}.{persp}",
+                w = timed_count(gw, jm, s, mr_sql(wq, tb, cmap, args.skip, args.gaps, raw=is_raw(persp)), f"warmup.{ds}.{persp}",
                                 timeout_s=min(args.timeout, 120.0))
                 print(f"[{ds}/{persp}] warm-up: {w['time_s']}s n={w['matched_groups']} "
                       f"{w['error'] or ''}", flush=True)
@@ -694,7 +768,7 @@ def run_perspective(gw: Gateway, jm: JobManager, ds: str, persp: str, args, flin
                     f.flush()
                     print(f"  {q['qid']} skipped ({args.skip_after} consecutive timeouts)", flush=True)
                     continue
-                sql = mr_sql(q, tb, cmap, args.skip, args.gaps)
+                sql = mr_sql(q, tb, cmap, args.skip, args.gaps, raw=is_raw(persp))
                 for rep in range(args.reps):
                     res = timed_count(gw, jm, s, sql, f"{q['qid']}.r{rep}", timeout_s=args.timeout)
                     truth = q["truth"]

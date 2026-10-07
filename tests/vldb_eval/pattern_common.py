@@ -18,8 +18,9 @@ Every system (SIESTA, ELK, MR, LPG) answers the *same* queries over the
   this is the order SIESTA assigns to group positions.
 
 * Pattern semantics.  A query is a sequence of events e1..eL, each with an
-  activity and optional predicates: ``attr = 'v'`` (literal), ``attr = $j``
-  / ``attr != $j`` (binding: same / different value as pattern event j < i).
+  activity and optional literal predicates ``attr = 'v'`` (values sampled
+  from the log).  (The matcher also supports bindings ``attr = $j`` /
+  ``attr != $j``, but the generator no longer emits them.)
   A group matches when events of the group occur in that order (other
   events may lie between them) and satisfy their predicates.  The result
   of a query is the number of matching groups.
@@ -57,6 +58,7 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import collections
 import json
 import random
 import re
@@ -74,7 +76,7 @@ DATA_DIR = RESULTS_DIR / "data"
 QUERY_DIR = RESULTS_DIR / "exp4_patterns" / "queries"
 LENGTHS = list(range(8, 16))
 PER_LENGTH = 10            # queries per (length, kind)
-TIMEOUT_S = 700.0          # per-query timeout, as in the original harness
+TIMEOUT_S = 300.0          # per-query timeout, applied uniformly to every dataset/system
 ORACLE_LIMIT_S = 120.0     # ground-truth budget per candidate query (generation only)
 SEED = 42
 
@@ -235,28 +237,38 @@ def _usable(v) -> bool:
 def _pick_window(rng: random.Random, seq: pd.DataFrame, length: int) -> list[int] | None:
     """
     Row indices (in group order) of a contiguous window of ``length``
-    events, as in the original harness: real process fragments, with
-    repeated activities allowed.  Windows with fewer than ceil(length / 3)
-    distinct activities (e.g. one activity repeated) are rejected as
-    degenerate.  The group is a witness.
+    events: real process fragments, but with repeats curbed so validation
+    stays tractable.  A window must have at least ceil(length / 4) distinct
+    activities, and no single activity may occur more than 4 times in it
+    (tuned empirically: tighter caps made length 14-15 windows infeasible
+    on BPIC 2012/2017, whose logs have few distinct activities).  Repeated
+    activities (e.g. a lab test re-ordered dozens of times per trace) make
+    CEP's backtracking search explode combinatorially — every extra
+    occurrence of a pattern activity multiplies the candidate positions to
+    try in every group, not just the witness.  The group is a witness.
     """
     n = len(seq)
     if n < length:
         return None
     acts = seq["activity"].to_numpy()
-    need = -(-length // 3)
-    for _ in range(20):
+    need = -(-length // 4)
+    max_repeat = 4
+    for _ in range(60):
         st = rng.randrange(n - length + 1)
-        if len(set(acts[st:st + length])) >= need:
+        window = acts[st:st + length]
+        counts = collections.Counter(window)
+        if len(counts) >= need and max(counts.values()) <= max_repeat:
             return list(range(st, st + length))
     return None
 
 
 def _add_predicates(rng: random.Random, rows: pd.DataFrame, cat: list[str]) -> list[list[Pred]]:
     """
-    1–3 predicates taken from the witness events: a literal ``attr = value``,
-    a binding ``attr = $j`` (equal witness values) or ``attr != $j``
-    (different witness values).  Satisfied by the witness by construction.
+    1–3 literal predicates ``attr = value`` taken from the witness events
+    (values sampled from the log, never null).  No variable bindings
+    (``$j``): their meaning on missing attributes differs between systems
+    (SQL: a null never matches; SIESTA: missing values compare as values).
+    Satisfied by the witness by construction.
     """
     L = len(rows)
     preds: list[list[Pred]] = [[] for _ in range(L)]
@@ -269,16 +281,7 @@ def _add_predicates(rng: random.Random, rows: pd.DataFrame, cat: list[str]) -> l
         vi = rows.iloc[i][attr]
         if not _usable(vi) or any(p.attr == attr for p in preds[i]):
             continue
-        kind = rng.random()
-        if kind < 0.5 or i == 0:
-            preds[i].append(Pred(attr, "=", value=vi))
-            continue
-        js = [j for j in range(i) if _usable(rows.iloc[j][attr])]
-        if not js:
-            continue
-        j = rng.choice(js)
-        vj = rows.iloc[j][attr]
-        preds[i].append(Pred(attr, "=" if vi == vj else "!=", ref=j + 1))
+        preds[i].append(Pred(attr, "=", value=vi))
     return preds
 
 
