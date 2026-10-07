@@ -1,0 +1,18 @@
+{
+  "App Name": "Siesta Framework",
+  "storage_type": "s3",
+  "s3_access_key": "minioadmin",
+  "s3_secret_key": "minioadmin",
+  "s3_endpoint": "http://minio:9000",
+  "s3_region": "us-east-1",
+  "spark_master": "spark://spark-master:7077",
+  "spark_app_name": "SiestaScaleOut",
+  "kafka_bootstrap_servers": "kafka:9092",
+  "raw_events_dir": "raw_events",
+  "checkpoint_dir": "checkpoints",
+  "api": {
+    "host": "0.0.0.0",
+    "port": 8000
+  },
+  "enable_timing": true
+}
